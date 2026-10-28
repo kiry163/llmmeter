@@ -80,3 +80,51 @@ func TestCloseFlushesQueue(t *testing.T) {
 		t.Fatalf("summary=%+v err=%v", sum, err)
 	}
 }
+
+func TestUnmeteredRowsAreNotUnpriced(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "u.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	r1 := rec("2026-10-28", 10, 5, "ok")
+	r1.Priced = false
+	r2 := rec("2026-10-28", 0, 0, "no_usage")
+	r2.Priced = false
+	s.Enqueue(r1)
+	s.Enqueue(r2)
+	if err := s.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	models, err := s.ByModel("2026-10-28", "2026-10-28")
+	if err != nil || len(models) != 1 {
+		t.Fatalf("models=%+v err=%v", models, err)
+	}
+	if models[0].Unpriced != 1 {
+		t.Fatalf("unpriced = %d, want 1 (only the metered row)", models[0].Unpriced)
+	}
+}
+
+func TestEnqueueAfterCloseIsIgnored(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "c.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s.Enqueue(rec("2026-10-28", 1, 1, "ok"))
+}
+
+func TestWriteBatchCountsDroppedRows(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "d.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.db.Close()
+	s.writeBatch([]Record{rec("2026-10-28", 1, 1, "ok")})
+	if got := s.dropped.Load(); got != 1 {
+		t.Fatalf("dropped = %d, want 1", got)
+	}
+}

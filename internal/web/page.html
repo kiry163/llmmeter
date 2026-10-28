@@ -79,7 +79,7 @@ async function load() {
     <td>${esc(r.started_at)}</td><td>${esc(r.model)}</td><td>${r.status}</td>
     <td>${r.usage.prompt_tokens}</td><td>${r.usage.completion_tokens}</td>
     <td>${esc(r.window_label)}</td><td>${fmtUSD(r.cost_nano_usd)}</td>
-    <td>${r.usage_status}${r.priced ? '' : ' / unpriced'}</td></tr>`).join('');
+    <td>${r.usage_status}${(r.priced || r.usage_status !== 'ok') ? '' : ' / unpriced'}</td></tr>`).join('');
 
   drawChart(daily || []);
   $('export').href = '/api/export.csv?' + p;
@@ -96,13 +96,13 @@ function drawChart(rows) {
   svg.innerHTML = `<polyline fill="none" stroke="currentColor" stroke-width="2" points="${pts}"/>`;
 }
 
-const today = new Date();
-const iso = d => d.toISOString().slice(0, 10);
-$('to').value = iso(today);
-$('from').value = iso(new Date(today.getTime() - 6 * 864e5));
 $('apply').onclick = load;
 $('metric').onchange = load;
-load();
+fetch('/api/today').then(r => r.json()).then(({day}) => {
+  $('to').value = day;
+  $('from').value = new Date(Date.parse(day) - 6 * 864e5).toISOString().slice(0, 10);
+  load();
+});
 </script>
 </body>
 </html>

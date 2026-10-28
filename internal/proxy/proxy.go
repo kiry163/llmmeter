@@ -6,6 +6,7 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -43,11 +44,10 @@ func New(cfg *config.Config, cat *pricing.Catalog, st *store.Store, now func() t
 		return nil, err
 	}
 	p.client = &http.Client{Transport: &http.Transport{
-		Proxy:                 http.ProxyFromEnvironment,
-		MaxIdleConnsPerHost:   64,
-		IdleConnTimeout:       90 * time.Second,
-		ResponseHeaderTimeout: 60 * time.Second,
-		ForceAttemptHTTP2:     true,
+		Proxy:               http.ProxyFromEnvironment,
+		MaxIdleConnsPerHost: 64,
+		IdleConnTimeout:     90 * time.Second,
+		ForceAttemptHTTP2:   true,
 	}}
 	return p, nil
 }
@@ -89,6 +89,7 @@ func isParsedPath(path string) bool {
 }
 
 func (p *Proxy) forwardRaw(w http.ResponseWriter, r *http.Request, cfg *config.Config) {
+	started := p.now()
 	out, cancel, err := p.upstreamRequest(r, cfg, r.Body, r.ContentLength)
 	if err != nil {
 		http.Error(w, `{"error":"bad upstream"}`, http.StatusBadGateway)
@@ -104,6 +105,11 @@ func (p *Proxy) forwardRaw(w http.ResponseWriter, r *http.Request, cfg *config.C
 	copyHeader(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
 	io.Copy(w, resp.Body)
+	slog.Info("access",
+		"path", r.URL.Path,
+		"status", resp.StatusCode,
+		"duration_ms", p.now().Sub(started).Milliseconds(),
+	)
 }
 
 // upstreamRequest builds the upstream request. body and length are explicit so
@@ -169,6 +175,9 @@ func (p *Proxy) forwardParsed(w http.ResponseWriter, r *http.Request, cfg *confi
 	defer cancel()
 	resp, err := p.client.Do(out)
 	if err != nil {
+		record.Status = http.StatusBadGateway
+		record.Error = err.Error()
+		p.finish(&record, usage.Usage{}, false, started, p.now())
 		http.Error(w, `{"error":"upstream unreachable"}`, http.StatusBadGateway)
 		return
 	}
@@ -203,6 +212,9 @@ func (p *Proxy) forwardParsed(w http.ResponseWriter, r *http.Request, cfg *confi
 			}
 			if m := ParseResponseModel(buf); m != "" {
 				record.UpstreamModel = m
+			}
+			if !found && !json.Valid(buf) {
+				record.UsageStatus = "parse_failed"
 			}
 		}
 	default:

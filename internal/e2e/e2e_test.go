@@ -72,8 +72,18 @@ func TestEndToEndStreamingAccounting(t *testing.T) {
 		t.Fatalf("stream truncated: %q", body)
 	}
 
-	if err := st.Flush(); err != nil {
-		t.Fatal(err)
+	// The handler enqueues its record after the last body byte, so wait for it
+	// instead of racing a single Flush.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		sum, err := st.Summary("2000-01-01", "2100-01-01")
+		if err == nil && sum.Requests == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("record never landed: sum=%+v err=%v", sum, err)
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 
 	sumResp, err := http.Get(srv.URL + "/api/summary")

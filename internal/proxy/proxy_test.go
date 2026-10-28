@@ -1,8 +1,10 @@
 package proxy
 
 import (
+	"bytes"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -157,5 +159,64 @@ func TestPassthroughPathNotStored(t *testing.T) {
 	rows, _ := st.Requests("2026-10-28", "2026-10-28", "", 10, 0)
 	if len(rows) != 0 {
 		t.Fatalf("passthrough must not be stored, got %d", len(rows))
+	}
+}
+
+func TestUpstreamUnreachableRecorded(t *testing.T) {
+	p, st := newProxy(t, "http://127.0.0.1:1")
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"deepseek-chat","messages":[]}`))
+	req.Header.Set("Authorization", "Bearer gw-key")
+	p.ServeHTTP(rr, req)
+	if rr.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d", rr.Code)
+	}
+	p.FlushForTest()
+	rows, _ := st.Requests("2026-10-28", "2026-10-28", "", 10, 0)
+	if len(rows) != 1 || rows[0].Status != http.StatusBadGateway || rows[0].UsageStatus != "no_usage" {
+		t.Fatalf("rows = %+v", rows)
+	}
+}
+
+func TestInvalidJSONLabeledParseFailed(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, "not json at all")
+	}))
+	defer up.Close()
+
+	p, st := newProxy(t, up.URL)
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"deepseek-chat","messages":[]}`))
+	req.Header.Set("Authorization", "Bearer gw-key")
+	p.ServeHTTP(rr, req)
+	p.FlushForTest()
+	rows, _ := st.Requests("2026-10-28", "2026-10-28", "", 10, 0)
+	if len(rows) != 1 || rows[0].UsageStatus != "parse_failed" {
+		t.Fatalf("rows = %+v", rows)
+	}
+}
+
+func TestPassthroughAccessLog(t *testing.T) {
+	var buf bytes.Buffer
+	old := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(old) })
+
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"data":[]}`)
+	}))
+	defer up.Close()
+
+	p, st := newProxy(t, up.URL)
+	defer st.Close()
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	req.Header.Set("Authorization", "Bearer gw-key")
+	p.ServeHTTP(rr, req)
+	if !strings.Contains(buf.String(), "access") || !strings.Contains(buf.String(), "/v1/models") {
+		t.Fatalf("missing access log: %q", buf.String())
 	}
 }

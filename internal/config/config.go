@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
@@ -99,7 +100,9 @@ func Load(path string) (*Config, error) {
 		Listen:   "127.0.0.1:8100",
 		Timezone: "Asia/Shanghai",
 	}
-	if err := yaml.Unmarshal([]byte(text), cfg); err != nil {
+	dec := yaml.NewDecoder(bytes.NewReader([]byte(text)))
+	dec.KnownFields(true)
+	if err := dec.Decode(cfg); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
 	if cfg.GatewayKey == "" {

@@ -50,3 +50,16 @@ func TestParseChatSSEEvent(t *testing.T) {
 		t.Fatalf("got %+v ok=%v", u, ok)
 	}
 }
+
+func TestParseResponsesTopLevelUsage(t *testing.T) {
+	body := []byte(`{"object":"response","model":"deepseek-chat","output":[],
+		"usage":{"input_tokens":9,"output_tokens":3,"total_tokens":12,
+		"input_tokens_details":{"cached_tokens":4}}}`)
+	u, ok := ParseResponses(body)
+	if !ok {
+		t.Fatal("expected top-level usage")
+	}
+	if u.Prompt != 9 || u.Completion != 3 || u.CacheRead != 4 || u.Total != 12 {
+		t.Fatalf("got %+v", u)
+	}
+}

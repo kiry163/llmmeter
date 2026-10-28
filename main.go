@@ -123,7 +123,9 @@ func serve(args []string) error {
 
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
+	shutdownDone := make(chan struct{})
 	go func() {
+		defer close(shutdownDone)
 		<-stop
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
@@ -131,7 +133,14 @@ func serve(args []string) error {
 	}()
 
 	slog.Info("llmmeter listening", "addr", cfg.Listen, "upstream", cfg.Upstream.BaseURL)
-	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	err = srv.ListenAndServe()
+	if errors.Is(err, http.ErrServerClosed) {
+		// ListenAndServe returns as soon as shutdown starts; wait for in-flight
+		// handlers so their records reach the store before it closes.
+		<-shutdownDone
+		err = nil
+	}
+	if err != nil {
 		return err
 	}
 	return st.Flush()

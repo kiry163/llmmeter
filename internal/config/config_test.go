@@ -75,3 +75,22 @@ pricing:
 		t.Fatal("expected error for malformed start time")
 	}
 }
+
+func TestLoadRejectsUnknownPricingKey(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	body := `
+gateway_key: "k"
+upstream: {base_url: "https://example.com", api_key: "x"}
+pricing:
+  models:
+    m:
+      input_pre_mtok: 0.5
+`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil {
+		t.Fatal("expected error for unknown pricing key")
+	}
+}

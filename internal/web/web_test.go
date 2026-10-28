@@ -54,3 +54,21 @@ func TestSummaryAndExport(t *testing.T) {
 		t.Fatalf("csv head = %q", got)
 	}
 }
+
+func TestTodayEndpointUsesConfiguredTimezone(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	loc, _ := time.LoadLocation("Asia/Shanghai")
+	h := New(st, loc)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest("GET", "/api/today", nil))
+	if rr.Code != 200 {
+		t.Fatalf("status = %d", rr.Code)
+	}
+	if want := time.Now().In(loc).Format("2006-01-02"); !strings.Contains(rr.Body.String(), want) {
+		t.Fatalf("body = %s, want day %s", rr.Body.String(), want)
+	}
+}

@@ -28,20 +28,23 @@ type chatEnvelope struct {
 	Usage *chatUsage `json:"usage"`
 }
 
+type responsesUsage struct {
+	InputTokens         int64 `json:"input_tokens"`
+	OutputTokens        int64 `json:"output_tokens"`
+	TotalTokens         int64 `json:"total_tokens"`
+	InputTokensDetails  *struct {
+		CachedTokens int64 `json:"cached_tokens"`
+	} `json:"input_tokens_details"`
+	OutputTokensDetails *struct {
+		ReasoningTokens int64 `json:"reasoning_tokens"`
+	} `json:"output_tokens_details"`
+}
+
 type responsesEnvelope struct {
-	Type     string `json:"type"`
+	Type     string          `json:"type"`
+	Usage    *responsesUsage `json:"usage"`
 	Response *struct {
-		Usage *struct {
-			InputTokens        int64 `json:"input_tokens"`
-			OutputTokens       int64 `json:"output_tokens"`
-			TotalTokens        int64 `json:"total_tokens"`
-			InputTokensDetails *struct {
-				CachedTokens int64 `json:"cached_tokens"`
-			} `json:"input_tokens_details"`
-			OutputTokensDetails *struct {
-				ReasoningTokens int64 `json:"reasoning_tokens"`
-			} `json:"output_tokens_details"`
-		} `json:"usage"`
+		Usage *responsesUsage `json:"usage"`
 	} `json:"response"`
 }
 
@@ -62,6 +65,20 @@ func (c chatUsage) normalize() Usage {
 	return u
 }
 
+func (r responsesUsage) normalize() Usage {
+	u := Usage{Prompt: r.InputTokens, Completion: r.OutputTokens, Total: r.TotalTokens}
+	if r.InputTokensDetails != nil {
+		u.CacheRead = r.InputTokensDetails.CachedTokens
+	}
+	if r.OutputTokensDetails != nil {
+		u.Reasoning = r.OutputTokensDetails.ReasoningTokens
+	}
+	if u.Total == 0 {
+		u.Total = u.Prompt + u.Completion
+	}
+	return u
+}
+
 // ParseChat parses a non-streaming chat completion body.
 func ParseChat(body []byte) (Usage, bool) {
 	var env chatEnvelope
@@ -74,24 +91,21 @@ func ParseChat(body []byte) (Usage, bool) {
 	return env.Usage.normalize(), true
 }
 
-// ParseResponses parses a non-streaming Responses API body.
+// ParseResponses parses a non-streaming Responses API body. Usage is top-level
+// on the Response object; a nested usage object is tolerated for callers that
+// pass an event envelope.
 func ParseResponses(body []byte) (Usage, bool) {
 	var env responsesEnvelope
-	if err := json.Unmarshal(body, &env); err != nil || env.Response == nil || env.Response.Usage == nil {
+	if err := json.Unmarshal(body, &env); err != nil {
 		return Usage{}, false
 	}
-	r := env.Response.Usage
-	u := Usage{Prompt: r.InputTokens, Completion: r.OutputTokens, Total: r.TotalTokens}
-	if r.InputTokensDetails != nil {
-		u.CacheRead = r.InputTokensDetails.CachedTokens
+	switch {
+	case env.Usage != nil:
+		return env.Usage.normalize(), true
+	case env.Response != nil && env.Response.Usage != nil:
+		return env.Response.Usage.normalize(), true
 	}
-	if r.OutputTokensDetails != nil {
-		u.Reasoning = r.OutputTokensDetails.ReasoningTokens
-	}
-	if u.Total == 0 {
-		u.Total = u.Prompt + u.Completion
-	}
-	return u, true
+	return Usage{}, false
 }
 
 // FromSSEEvent parses one SSE data payload for the given request path.
@@ -108,18 +122,7 @@ func FromSSEEvent(path string, data []byte) (u Usage, found bool, terminal bool)
 		if env.Type != "response.completed" || env.Response == nil || env.Response.Usage == nil {
 			return Usage{}, false, false
 		}
-		r := env.Response.Usage
-		u = Usage{Prompt: r.InputTokens, Completion: r.OutputTokens, Total: r.TotalTokens}
-		if r.InputTokensDetails != nil {
-			u.CacheRead = r.InputTokensDetails.CachedTokens
-		}
-		if r.OutputTokensDetails != nil {
-			u.Reasoning = r.OutputTokensDetails.ReasoningTokens
-		}
-		if u.Total == 0 {
-			u.Total = u.Prompt + u.Completion
-		}
-		return u, true, true
+		return env.Response.Usage.normalize(), true, true
 	}
 	var env chatEnvelope
 	if json.Unmarshal(data, &env) != nil || env.Usage == nil {

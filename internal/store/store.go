@@ -4,7 +4,9 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -89,10 +91,13 @@ type ModelRow struct {
 }
 
 type Store struct {
-	db    *sql.DB
-	ch    chan Record
-	flush chan chan struct{}
-	wg    sync.WaitGroup
+	db      *sql.DB
+	ch      chan Record
+	flush   chan chan struct{}
+	wg      sync.WaitGroup
+	mu      sync.RWMutex
+	closed  bool
+	dropped atomic.Int64
 }
 
 func Open(path string) (*Store, error) {
@@ -113,11 +118,24 @@ func Open(path string) (*Store, error) {
 }
 
 // Enqueue blocks when the queue is full; blocking is preferable to dropping a
-// record or writing concurrently with the batch writer.
-func (s *Store) Enqueue(r Record) { s.ch <- r }
+// record or writing concurrently with the batch writer. Records enqueued after
+// Close are ignored so a finishing handler cannot panic on a closed channel.
+func (s *Store) Enqueue(r Record) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.closed {
+		return
+	}
+	s.ch <- r
+}
 
 // Flush blocks until every record enqueued so far is committed.
 func (s *Store) Flush() error {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.closed {
+		return nil
+	}
 	ack := make(chan struct{})
 	s.flush <- ack
 	<-ack
@@ -180,17 +198,28 @@ func (s *Store) writeBatch(batch []Record) {
 	if len(batch) == 0 {
 		return
 	}
+	if err := s.insertBatch(batch); err != nil {
+		// One immediate retry covers a transient SQLITE_BUSY; a second failure
+		// is logged and counted rather than silently dropped.
+		if retryErr := s.insertBatch(batch); retryErr != nil {
+			slog.Error("store: dropping records", "rows", len(batch), "err", retryErr)
+			s.dropped.Add(int64(len(batch)))
+		}
+	}
+}
+
+func (s *Store) insertBatch(batch []Record) error {
 	tx, err := s.db.Begin()
 	if err != nil {
-		return
+		return err
 	}
 	for _, r := range batch {
 		if err := insertTx(tx, r); err != nil {
 			tx.Rollback()
-			return
+			return err
 		}
 	}
-	_ = tx.Commit()
+	return tx.Commit()
 }
 
 const insertSQL = `INSERT INTO requests
@@ -223,7 +252,14 @@ func boolInt(b bool) int {
 }
 
 func (s *Store) Close() error {
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return nil
+	}
+	s.closed = true
 	close(s.ch)
+	s.mu.Unlock()
 	s.wg.Wait()
 	if _, err := s.db.Exec("PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
 		s.db.Close()
@@ -269,7 +305,7 @@ func (s *Store) ByModel(from, to string) ([]ModelRow, error) {
 	rows, err := s.db.Query(`SELECT model, COUNT(*),
 	  COALESCE(SUM(prompt_tokens),0), COALESCE(SUM(completion_tokens),0),
 	  COALESCE(SUM(cache_read_tokens),0), COALESCE(SUM(reasoning_tokens),0),
-	  COALESCE(SUM(cost_nano_usd),0), COALESCE(SUM(CASE WHEN priced = 0 THEN 1 ELSE 0 END),0)
+	  COALESCE(SUM(cost_nano_usd),0), COALESCE(SUM(CASE WHEN priced = 0 AND usage_status = 'ok' THEN 1 ELSE 0 END),0)
 	  FROM requests WHERE local_day BETWEEN ? AND ?
 	  GROUP BY model ORDER BY SUM(cost_nano_usd) DESC`, from, to)
 	if err != nil {

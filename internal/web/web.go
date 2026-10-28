@@ -30,6 +30,9 @@ func New(st *store.Store, loc *time.Location) http.Handler {
 		sum, err := st.Summary(from, to)
 		writeJSON(w, sum, err)
 	})
+	mux.HandleFunc("/api/today", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]string{"day": time.Now().In(loc).Format("2006-01-02")}, nil)
+	})
 	mux.HandleFunc("/api/daily", func(w http.ResponseWriter, r *http.Request) {
 		from, to := rangeParams(r, loc)
 		rows, err := st.Daily(from, to)
