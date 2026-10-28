@@ -1,0 +1,31 @@
+listen: "127.0.0.1:8100"
+gateway_key: "sk-local-change-me"
+timezone: "Asia/Shanghai"
+
+upstream:
+  base_url: "https://api.deepseek.com"
+  api_key: "${env:DEEPSEEK_API_KEY}"
+  timeout: "300s"
+
+# 价格是示例值，请按你的账单替换。
+pricing:
+  models:
+    deepseek-chat:
+      input_per_mtok: 0.28
+      output_per_mtok: 0.42
+      cache_read_per_mtok: 0.028
+      windows:
+        - label: peak
+          days: [mon, tue, wed, thu, fri]
+          start: "09:00"
+          end: "12:00"
+          input_per_mtok: 0.56
+          output_per_mtok: 0.84
+          cache_read_per_mtok: 0.056
+        - label: peak
+          days: [mon, tue, wed, thu, fri]
+          start: "14:00"
+          end: "18:00"
+          input_per_mtok: 0.56
+          output_per_mtok: 0.84
+          cache_read_per_mtok: 0.056

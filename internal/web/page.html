@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>llmmeter</title>
+<style>
+  :root { color-scheme: light dark; --muted:#888; }
+  body { font: 14px/1.5 system-ui, sans-serif; margin: 24px auto; max-width: 1100px; padding: 0 16px; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+  .card { border: 1px solid #8883; border-radius: 8px; padding: 12px; }
+  .card b { display: block; font-size: 22px; }
+  .card span { color: var(--muted); }
+  table { border-collapse: collapse; width: 100%; margin-top: 16px; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #8883; }
+  .row { display: flex; gap: 8px; align-items: center; margin: 16px 0; flex-wrap: wrap; }
+  svg { width: 100%; height: 180px; }
+  .muted { color: var(--muted); }
+</style>
+</head>
+<body>
+<h2>llmmeter</h2>
+<div class="row">
+  <label>从 <input type="date" id="from"></label>
+  <label>到 <input type="date" id="to"></label>
+  <label>模型 <select id="model"><option value="">全部</option></select></label>
+  <label>曲线 <select id="metric"><option value="cost">花费</option><option value="tokens">tokens</option></select></label>
+  <button id="apply">刷新</button>
+  <a id="export" href="#">导出 CSV</a>
+</div>
+<div class="cards" id="cards"></div>
+<svg id="chart" viewBox="0 0 800 180" preserveAspectRatio="none"></svg>
+<table id="models"><thead><tr>
+<th>模型</th><th>请求</th><th>input</th><th>output</th><th>cache</th><th>reasoning</th><th>花费(USD)</th><th>未定价</th>
+</tr></thead><tbody></tbody></table>
+<table id="requests"><thead><tr>
+<th>时间</th><th>模型</th><th>状态</th><th>input</th><th>output</th><th>窗口</th><th>花费(USD)</th><th>计量</th>
+</tr></thead><tbody></tbody></table>
+
+<script>
+const fmtUSD = n => (n / 1e9).toFixed(n < 1e6 ? 8 : 4);
+const $ = id => document.getElementById(id);
+const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+function params() {
+  const p = new URLSearchParams({from: $('from').value, to: $('to').value});
+  if ($('model').value) p.set('model', $('model').value);
+  return p;
+}
+
+async function load() {
+  const p = params();
+  const [sum, daily, models, reqs] = await Promise.all([
+    fetch('/api/summary?' + p).then(r => r.json()),
+    fetch('/api/daily?' + p).then(r => r.json()),
+    fetch('/api/models?' + p).then(r => r.json()),
+    fetch('/api/requests?' + p + '&limit=50').then(r => r.json()),
+  ]);
+  $('cards').innerHTML = [
+    ['请求', sum.requests], ['input', sum.prompt_tokens], ['output', sum.completion_tokens],
+    ['cache read', sum.cache_read_tokens], ['花费 USD', fmtUSD(sum.cost_nano_usd)],
+    ['未计量', sum.unmetered],
+  ].map(([k, v]) => `<div class="card"><span>${k}</span><b>${v}</b></div>`).join('');
+
+  $('models').tBodies[0].innerHTML = (models || []).map(m => `<tr>
+    <td>${esc(m.model || '(empty)')}</td><td>${m.requests}</td><td>${m.prompt_tokens}</td>
+    <td>${m.completion_tokens}</td><td>${m.cache_read_tokens}</td><td>${m.reasoning_tokens}</td>
+    <td>${fmtUSD(m.cost_nano_usd)}</td><td>${m.unpriced}</td></tr>`).join('');
+
+  const sel = $('model');
+  if (sel.options.length <= 1) {
+    for (const m of models || []) {
+      const o = document.createElement('option');
+      o.value = o.textContent = m.model;
+      sel.append(o);
+    }
+  }
+
+  $('requests').tBodies[0].innerHTML = (reqs || []).map(r => `<tr>
+    <td>${esc(r.started_at)}</td><td>${esc(r.model)}</td><td>${r.status}</td>
+    <td>${r.usage.prompt_tokens}</td><td>${r.usage.completion_tokens}</td>
+    <td>${esc(r.window_label)}</td><td>${fmtUSD(r.cost_nano_usd)}</td>
+    <td>${r.usage_status}${(r.priced || r.usage_status !== 'ok') ? '' : ' / unpriced'}</td></tr>`).join('');
+
+  drawChart(daily || []);
+  $('export').href = '/api/export.csv?' + p;
+}
+
+function drawChart(rows) {
+  const svg = $('chart');
+  if (!rows.length) { svg.innerHTML = ''; return; }
+  const byTokens = $('metric').value === 'tokens';
+  const value = r => byTokens ? r.prompt_tokens + r.completion_tokens : r.cost_nano_usd;
+  const max = Math.max(...rows.map(value), 1);
+  const dx = 780 / Math.max(rows.length - 1, 1);
+  const pts = rows.map((r, i) => `${20 + i * dx},${160 - (value(r) / max) * 140}`).join(' ');
+  svg.innerHTML = `<polyline fill="none" stroke="currentColor" stroke-width="2" points="${pts}"/>`;
+}
+
+$('apply').onclick = load;
+$('metric').onchange = load;
+fetch('/api/today').then(r => r.json()).then(({day}) => {
+  $('to').value = day;
+  $('from').value = new Date(Date.parse(day) - 6 * 864e5).toISOString().slice(0, 10);
+  load();
+});
+</script>
+</body>
+</html>
