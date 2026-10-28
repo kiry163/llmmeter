@@ -27,10 +27,19 @@ func main() {
 		fmt.Println(version)
 		return
 	}
-	if err := serve(os.Args[1:]); err != nil {
+	if err := serve(serveArgs(os.Args[1:])); err != nil {
 		slog.Error("fatal", "err", err)
 		os.Exit(1)
 	}
+}
+
+// serveArgs drops an optional leading "serve" subcommand so that
+// `llmmeter serve -config x` and `llmmeter -config x` behave the same.
+func serveArgs(args []string) []string {
+	if len(args) > 0 && args[0] == "serve" {
+		return args[1:]
+	}
+	return args
 }
 
 func serve(args []string) error {
