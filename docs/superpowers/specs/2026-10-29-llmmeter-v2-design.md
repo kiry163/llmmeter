@@ -62,7 +62,7 @@ web/                        React 19 + Vite + TS + Tailwind + ECharts
 
 1. `/api/*` → 管理 API（会话鉴权或回环免登录）。
 2. `/assets/*`、`/favicon.svg` → 内嵌静态资源。
-3. 精确命中的 SPA 路由：`/`、`/requests`、`/pricing`、`/settings`、`/setup` → `index.html`。
+3. 精确命中的 SPA 路由：`/`、`/requests`、`/pricing`、`/settings`、`/setup`、`/login` → `index.html`。
 4. 其余全部 → 网关（`Authorization: Bearer <gateway_key>`），包括 `/v1/*` 与未知路径。
 
 新增 SPA 路由必须同步加入第 3 条的路由表。未知路径不再可能被误当静态资源。
@@ -285,7 +285,7 @@ CREATE TABLE traffic_minutes (
 | 方法与路径 | 说明 |
 |---|---|
 | `GET /api/bootstrap` | `{version, needsSetup, authRequired, listen, timezone}`，无鉴权 |
-| `POST /api/setup` | 仅空库可调用：`{upstream:{baseUrl,apiKey,timeoutS}, timezone?, adminPassword?}`；生成 `sk-local-` + 32 位十六进制的 gateway key，仅在响应明文返回 |
+| `POST /api/setup` | 仅空库可调用：`{upstream:{baseUrl,apiKey,timeoutS}, timezone?, adminPassword?}`；生成 `sk-local-` + 32 位十六进制的 gateway key，仅在响应明文返回；设置密码时同时签发会话 cookie |
 | `POST /api/auth/login` | `{password}` → 设置 cookie；5 次/分/IP 限速 |
 | `POST /api/auth/logout` | 清 cookie |
 | `GET /api/me` | `{authRequired, authenticated}` |
@@ -330,6 +330,7 @@ CREATE TABLE traffic_minutes (
 - **价格**：模型列表与抽屉编辑器；基础价四项（reasoning 留空 = 继承 output）；窗口编辑用星期芯片 + 时间输入，覆盖项留空表示继承；提交前校验重名、时间范围、days_mask；保存后提示热生效。
 - **设置**：上游（base_url、key 掩码与替换、超时、测试连接）、时区、保留天数、管理密码、gateway key（掩码、轮换后明文一次）、有效监听与重启提示、DB 路径与体积、版本。
 - **引导 `/setup`**：上游 → 生成 gateway key（可复制）→ 可选密码；完成后进入总览。
+- **登录 `/login`**：仅在已设管理密码且未持有效 cookie 时出现；密码错误提示，成功后回跳原页面。
 
 ### 7.2 实现约定
 
