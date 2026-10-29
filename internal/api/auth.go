@@ -296,20 +296,3 @@ func (a *Auth) allowLogin(ip string) bool {
 	v.count++
 	return true
 }
-
-// writeAPIError writes the API error envelope used by every /api failure.
-func writeAPIError(w http.ResponseWriter, status int, code, message string) {
-	writeJSON(w, status, map[string]any{
-		"error": map[string]any{
-			"code":    code,
-			"message": message,
-			"fields":  map[string]string{},
-		},
-	})
-}
-
-func writeJSON(w http.ResponseWriter, status int, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(v)
-}
