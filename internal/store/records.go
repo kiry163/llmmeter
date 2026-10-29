@@ -7,7 +7,9 @@ import (
 )
 
 // Record is one completed request as persisted into the requests table.
+// ID is assigned by SQLite on insert and is only populated by read queries.
 type Record struct {
+	ID                                                           int64
 	StartedAt, CompletedAt                                       time.Time
 	LocalDay                                                     string
 	MinuteOfDay                                                  int
