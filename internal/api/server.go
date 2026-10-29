@@ -80,6 +80,19 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/live/snapshot", require(s.liveSnapshot))
 	mux.Handle("GET /api/live/stream", require(s.liveStream))
 
+	// Configuration endpoints. Setup and the pre-setup upstream probe are
+	// limited to the local machine instead of requiring a session.
+	mux.Handle("POST /api/setup", s.auth.RequireLoopback(http.HandlerFunc(s.setup)))
+	mux.Handle("POST /api/upstream/test", s.upstreamTestRoute(s.upstreamTest))
+	mux.Handle("GET /api/models", require(s.listModels))
+	mux.Handle("POST /api/models", require(s.createModel))
+	mux.Handle("PATCH /api/models/{id}", require(s.updateModel))
+	mux.Handle("DELETE /api/models/{id}", require(s.deleteModel))
+	mux.Handle("PUT /api/models/{id}/windows", require(s.replaceWindows))
+	mux.Handle("GET /api/settings", require(s.getSettings))
+	mux.Handle("PATCH /api/settings", require(s.patchSettings))
+	mux.Handle("POST /api/gateway-key/rotate", require(s.rotateGatewayKey))
+
 	// Unknown /api paths still answer with the JSON error envelope.
 	mux.HandleFunc("/api/", s.notFound)
 
