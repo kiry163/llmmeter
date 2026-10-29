@@ -279,7 +279,7 @@ CREATE TABLE traffic_minutes (
 统一前缀 `/api`；JSON camelCase；错误体：
 
 ```json
-{"error":{"code":"validation|unauthorized|not_found|conflict|internal","message":"...","fields":{}}}
+{"error":{"code":"validation|unauthorized|forbidden|not_found|conflict|internal","message":"...","fields":{}}}
 ```
 
 | 方法与路径 | 说明 |
