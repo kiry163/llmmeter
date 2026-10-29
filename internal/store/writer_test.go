@@ -2,6 +2,7 @@ package store_test
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -243,5 +244,85 @@ func TestEnqueueAfterCloseIsDropped(t *testing.T) {
 	}
 	if err := st.Close(); err != nil {
 		t.Fatalf("second close: %v", err)
+	}
+}
+
+// failPathTrigger makes inserts for a specific path fail, standing in for a
+// single corrupt record among valid ones.
+func failPathTrigger(t *testing.T, st *store.Store, path string) {
+	t.Helper()
+	// Trigger bodies cannot use bind parameters, so the path is inlined with
+	// SQL string quoting.
+	literal := "'" + strings.ReplaceAll(path, "'", "''") + "'"
+	_, err := st.DB().Exec(`CREATE TRIGGER fail_bad_row BEFORE INSERT ON requests
+		WHEN NEW.path = ` + literal + ` BEGIN SELECT RAISE(ABORT, 'bad row'); END`)
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestWriterIsolatesFailedRow(t *testing.T) {
+	st := newStore(t)
+	failPathTrigger(t, st, "/bad")
+	base := time.Date(2026, 10, 29, 4, 0, 0, 0, time.UTC)
+	for _, path := range []string{"/a", "/bad", "/c"} {
+		st.EnqueueRecord(store.Record{
+			StartedAt: base, CompletedAt: base, LocalDay: "2026-10-29",
+			MinuteOfDay: 720, Path: path, PathClass: "chat",
+			UsageStatus: usage.StatusOK,
+		})
+	}
+	if err := st.Flush(); err == nil {
+		t.Fatal("Flush = nil, want the failed row reported")
+	}
+	var total, survived int
+	if err := st.DB().QueryRow("SELECT COUNT(*) FROM requests").Scan(&total); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.DB().QueryRow("SELECT COUNT(*) FROM requests WHERE path IN ('/a', '/c')").Scan(&survived); err != nil {
+		t.Fatal(err)
+	}
+	if total != 2 || survived != 2 {
+		t.Fatalf("requests=%d surviving=%d, want 2/2", total, survived)
+	}
+	var bad int
+	if err := st.DB().QueryRow("SELECT COUNT(*) FROM requests WHERE path = '/bad'").Scan(&bad); err != nil {
+		t.Fatal(err)
+	}
+	if bad != 0 {
+		t.Fatalf("bad row persisted %d times", bad)
+	}
+}
+
+func TestFlushClearsReportedError(t *testing.T) {
+	st := newStore(t)
+	failPathTrigger(t, st, "/bad")
+	base := time.Date(2026, 10, 29, 4, 0, 0, 0, time.UTC)
+	st.EnqueueRecord(store.Record{
+		StartedAt: base, CompletedAt: base, LocalDay: "2026-10-29",
+		Path: "/bad", PathClass: "chat", UsageStatus: usage.StatusOK,
+	})
+	if err := st.Flush(); err == nil {
+		t.Fatal("first Flush = nil, want the failed row reported")
+	}
+	if err := st.Flush(); err != nil {
+		t.Fatalf("second Flush = %v, want nil after the error was reported", err)
+	}
+	if _, err := st.DB().Exec("DROP TRIGGER fail_bad_row"); err != nil {
+		t.Fatal(err)
+	}
+	st.EnqueueRecord(store.Record{
+		StartedAt: base, CompletedAt: base, LocalDay: "2026-10-29",
+		Path: "/ok", PathClass: "chat", UsageStatus: usage.StatusOK,
+	})
+	if err := st.Flush(); err != nil {
+		t.Fatalf("Flush after recovery = %v", err)
+	}
+	var n int
+	if err := st.DB().QueryRow("SELECT COUNT(*) FROM requests").Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("requests=%d, want 1", n)
 	}
 }

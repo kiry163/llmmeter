@@ -103,7 +103,7 @@ func (s *Store) Flush() error {
 	s.mu.RLock()
 	if s.closed {
 		s.mu.RUnlock()
-		return s.lastErr()
+		return s.takeErr()
 	}
 	ack := make(chan error, 1)
 	s.ops <- op{kind: opFlush, ack: ack}
@@ -127,6 +127,8 @@ func (s *Store) Close() error {
 
 	flushErr := <-ack
 	<-s.done
+	// Anything noted after the flush barrier (none in practice) is reported too.
+	lateErr := s.takeErr()
 	_, checkpointErr := s.db.Exec("PRAGMA wal_checkpoint(TRUNCATE)")
 	closeErr := s.db.Close()
 	if checkpointErr != nil {
@@ -135,7 +137,7 @@ func (s *Store) Close() error {
 	if closeErr != nil {
 		closeErr = fmt.Errorf("close database: %w", closeErr)
 	}
-	return errors.Join(flushErr, checkpointErr, closeErr)
+	return errors.Join(flushErr, lateErr, checkpointErr, closeErr)
 }
 
 // loop consumes ops until opQuit. Records are collected into a batch that is
@@ -148,7 +150,7 @@ func (s *Store) loop() {
 
 	batch := make([]Record, 0, maxBatch)
 	flushBatch := func() {
-		s.note(s.insertBatch(batch))
+		s.insertRecords(batch)
 		batch = batch[:0]
 	}
 
@@ -167,7 +169,7 @@ func (s *Store) loop() {
 				s.note(s.pruneBefore(o.pruneBefore))
 			case opFlush:
 				flushBatch()
-				o.ack <- s.lastErr()
+				o.ack <- s.takeErr()
 			case opQuit:
 				flushBatch()
 				return
@@ -176,6 +178,23 @@ func (s *Store) loop() {
 			if len(batch) > 0 {
 				flushBatch()
 			}
+		}
+	}
+}
+
+// insertRecords writes recs as one transaction. If the batch fails, every row
+// is retried on its own so a single offending record cannot discard the rest;
+// each per-row failure is noted.
+func (s *Store) insertRecords(recs []Record) {
+	if len(recs) == 0 {
+		return
+	}
+	if err := s.insertBatch(recs); err == nil {
+		return
+	}
+	for i := range recs {
+		if err := s.insertBatch(recs[i : i+1]); err != nil {
+			s.note(err)
 		}
 	}
 }
@@ -212,20 +231,35 @@ func (s *Store) insertBatch(recs []Record) error {
 	return nil
 }
 
+// execRetry executes one statement, retrying a single time to ride out a
+// transient lock before reporting the failure.
+func (s *Store) execRetry(query string, args ...any) (sql.Result, error) {
+	res, err := s.db.Exec(query, args...)
+	if err == nil {
+		return res, nil
+	}
+	res, retryErr := s.db.Exec(query, args...)
+	if retryErr != nil {
+		return nil, errors.Join(err, retryErr)
+	}
+	return res, nil
+}
+
 // upsertMinute accumulates d into its traffic_minutes row.
 func (s *Store) upsertMinute(d *MinuteDelta) error {
-	if _, err := s.db.Exec(upsertMinuteSQL, minuteArgs(d)...); err != nil {
+	if _, err := s.execRetry(upsertMinuteSQL, minuteArgs(d)...); err != nil {
 		return fmt.Errorf("upsert traffic minute: %w", err)
 	}
 	return nil
 }
 
 // pruneBefore deletes requests started before the cutoff in chunks of up to
-// 10000 rows until none remain.
+// 10000 rows until none remain. A failing chunk is retried once; if it still
+// fails the whole prune is reported so the caller can schedule it again.
 func (s *Store) pruneBefore(before time.Time) error {
 	cutoff := timestampText(before)
 	for {
-		res, err := s.db.Exec(pruneSQL, cutoff)
+		res, err := s.execRetry(pruneSQL, cutoff)
 		if err != nil {
 			return fmt.Errorf("prune requests: %w", err)
 		}
@@ -249,8 +283,12 @@ func (s *Store) note(err error) {
 	s.errMu.Unlock()
 }
 
-func (s *Store) lastErr() error {
+// takeErr returns the accumulated writer errors and clears them, so a reported
+// failure is surfaced exactly once.
+func (s *Store) takeErr() error {
 	s.errMu.Lock()
 	defer s.errMu.Unlock()
-	return s.err
+	err := s.err
+	s.err = nil
+	return err
 }
