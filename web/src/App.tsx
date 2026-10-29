@@ -1,7 +1,24 @@
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
+import {
+  MutationCache,
+  QueryCache,
+  QueryClient,
+  QueryClientProvider,
+  useQuery,
+} from "@tanstack/react-query";
+import { useEffect, type ReactNode } from "react";
+import {
+  BrowserRouter,
+  Navigate,
+  Outlet,
+  Route,
+  Routes,
+  useLocation,
+  useNavigate,
+} from "react-router-dom";
+import { UnauthorizedError, api } from "./api/client";
 import { Layout } from "./components/Layout";
-import { ToastProvider } from "./components/ui";
+import { Button, ErrorText, Spinner, ToastProvider } from "./components/ui";
+import { UNAUTHORIZED_EVENT, notifyUnauthorized, safeNext } from "./lib/auth";
 import { Login } from "./pages/Login";
 import { Overview } from "./pages/Overview";
 import { Pricing } from "./pages/Pricing";
@@ -10,29 +27,169 @@ import { Settings } from "./pages/Settings";
 import { Setup } from "./pages/Setup";
 
 const queryClient = new QueryClient({
+  queryCache: new QueryCache({ onError: notifyUnauthorized }),
+  mutationCache: new MutationCache({ onError: notifyUnauthorized }),
   defaultOptions: {
     queries: {
-      retry: 1,
+      // A missing session is terminal; retrying only delays the login redirect.
+      retry: (failureCount, error) =>
+        !(error instanceof UnauthorizedError) && failureCount < 1,
       refetchOnWindowFocus: false,
       staleTime: 5_000,
     },
   },
 });
 
+function FullPage({ children }: { children: ReactNode }) {
+  return (
+    <div className="flex min-h-screen items-center justify-center bg-surface p-6 text-ink">
+      {children}
+    </div>
+  );
+}
+
+function LoadFailure({ error, onRetry }: { error: unknown; onRetry: () => void }) {
+  return (
+    <FullPage>
+      <div className="w-full max-w-sm space-y-3">
+        <h1 className="text-lg font-semibold">无法连接服务</h1>
+        <ErrorText error={error} />
+        <Button onClick={onRetry}>重试</Button>
+      </div>
+    </FullPage>
+  );
+}
+
+/**
+ * AuthGate redirects unauthenticated viewers to the login page, preserving
+ * the current internal route as `next`.
+ */
+function AuthGate() {
+  const location = useLocation();
+  const me = useQuery({ queryKey: ["me"], queryFn: api.me });
+
+  if (me.isPending) {
+    return (
+      <FullPage>
+        <Spinner label="检查登录状态…" />
+      </FullPage>
+    );
+  }
+  if (me.isError) {
+    return <LoadFailure error={me.error} onRetry={() => void me.refetch()} />;
+  }
+
+  const authenticated = me.data.authenticated;
+  if (authenticated) {
+    if (location.pathname === "/login") {
+      const next = safeNext(new URLSearchParams(location.search).get("next"));
+      return <Navigate to={next} replace />;
+    }
+    return <Outlet />;
+  }
+
+  if (location.pathname === "/login") return <Outlet />;
+  const next = `${location.pathname}${location.search}`;
+  return <Navigate to={`/login?next=${encodeURIComponent(next)}`} replace />;
+}
+
+/**
+ * LocalOnlyGate covers deployments without an admin password: the API only
+ * trusts loopback requests, so remote viewers get an explanation instead of a
+ * login page they could never pass.
+ */
+function LocalOnlyGate() {
+  const me = useQuery({ queryKey: ["me"], queryFn: api.me });
+
+  if (me.isPending) {
+    return (
+      <FullPage>
+        <Spinner label="检查访问权限…" />
+      </FullPage>
+    );
+  }
+  if (me.isError) {
+    return <LoadFailure error={me.error} onRetry={() => void me.refetch()} />;
+  }
+  if (me.data.authenticated) return <Outlet />;
+
+  return (
+    <FullPage>
+      <div className="w-full max-w-sm space-y-2">
+        <h1 className="text-lg font-semibold">仅限本机访问</h1>
+        <p className="text-sm text-muted">
+          当前未设置管理密码，llmmeter 只允许从运行服务的机器访问。请在服务器本机打开此页面。
+        </p>
+      </div>
+    </FullPage>
+  );
+}
+
+/**
+ * AppGuard enforces the first-run setup and the login requirement before any
+ * application route renders.
+ */
+function AppGuard() {
+  const location = useLocation();
+  const bootstrap = useQuery({ queryKey: ["bootstrap"], queryFn: api.bootstrap });
+  const isSetup = location.pathname === "/setup";
+  const isLogin = location.pathname === "/login";
+
+  if (bootstrap.isPending) {
+    return (
+      <FullPage>
+        <Spinner label="加载配置…" />
+      </FullPage>
+    );
+  }
+  if (bootstrap.isError) {
+    return <LoadFailure error={bootstrap.error} onRetry={() => void bootstrap.refetch()} />;
+  }
+
+  if (bootstrap.data.needsSetup) {
+    return isSetup ? <Outlet /> : <Navigate to="/setup" replace />;
+  }
+  if (isSetup) return <Navigate to="/" replace />;
+  if (!bootstrap.data.authRequired) {
+    return isLogin ? <Navigate to="/" replace /> : <LocalOnlyGate />;
+  }
+  return <AuthGate />;
+}
+
+/** UnauthorizedRedirect catches expired sessions from any protected call. */
+function UnauthorizedRedirect() {
+  const navigate = useNavigate();
+
+  useEffect(() => {
+    const onUnauthorized = () => {
+      const { pathname, search } = window.location;
+      if (pathname === "/login" || pathname === "/setup") return;
+      navigate(`/login?next=${encodeURIComponent(`${pathname}${search}`)}`, { replace: true });
+    };
+    window.addEventListener(UNAUTHORIZED_EVENT, onUnauthorized);
+    return () => window.removeEventListener(UNAUTHORIZED_EVENT, onUnauthorized);
+  }, [navigate]);
+
+  return null;
+}
+
 export function App() {
   return (
     <QueryClientProvider client={queryClient}>
       <ToastProvider>
         <BrowserRouter>
+          <UnauthorizedRedirect />
           <Routes>
-            <Route element={<Layout />}>
-              <Route index element={<Overview />} />
-              <Route path="requests" element={<Requests />} />
-              <Route path="pricing" element={<Pricing />} />
-              <Route path="settings" element={<Settings />} />
+            <Route element={<AppGuard />}>
+              <Route path="setup" element={<Setup />} />
+              <Route path="login" element={<Login />} />
+              <Route element={<Layout />}>
+                <Route index element={<Overview />} />
+                <Route path="requests" element={<Requests />} />
+                <Route path="pricing" element={<Pricing />} />
+                <Route path="settings" element={<Settings />} />
+              </Route>
             </Route>
-            <Route path="setup" element={<Setup />} />
-            <Route path="login" element={<Login />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
         </BrowserRouter>

@@ -42,6 +42,14 @@ export class ApiError extends Error implements ApiErrorShape {
   }
 }
 
+/** UnauthorizedError is thrown for protected calls made without a session. */
+export class UnauthorizedError extends ApiError {
+  constructor(message: string, fields: Record<string, string> = {}) {
+    super("unauthorized", message, 401, fields);
+    this.name = "UnauthorizedError";
+  }
+}
+
 type QueryValue = string | number | boolean | null | undefined;
 
 interface QueryParams {
@@ -64,6 +72,7 @@ interface ErrorEnvelope {
     message?: string;
     fields?: Record<string, string>;
   };
+  message?: string;
 }
 
 function parseError(status: number, text: string): ApiError {
@@ -86,7 +95,13 @@ function parseError(status: number, text: string): ApiError {
     "internal",
   ];
   const code = codes.includes(known as ApiErrorCode) ? (known as ApiErrorCode) : "unknown";
-  const message = body?.message ?? (text.trim() || `HTTP ${status}`);
+  // The upstream probe reports failures as {ok:false,message} without an
+  // error envelope, so fall back to the top-level message.
+  const message =
+    body?.message ?? envelope?.message ?? (text.trim() || `HTTP ${status}`);
+  if (status === 401) {
+    return new UnauthorizedError(message, body?.fields ?? {});
+  }
   return new ApiError(code, message, status, body?.fields ?? {});
 }
 
