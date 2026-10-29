@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { NavLink, Outlet } from "react-router-dom";
 import { api } from "../api/client";
+import { useLive } from "../hooks/useLive";
 
 const navItems = [
   { to: "/", label: "总览", end: true },
@@ -17,6 +18,10 @@ function navClass({ isActive }: { isActive: boolean }): string {
 
 export function Layout() {
   const bootstrap = useQuery({ queryKey: ["bootstrap"], queryFn: api.bootstrap });
+  const { mode } = useLive();
+  const liveLabel = mode === "sse" ? "实时" : mode === "poll" ? "轮询" : "未连接";
+  const liveDot =
+    mode === "sse" ? "bg-success" : mode === "poll" ? "bg-warning" : "bg-danger";
 
   return (
     <div className="min-h-screen bg-surface text-ink md:flex">
@@ -26,12 +31,16 @@ export function Layout() {
             <div className="text-base font-semibold tracking-tight">llmmeter</div>
             <div className="text-xs text-muted">LLM 用量计量</div>
           </div>
-          <div className="flex items-center gap-2 text-xs text-muted">
+          <div
+            className="flex items-center gap-2 text-xs text-muted"
+            role="status"
+            aria-live="polite"
+          >
             <span
-              className="inline-block h-2 w-2 rounded-full bg-warning"
-              title="实时连接（Task 14 接入 SSE 后显示真实状态）"
+              className={`inline-block h-2 w-2 rounded-full ${liveDot}`}
+              aria-hidden="true"
             />
-            未连接
+            {liveLabel}
           </div>
         </div>
         <nav className="flex gap-1 overflow-x-auto px-2 pb-2 md:mt-2 md:flex-col md:px-2">
