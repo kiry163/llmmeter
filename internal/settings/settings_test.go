@@ -174,3 +174,58 @@ func TestUpdateModelReasoningFallback(t *testing.T) {
 		t.Fatalf("double delete err = %v", err)
 	}
 }
+
+func TestApplyPatchValidatesBeforeWriting(t *testing.T) {
+	repo := newTestRepo(t)
+	ctx := context.Background()
+	if err := repo.SetPassword(ctx, "", "hunter22"); err != nil {
+		t.Fatal(err)
+	}
+
+	badTZ := "Mars/Olympus"
+	err := repo.ApplyPatch(ctx,
+		settings.Patch{Timezone: &badTZ},
+		&settings.PasswordChange{Current: "hunter22", New: "newpass123"})
+	var ve *settings.ValidationError
+	if !errors.As(err, &ve) || ve.Fields["timezone"] == "" {
+		t.Fatalf("err = %v", err)
+	}
+	hash := repo.Snapshot().AdminPasswordHash
+	if !settings.VerifyPassword(hash, "hunter22") || settings.VerifyPassword(hash, "newpass123") {
+		t.Fatal("failed patch changed the password")
+	}
+
+	retention := 30
+	if err := repo.ApplyPatch(ctx,
+		settings.Patch{RetentionDays: &retention},
+		&settings.PasswordChange{Current: "hunter22", New: "newpass123"}); err != nil {
+		t.Fatal(err)
+	}
+	snap := repo.Snapshot()
+	if snap.RetentionDays != 30 || !settings.VerifyPassword(snap.AdminPasswordHash, "newpass123") {
+		t.Fatalf("snapshot = %+v", snap)
+	}
+}
+
+func TestClearPassword(t *testing.T) {
+	repo := newTestRepo(t)
+	ctx := context.Background()
+	if err := repo.SetPassword(ctx, "", "hunter22"); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.ApplyPatch(ctx, settings.Patch{}, &settings.PasswordChange{Current: "wrong", Clear: true}); err == nil {
+		t.Fatal("wrong current password accepted")
+	}
+	if repo.Snapshot().AdminPasswordHash == "" {
+		t.Fatal("failed clear dropped the password")
+	}
+	if err := repo.ApplyPatch(ctx, settings.Patch{}, &settings.PasswordChange{Current: "hunter22", Clear: true}); err != nil {
+		t.Fatal(err)
+	}
+	if repo.Snapshot().AdminPasswordHash != "" {
+		t.Fatal("password not cleared")
+	}
+	if err := repo.ApplyPatch(ctx, settings.Patch{}, &settings.PasswordChange{New: "x", Clear: true}); err == nil {
+		t.Fatal("set and clear together accepted")
+	}
+}

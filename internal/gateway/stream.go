@@ -180,6 +180,18 @@ func newUsageTracker(class string, stream bool) *usageTracker {
 	return &usageTracker{class: class, stream: stream}
 }
 
+// trackerForClass returns a tracker only for the classes whose payload carries
+// usage. Every other class (models, audio, other) streams through untouched,
+// so a large non-chat response is never buffered.
+func trackerForClass(class string, stream bool) *usageTracker {
+	switch class {
+	case classChat, classResponses:
+		return newUsageTracker(class, stream)
+	default:
+		return nil
+	}
+}
+
 // feed consumes one proxied chunk of the response body.
 func (t *usageTracker) feed(p []byte) {
 	if t.stream {

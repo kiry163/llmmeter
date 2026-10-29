@@ -79,13 +79,21 @@ type SetupInput struct {
 }
 
 // Patch is a partial update of the non-password settings. Password changes
-// go through SetPassword.
+// go through SetPassword or ApplyPatch.
 type Patch struct {
 	BaseURL       *string
 	APIKey        *string
 	Timeout       *time.Duration
 	Timezone      *string
 	RetentionDays *int
+}
+
+// PasswordChange is one admin password modification: set New, or Clear the
+// stored hash. Current must match when a password is already configured.
+type PasswordChange struct {
+	Current string
+	New     string
+	Clear   bool
 }
 
 // ValidationError reports per-field validation failures with camelCase keys.
@@ -325,6 +333,19 @@ func (r *Repo) Setup(ctx context.Context, in SetupInput) (string, error) {
 // Update applies the non-nil fields of p in one transaction, then refreshes
 // the snapshot.
 func (r *Repo) Update(ctx context.Context, p Patch) error {
+	return r.ApplyPatch(ctx, p, nil)
+}
+
+// SetPassword verifies current (when a password is set) and stores a hash of
+// next.
+func (r *Repo) SetPassword(ctx context.Context, current, next string) error {
+	return r.ApplyPatch(ctx, Patch{}, &PasswordChange{Current: current, New: next})
+}
+
+// ApplyPatch validates the whole patch, including the password change, before
+// writing anything, then commits the settings and the password hash in one
+// transaction. On any validation or database error nothing changes.
+func (r *Repo) ApplyPatch(ctx context.Context, p Patch, pw *PasswordChange) error {
 	snap := r.Snapshot()
 	fields := make(map[string]string)
 	updates := make(map[string]string)
@@ -372,6 +393,17 @@ func (r *Repo) Update(ctx context.Context, p Patch) error {
 			updates[keyRetentionDays] = strconv.Itoa(*p.RetentionDays)
 		}
 	}
+	if pw != nil {
+		switch {
+		case pw.Clear && pw.New != "":
+			fields["newPassword"] = "cannot be set together with clearPassword"
+		case !pw.Clear && len(pw.New) < minPasswordLen:
+			fields["newPassword"] = fmt.Sprintf("must be at least %d characters", minPasswordLen)
+		}
+		if snap != nil && snap.AdminPasswordHash != "" && !VerifyPassword(snap.AdminPasswordHash, pw.Current) {
+			fields["currentPassword"] = "incorrect password"
+		}
+	}
 
 	if len(fields) > 0 {
 		return &ValidationError{Fields: fields}
@@ -388,31 +420,37 @@ func (r *Repo) Update(ctx context.Context, p Patch) error {
 		}
 		updates[keyUpstream] = string(b)
 	}
-	if len(updates) == 0 {
+	if len(updates) == 0 && pw == nil {
 		return nil
 	}
-	if err := r.putSettings(ctx, updates); err != nil {
-		return err
-	}
-	return r.Refresh()
-}
 
-// SetPassword verifies current (when a password is set) and stores a hash of
-// next.
-func (r *Repo) SetPassword(ctx context.Context, current, next string) error {
-	if len(next) < minPasswordLen {
-		return &ValidationError{Fields: map[string]string{
-			"newPassword": fmt.Sprintf("must be at least %d characters", minPasswordLen),
-		}}
+	var passwordHash string
+	if pw != nil && !pw.Clear {
+		hash, err := HashPassword(pw.New)
+		if err != nil {
+			return err
+		}
+		passwordHash = hash
 	}
-	if snap := r.Snapshot(); snap != nil && snap.AdminPasswordHash != "" && !VerifyPassword(snap.AdminPasswordHash, current) {
-		return &ValidationError{Fields: map[string]string{"currentPassword": "incorrect password"}}
-	}
-	hash, err := HashPassword(next)
+
+	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
-	if err := r.putSettings(ctx, map[string]string{keyAdminPasswordHash: hash}); err != nil {
+	defer tx.Rollback()
+	if err := writeSettingsTx(ctx, tx, updates); err != nil {
+		return err
+	}
+	if pw != nil {
+		if pw.Clear {
+			if _, err := tx.ExecContext(ctx, `DELETE FROM settings WHERE key = ?`, keyAdminPasswordHash); err != nil {
+				return fmt.Errorf("settings: clear password: %w", err)
+			}
+		} else if err := writeSettingTx(ctx, tx, keyAdminPasswordHash, passwordHash); err != nil {
+			return err
+		}
+	}
+	if err := tx.Commit(); err != nil {
 		return err
 	}
 	return r.Refresh()
@@ -437,16 +475,32 @@ func (r *Repo) putSettings(ctx context.Context, values map[string]string) error 
 		return err
 	}
 	defer tx.Rollback()
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-	for k, v := range values {
-		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)
-			 ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
-			k, v, now); err != nil {
-			return fmt.Errorf("settings: write %s: %w", k, err)
-		}
+	if err := writeSettingsTx(ctx, tx, values); err != nil {
+		return err
 	}
 	return tx.Commit()
+}
+
+// writeSettingsTx upserts every key/value pair inside tx.
+func writeSettingsTx(ctx context.Context, tx *sql.Tx, values map[string]string) error {
+	for k, v := range values {
+		if err := writeSettingTx(ctx, tx, k, v); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// writeSettingTx upserts one settings row inside tx.
+func writeSettingTx(ctx context.Context, tx *sql.Tx, key, value string) error {
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)
+		 ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+		key, value, now); err != nil {
+		return fmt.Errorf("settings: write %s: %w", key, err)
+	}
+	return nil
 }
 
 // checkBaseURL validates and normalizes the upstream base URL.

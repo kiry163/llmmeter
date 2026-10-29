@@ -303,8 +303,8 @@ CREATE TABLE traffic_minutes (
 | `GET /api/settings` | `{upstream:{baseUrl,apiKey:{set,last4},timeoutS}, timezone, retentionDays, gatewayKey:{set,prefix,last4}, adminPasswordSet, listen, dbPath, dbSizeBytes, version}` |
 | `PATCH /api/settings` | 部分更新；`apiKey` 空字符串表示不变；改密需 `currentPassword` |
 | `POST /api/gateway-key/rotate` | 返回新 key 一次 |
-| `POST /api/upstream/test` | `{baseUrl, apiKey?}` 探测 `/models`，5s 超时 |
-| `GET /api/health` | 无鉴权：`{ok, dbWritable, queueDepth, version}` |
+| `POST /api/upstream/test` | `{baseUrl, apiKey?}` 探测 `/models`；404/405 时回退 `/v1/models`（base 已以 `/v1` 结尾则不重复），5s 超时 |
+| `GET /api/health` | 无鉴权：`{ok, dbWritable, queueDepth, version, lastError?}`；`dbWritable` 来自短时 `BEGIN IMMEDIATE`/`ROLLBACK` 写探针 |
 
 `GET /api/settings` 掩码规则：上游 key 与 gateway key 只返回 `set: true` 与末 4 位（gateway key 额外返回前缀），密码只返回 `set`。
 
@@ -371,7 +371,7 @@ CREATE TABLE traffic_minutes (
 
 - 卡片、`series`、`breakdown` 的和值来自 `traffic_minutes`（永久、5 秒延迟内准确）；页面对「最近 5 秒」只用实时卡片呈现。
 - `breakdown` 的 unpriced 计数额外查询 `requests`（仅保留期内），超出保留期时该列为空并在 UI 标注。
-- P50/P95 由 `requests` 按 100ms 分桶 `GROUP BY` 近似；区间超过保留期时改用聚合的 `latency_sum/count` 均值与最大值，并在 UI 标注。
+- P50/P95 由 `requests` 按 100ms 分桶 `GROUP BY` 近似；区间超过保留期时改用聚合的 `latency_sum/count` 均值与 `latency_max_ms`，P50/P95 以均值近似并在 UI 标注「近似」。
 - 未定价/未计量计数来自 `requests`；区间超出保留期时 UI 标注「仅统计保留期内」。
 
 ### 9.3 保留与关闭

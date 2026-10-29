@@ -495,6 +495,7 @@ type settingsPatchRequest struct {
 	RetentionDays   *int           `json:"retentionDays"`
 	CurrentPassword string         `json:"currentPassword"`
 	NewPassword     string         `json:"newPassword"`
+	ClearPassword   bool           `json:"clearPassword"`
 }
 
 func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
@@ -522,15 +523,25 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	patch.Timezone = in.Timezone
 	patch.RetentionDays = in.RetentionDays
-	// Password changes go through their own repository call; a failure after
-	// it is acceptable, so the first error is returned.
-	if in.NewPassword != "" {
-		if err := s.repo.SetPassword(r.Context(), in.CurrentPassword, in.NewPassword); err != nil {
-			writeRepoError(w, err)
-			return
+
+	// Clearing the password is only safe while listening on loopback: a
+	// restart with a non-loopback listen and no password refuses to start.
+	if in.ClearPassword && !LoopbackListen(s.listen) {
+		writeAPIErrorFields(w, http.StatusBadRequest, codeValidation, "invalid settings",
+			map[string]string{"clearPassword": "only allowed while listening on loopback"})
+		return
+	}
+	var pw *settings.PasswordChange
+	if in.NewPassword != "" || in.ClearPassword {
+		pw = &settings.PasswordChange{
+			Current: in.CurrentPassword,
+			New:     in.NewPassword,
+			Clear:   in.ClearPassword,
 		}
 	}
-	if err := s.repo.Update(r.Context(), patch); err != nil {
+	// One repository call validates and commits the settings and the password
+	// change in a single transaction, so a rejected field changes nothing.
+	if err := s.repo.ApplyPatch(r.Context(), patch, pw); err != nil {
 		writeRepoError(w, err)
 		return
 	}
@@ -571,14 +582,17 @@ type upstreamTestRequest struct {
 }
 
 type upstreamTestResponse struct {
-	OK      bool   `json:"ok"`
-	Status  int    `json:"status"`
-	Message string `json:"message,omitempty"`
+	OK       bool   `json:"ok"`
+	Status   int    `json:"status"`
+	Endpoint string `json:"endpoint,omitempty"`
+	Message  string `json:"message,omitempty"`
 }
 
-// upstreamTest checks that the configured upstream answers GET /models. The
-// request carries no headers copied from the client; the resolved key is sent
-// as a bearer token and is never echoed.
+// upstreamTest checks that the configured upstream answers a models listing.
+// It tries <base>/models first and, when that path is missing, <base>/v1/models
+// (unless base already ends in /v1). The request carries no headers copied
+// from the client; the resolved key is sent as a bearer token and is never
+// echoed.
 func (s *Server) upstreamTest(w http.ResponseWriter, r *http.Request) {
 	var in upstreamTestRequest
 	if !decodeJSON(w, r, &in) {
@@ -596,29 +610,53 @@ func (s *Server) upstreamTest(w http.ResponseWriter, r *http.Request) {
 			key = snap.Upstream.APIKey
 		}
 	}
-	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, base+"/models", nil)
-	if err != nil {
-		writeAPIErrorFields(w, http.StatusBadRequest, codeValidation, "invalid upstream probe",
-			map[string]string{"baseUrl": "must be an http or https URL"})
-		return
-	}
-	if key != "" {
-		req.Header.Set("Authorization", "Bearer "+key)
-	}
 	client := &http.Client{Timeout: upstreamProbeTimeout}
-	resp, err := client.Do(req)
+	endpoints := []string{"/models"}
+	if !strings.HasSuffix(base, "/v1") {
+		endpoints = append(endpoints, "/v1/models")
+	}
+
+	var resp *http.Response
+	var endpoint string
+	var err error
+	for i, path := range endpoints {
+		var req *http.Request
+		req, err = http.NewRequestWithContext(r.Context(), http.MethodGet, base+path, nil)
+		if err != nil {
+			writeAPIErrorFields(w, http.StatusBadRequest, codeValidation, "invalid upstream probe",
+				map[string]string{"baseUrl": "must be an http or https URL"})
+			return
+		}
+		if key != "" {
+			req.Header.Set("Authorization", "Bearer "+key)
+		}
+		resp, err = client.Do(req)
+		if err != nil {
+			break
+		}
+		endpoint = path
+		// A missing /models endpoint is often an OpenAI-compatible server
+		// that only exposes the versioned path; retry once before reporting.
+		if (resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusMethodNotAllowed) &&
+			i < len(endpoints)-1 {
+			resp.Body.Close()
+			continue
+		}
+		break
+	}
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, upstreamTestResponse{OK: false, Message: err.Error()})
 		return
 	}
 	resp.Body.Close()
 	if resp.StatusCode == http.StatusOK {
-		writeJSON(w, http.StatusOK, upstreamTestResponse{OK: true, Status: resp.StatusCode})
+		writeJSON(w, http.StatusOK, upstreamTestResponse{OK: true, Status: resp.StatusCode, Endpoint: endpoint})
 		return
 	}
 	writeJSON(w, http.StatusBadGateway, upstreamTestResponse{
-		OK:      false,
-		Status:  resp.StatusCode,
-		Message: fmt.Sprintf("upstream returned HTTP %d", resp.StatusCode),
+		OK:       false,
+		Status:   resp.StatusCode,
+		Endpoint: endpoint,
+		Message:  fmt.Sprintf("upstream returned HTTP %d", resp.StatusCode),
 	})
 }

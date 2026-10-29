@@ -346,3 +346,37 @@ func TestResponseBytesMatchWireBodyWithoutTransparentGzip(t *testing.T) {
 		t.Fatalf("rows = %+v", rows)
 	}
 }
+
+func TestLargeNonUsageResponseIsForwardedWithoutUsageTracking(t *testing.T) {
+	const size = 2 << 20
+	payload := strings.Repeat("x", size)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "audio/mpeg")
+		w.WriteHeader(http.StatusOK)
+		io.WriteString(w, payload)
+	}))
+	defer upstream.Close()
+
+	g, st, repo := newTestGateway(t, upstream.URL)
+	req := httptest.NewRequest("POST", "/v1/audio/speech", strings.NewReader(`{"model":"tts"}`))
+	req.Header.Set("Authorization", "Bearer "+repo.Snapshot().GatewayKey)
+	rec := httptest.NewRecorder()
+	g.ServeHTTP(rec, req)
+	if rec.Code != 200 || rec.Body.Len() != size {
+		t.Fatalf("client got %d bytes status %d", rec.Body.Len(), rec.Code)
+	}
+	if err := st.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := st.Requests(store.RequestFilter{From: "2026-10-29", To: "2026-10-29", Limit: 10})
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("rows=%v err=%v", rows, err)
+	}
+	r0 := rows[0]
+	if r0.UsageStatus != usage.StatusNotApplicable || !r0.Priced {
+		t.Fatalf("record = %+v", r0)
+	}
+	if r0.RespBodyBytes != int64(size) || r0.Usage.TotalTokens != 0 {
+		t.Fatalf("bytes=%d usage=%+v", r0.RespBodyBytes, r0.Usage)
+	}
+}

@@ -96,7 +96,7 @@ func (s *Server) Handler() http.Handler {
 	// Unknown /api paths still answer with the JSON error envelope.
 	mux.HandleFunc("/api/", s.notFound)
 
-	return s.auth.CSRF(mux)
+	return s.auth.HostGuard(s.auth.CSRF(mux))
 }
 
 // notFound answers an unknown /api path.

@@ -219,7 +219,7 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "text/event-stream") {
 		res.stream = true
 	}
-	tracker := newUsageTracker(class, res.stream)
+	tracker := trackerForClass(class, res.stream)
 	flusher, canFlush := w.(http.Flusher)
 
 	done := make(chan struct{})
@@ -246,7 +246,9 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				res.ttft = &ms
 			}
 			res.respBody += int64(n)
-			tracker.feed(chunk)
+			if tracker != nil {
+				tracker.feed(chunk)
+			}
 			if disconnected.Load() {
 				drained += int64(n)
 			} else if _, writeErr := w.Write(chunk); writeErr != nil {

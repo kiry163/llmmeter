@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -112,7 +113,8 @@ func (s *Store) Flush() error {
 }
 
 // Close flushes pending writes, stops the writer, checkpoints the WAL and
-// closes the database. It is safe to call more than once.
+// closes the database. A pending prune is abandoned rather than drained, so
+// shutdown is bounded. It is safe to call more than once.
 func (s *Store) Close() error {
 	s.mu.Lock()
 	if s.closed {
@@ -121,13 +123,12 @@ func (s *Store) Close() error {
 	}
 	s.closed = true
 	ack := make(chan error, 1)
-	s.ops <- op{kind: opFlush, ack: ack}
-	s.ops <- op{kind: opQuit}
+	s.ops <- op{kind: opQuit, ack: ack}
 	s.mu.Unlock()
 
-	flushErr := <-ack
+	quitErr := <-ack
 	<-s.done
-	// Anything noted after the flush barrier (none in practice) is reported too.
+	// Anything noted after the quit barrier is reported too.
 	lateErr := s.takeErr()
 	_, checkpointErr := s.db.Exec("PRAGMA wal_checkpoint(TRUNCATE)")
 	closeErr := s.db.Close()
@@ -137,11 +138,13 @@ func (s *Store) Close() error {
 	if closeErr != nil {
 		closeErr = fmt.Errorf("close database: %w", closeErr)
 	}
-	return errors.Join(flushErr, lateErr, checkpointErr, closeErr)
+	return errors.Join(quitErr, lateErr, checkpointErr, closeErr)
 }
 
 // loop consumes ops until opQuit. Records are collected into a batch that is
-// written when it reaches maxBatch or batchInterval elapses.
+// written when it reaches maxBatch or batchInterval elapses. A prune deletes
+// at most one chunk per op or tick, so inserts and minute upserts interleave
+// with a large cleanup instead of waiting for it to finish.
 func (s *Store) loop() {
 	defer close(s.done)
 
@@ -152,6 +155,24 @@ func (s *Store) loop() {
 	flushBatch := func() {
 		s.insertRecords(batch)
 		batch = batch[:0]
+	}
+
+	// pruneCutoff non-empty means a prune is in progress; each call removes
+	// one bounded chunk and clears the marker once nothing is left.
+	var pruneCutoff string
+	runPrune := func() {
+		if pruneCutoff == "" {
+			return
+		}
+		more, err := s.pruneChunk(pruneCutoff)
+		if err != nil {
+			s.note(err)
+			pruneCutoff = ""
+			return
+		}
+		if !more {
+			pruneCutoff = ""
+		}
 	}
 
 	for {
@@ -166,18 +187,26 @@ func (s *Store) loop() {
 			case opMinute:
 				s.note(s.upsertMinute(&o.minute))
 			case opPrune:
-				s.note(s.pruneBefore(o.pruneBefore))
+				pruneCutoff = timestampText(o.pruneBefore)
+				runPrune()
 			case opFlush:
 				flushBatch()
+				// Flush is a barrier: finish the pending prune so callers
+				// that enqueued one observe it fully applied.
+				for pruneCutoff != "" {
+					runPrune()
+				}
 				o.ack <- s.takeErr()
 			case opQuit:
 				flushBatch()
+				o.ack <- s.takeErr()
 				return
 			}
 		case <-ticker.C:
 			if len(batch) > 0 {
 				flushBatch()
 			}
+			runPrune()
 		}
 	}
 }
@@ -253,24 +282,51 @@ func (s *Store) upsertMinute(d *MinuteDelta) error {
 	return nil
 }
 
-// pruneBefore deletes requests started before the cutoff in chunks of up to
-// 10000 rows until none remain. A failing chunk is retried once; if it still
-// fails the whole prune is reported so the caller can schedule it again.
-func (s *Store) pruneBefore(before time.Time) error {
-	cutoff := timestampText(before)
-	for {
-		res, err := s.execRetry(pruneSQL, cutoff)
-		if err != nil {
-			return fmt.Errorf("prune requests: %w", err)
-		}
-		n, err := res.RowsAffected()
-		if err != nil {
-			return fmt.Errorf("prune requests rows: %w", err)
-		}
-		if n == 0 {
-			return nil
-		}
+// pruneChunkRows is the maximum number of detail rows one prune statement
+// deletes; pruneSQL carries the same literal.
+const pruneChunkRows = 10000
+
+// pruneChunk deletes one bounded chunk of requests started before the cutoff.
+// more reports whether the chunk was full, i.e. another pass is needed.
+func (s *Store) pruneChunk(cutoff string) (more bool, err error) {
+	res, err := s.execRetry(pruneSQL, cutoff)
+	if err != nil {
+		return false, fmt.Errorf("prune requests: %w", err)
 	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("prune requests rows: %w", err)
+	}
+	return n >= pruneChunkRows, nil
+}
+
+// ProbeWritable verifies that the database accepts a write transaction without
+// going through the writer goroutine. It opens a short BEGIN IMMEDIATE and
+// rolls it back, so it only proves the write lock can be acquired.
+func (s *Store) ProbeWritable(ctx context.Context) error {
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("probe writable: %w", err)
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+		return fmt.Errorf("probe writable: %w", err)
+	}
+	// Roll back with an independent deadline so a cancelled request still
+	// releases the write lock before the connection returns to the pool.
+	rollbackCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if _, err := conn.ExecContext(rollbackCtx, "ROLLBACK"); err != nil {
+		return fmt.Errorf("probe writable rollback: %w", err)
+	}
+	return nil
+}
+
+// LastError returns the most recent writer error without clearing it.
+func (s *Store) LastError() error {
+	s.errMu.Lock()
+	defer s.errMu.Unlock()
+	return s.err
 }
 
 // note records a writer error so Flush and Close can surface it.

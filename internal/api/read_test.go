@@ -29,6 +29,21 @@ var apiNow = time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)
 // 2026-10-29 requests as store.seedStore.
 func newAPIServer(t *testing.T, seeded bool) *httptest.Server {
 	t.Helper()
+	return newAPIServerWithListen(t, seeded, "127.0.0.1:8100")
+}
+
+// newAPIServerWithListen is newAPIServer with an explicit listen address,
+// which the password-clear rule inspects.
+func newAPIServerWithListen(t *testing.T, seeded bool, listen string) *httptest.Server {
+	t.Helper()
+	ts, _ := newAPIServerStore(t, seeded, listen)
+	return ts
+}
+
+// newAPIServerStore also returns the store so tests can inspect or break the
+// database underneath the handler.
+func newAPIServerStore(t *testing.T, seeded bool, listen string) (*httptest.Server, *store.Store) {
+	t.Helper()
 
 	st, err := store.Open(filepath.Join(t.TempDir(), "api.db"))
 	if err != nil {
@@ -65,7 +80,7 @@ func newAPIServer(t *testing.T, seeded bool) *httptest.Server {
 
 	srv := api.New(api.Config{
 		Version: "test",
-		Listen:  "127.0.0.1:8100",
+		Listen:  listen,
 		DBPath:  "/tmp/llmmeter-test.db",
 		Repo:    repo,
 		Store:   st,
@@ -74,7 +89,7 @@ func newAPIServer(t *testing.T, seeded bool) *httptest.Server {
 	})
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
-	return ts
+	return ts, st
 }
 
 // newAPIServerWithSeed is the alias used by the configuration API tests.
@@ -129,6 +144,13 @@ func seedAPIData(t *testing.T, st *store.Store) {
 // real frontend sends, and buffers the response into a recorder.
 func do(t *testing.T, srv *httptest.Server, method, path, body string) *httptest.ResponseRecorder {
 	t.Helper()
+	return doAs(t, srv.Client(), srv, method, path, body)
+}
+
+// doAs is do with a caller-supplied client, so tests can keep a session cookie
+// across requests.
+func doAs(t *testing.T, client *http.Client, srv *httptest.Server, method, path, body string) *httptest.ResponseRecorder {
+	t.Helper()
 	var rdr io.Reader
 	if body != "" {
 		rdr = strings.NewReader(body)
@@ -141,7 +163,7 @@ func do(t *testing.T, srv *httptest.Server, method, path, body string) *httptest
 	if body != "" {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	resp, err := srv.Client().Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -445,5 +467,52 @@ func TestUnauthenticatedRequestsRejected(t *testing.T) {
 	rec = doGET(t, ts, "/api/live/stream")
 	if rec.Code != 401 {
 		t.Fatalf("unauthenticated stream = %d", rec.Code)
+	}
+}
+
+func TestHealthReportsUnwritableDatabase(t *testing.T) {
+	srv, st := newAPIServerStore(t, true, "127.0.0.1:8100")
+	if err := st.DB().Close(); err != nil {
+		t.Fatal(err)
+	}
+	rec := doGET(t, srv, "/api/health")
+	if rec.Code != http.StatusServiceUnavailable ||
+		!strings.Contains(rec.Body.String(), `"dbWritable":false`) {
+		t.Fatalf("health = %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHostGuardRejectsNonLoopbackHostWithoutPassword(t *testing.T) {
+	srv := newAPIServer(t, true)
+	doHost := func(server *httptest.Server, host string) *http.Response {
+		t.Helper()
+		req, err := http.NewRequest(http.MethodGet, server.URL+"/api/bootstrap", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Host = host
+		resp, err := server.Client().Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { resp.Body.Close() })
+		return resp
+	}
+
+	if resp := doHost(srv, "evil.example"); resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("rebound host = %d", resp.StatusCode)
+	}
+	if resp := doHost(srv, "127.0.0.1"); resp.StatusCode != http.StatusOK {
+		t.Fatalf("loopback host = %d", resp.StatusCode)
+	}
+
+	// Once a password is configured the guard steps aside and session auth
+	// applies instead; bootstrap stays reachable so the login page can load.
+	secured := newAPIServer(t, true)
+	if rec := doPATCH(t, secured, "/api/settings", `{"newPassword":"hunter22"}`); rec.Code != 200 {
+		t.Fatalf("set password = %d %s", rec.Code, rec.Body.String())
+	}
+	if resp := doHost(secured, "evil.example"); resp.StatusCode != http.StatusOK {
+		t.Fatalf("secured rebound host = %d", resp.StatusCode)
 	}
 }

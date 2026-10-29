@@ -1,7 +1,10 @@
 package store_test
 
 import (
+	"context"
+	"database/sql"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -86,5 +89,48 @@ func TestPruneRemovesOldRequests(t *testing.T) {
 	st.DB().QueryRow("SELECT COUNT(*) FROM requests").Scan(&n)
 	if n != 0 {
 		t.Fatalf("left %d rows", n)
+	}
+}
+
+func TestOpenDBRefusesNewerAndLegacySchemas(t *testing.T) {
+	dir := t.TempDir()
+
+	newer := filepath.Join(dir, "newer.db")
+	db, err := store.OpenDB(newer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("PRAGMA user_version = 2"); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	if _, err := store.OpenDB(newer); err == nil || !strings.Contains(err.Error(), "newer") {
+		t.Fatalf("newer schema err = %v", err)
+	}
+
+	legacy := filepath.Join(dir, "legacy.db")
+	raw, err := sql.Open("sqlite", legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(`CREATE TABLE requests (id INTEGER PRIMARY KEY)`); err != nil {
+		t.Fatal(err)
+	}
+	raw.Close()
+	if _, err := store.OpenDB(legacy); err == nil || !strings.Contains(err.Error(), "legacy") {
+		t.Fatalf("legacy schema err = %v", err)
+	}
+}
+
+func TestProbeWritable(t *testing.T) {
+	st := newStore(t)
+	if err := st.ProbeWritable(context.Background()); err != nil {
+		t.Fatalf("probe = %v", err)
+	}
+	if err := st.DB().Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.ProbeWritable(context.Background()); err == nil {
+		t.Fatal("probe on a closed database succeeded")
 	}
 }

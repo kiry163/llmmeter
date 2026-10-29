@@ -326,3 +326,45 @@ func TestFlushClearsReportedError(t *testing.T) {
 		t.Fatalf("requests=%d, want 1", n)
 	}
 }
+
+func TestPruneDeletesInChunksWithoutStallingInserts(t *testing.T) {
+	st := newStore(t)
+	// 10005 rows force more than one prune chunk.
+	if _, err := st.DB().Exec(`
+WITH RECURSIVE seq(n) AS (
+  SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 10005
+)
+INSERT INTO requests (
+  started_at, completed_at, local_day, minute_of_day,
+  path, path_class, stream, status, latency_ms,
+  req_body_bytes, req_header_bytes, resp_body_bytes, resp_header_bytes,
+  usage_status
+)
+SELECT '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:01.000Z', '2026-01-01', 60,
+       '/v1/chat/completions', 'chat', 0, 200, 10, 0, 0, 0, 0, 'ok'
+FROM seq`); err != nil {
+		t.Fatal(err)
+	}
+
+	fresh := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
+	st.EnqueuePrune(time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC))
+	st.EnqueueRecord(store.Record{
+		StartedAt: fresh, CompletedAt: fresh, LocalDay: "2026-07-01", UsageStatus: usage.StatusOK,
+	})
+	if err := st.Flush(); err != nil {
+		t.Fatal(err)
+	}
+
+	var oldCount, freshCount int
+	if err := st.DB().QueryRow(
+		"SELECT COUNT(*) FROM requests WHERE local_day = '2026-01-01'").Scan(&oldCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.DB().QueryRow(
+		"SELECT COUNT(*) FROM requests WHERE local_day = '2026-07-01'").Scan(&freshCount); err != nil {
+		t.Fatal(err)
+	}
+	if oldCount != 0 || freshCount != 1 {
+		t.Fatalf("old=%d fresh=%d", oldCount, freshCount)
+	}
+}

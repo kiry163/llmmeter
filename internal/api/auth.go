@@ -79,12 +79,51 @@ func IsLoopback(r *http.Request) bool {
 	if h, _, err := net.SplitHostPort(host); err == nil {
 		host = h
 	}
+	return loopbackName(host)
+}
+
+// loopbackName reports whether host is localhost or a loopback IP literal.
+func loopbackName(host string) bool {
 	host = strings.Trim(host, "[]")
 	if strings.EqualFold(host, "localhost") {
 		return true
 	}
 	ip := net.ParseIP(host)
 	return ip != nil && ip.IsLoopback()
+}
+
+// LoopbackListen reports whether addr binds only the local machine. An empty
+// or wildcard host (e.g. ":8100" or "0.0.0.0:8100") is not loopback.
+func LoopbackListen(addr string) bool {
+	host := addr
+	if h, _, err := net.SplitHostPort(addr); err == nil {
+		host = h
+	}
+	if host == "" {
+		return false
+	}
+	return loopbackName(host)
+}
+
+// HostGuard rejects requests whose Host header is not a loopback name while no
+// admin password is configured. Without it a DNS-rebinding page could reach a
+// local-only instance through the browser. Once a password is set, normal
+// session authentication applies instead.
+func (a *Auth) HostGuard(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		snap := a.repo.Snapshot()
+		if snap == nil || snap.AdminPasswordHash == "" {
+			host := r.Host
+			if h, _, err := net.SplitHostPort(host); err == nil {
+				host = h
+			}
+			if !loopbackName(host) {
+				writeAPIError(w, http.StatusForbidden, "forbidden", "loopback host required")
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // Authenticated reports whether the request carries a valid session. Without

@@ -27,6 +27,7 @@ import (
 func localRequest(method, path string, body io.Reader) *http.Request {
 	r := httptest.NewRequest(method, path, body)
 	r.RemoteAddr = "127.0.0.1:41234"
+	r.Host = "127.0.0.1:8100"
 	if method != http.MethodGet && method != http.MethodHead && method != http.MethodOptions {
 		r.Header.Set("X-Requested-With", "llmmeter")
 	}

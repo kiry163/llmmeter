@@ -33,6 +33,9 @@ type Overview struct {
 	UpBytes, DownBytes                              int64
 	Priced, Unpriced, Unmetered                     int64
 	LatencyP50MS, LatencyP95MS, LatencyAvgMS        *int64
+	// LatencyMaxMS is the slowest latency kept by the permanent aggregate;
+	// it is the best available bound once detail rows have been pruned.
+	LatencyMaxMS *int64
 }
 
 // SeriesPoint is one time bucket of the series query.
@@ -85,18 +88,19 @@ GROUP BY bucket ORDER BY bucket`
 // Overview aggregates the inclusive local_day range [from, to].
 func (s *Store) Overview(from, to string) (Overview, error) {
 	var ov Overview
-	var sumLatency int64
+	var sumLatency, maxLatency int64
 	err := s.db.QueryRow(`
 SELECT COALESCE(SUM(requests), 0), COALESCE(SUM(errors), 0),
        COALESCE(SUM(req_bytes), 0), COALESCE(SUM(resp_bytes), 0),
        COALESCE(SUM(prompt_tokens), 0), COALESCE(SUM(completion_tokens), 0),
        COALESCE(SUM(cache_read_tokens), 0), COALESCE(SUM(reasoning_tokens), 0),
-       COALESCE(SUM(cost_nano_usd), 0), COALESCE(SUM(latency_sum_ms), 0)
+       COALESCE(SUM(cost_nano_usd), 0), COALESCE(SUM(latency_sum_ms), 0),
+       COALESCE(MAX(latency_max_ms), 0)
 FROM traffic_minutes WHERE local_day BETWEEN ? AND ?`, from, to).Scan(
 		&ov.Requests, &ov.Errors, &ov.UpBytes, &ov.DownBytes,
 		&ov.PromptTokens, &ov.CompletionTokens,
 		&ov.CacheReadTokens, &ov.ReasoningTokens,
-		&ov.CostNanoUSD, &sumLatency,
+		&ov.CostNanoUSD, &sumLatency, &maxLatency,
 	)
 	if err != nil {
 		return Overview{}, fmt.Errorf("overview sums: %w", err)
@@ -105,6 +109,7 @@ FROM traffic_minutes WHERE local_day BETWEEN ? AND ?`, from, to).Scan(
 	if ov.Requests > 0 {
 		avg := sumLatency / ov.Requests
 		ov.LatencyAvgMS = &avg
+		ov.LatencyMaxMS = &maxLatency
 	}
 
 	err = s.db.QueryRow(`
@@ -123,8 +128,15 @@ FROM requests WHERE local_day BETWEEN ? AND ?`,
 	if err != nil {
 		return Overview{}, err
 	}
-	ov.LatencyP50MS = percentile(buckets, 50)
-	ov.LatencyP95MS = percentile(buckets, 95)
+	if len(buckets) > 0 {
+		ov.LatencyP50MS = percentile(buckets, 50)
+		ov.LatencyP95MS = percentile(buckets, 95)
+	} else if ov.LatencyAvgMS != nil {
+		// The range predates detail retention: no histogram is available, so
+		// approximate both percentiles with the permanent aggregate mean.
+		ov.LatencyP50MS = ov.LatencyAvgMS
+		ov.LatencyP95MS = ov.LatencyAvgMS
+	}
 	return ov, nil
 }
 

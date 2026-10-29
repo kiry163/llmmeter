@@ -268,3 +268,30 @@ func TestRequestDetail(t *testing.T) {
 		t.Fatalf("missing request err = %v", err)
 	}
 }
+
+func TestOverviewHistoricalLatencyFallback(t *testing.T) {
+	st := seedStore(t)
+	// An aggregate-only day: traffic_minutes has data but its detail rows
+	// were pruned, so no latency histogram can be built.
+	st.EnqueueMinute(store.MinuteDelta{
+		LocalDay: "2026-01-01", MinuteOfDay: 60, PathClass: "chat", Model: "m",
+		Requests: 3, LatencySumMS: 900, LatencyMaxMS: 700,
+	})
+	if err := st.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	ov, err := st.Overview("2026-01-01", "2026-01-01")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ov.Requests != 3 || ov.LatencyAvgMS == nil || *ov.LatencyAvgMS != 300 {
+		t.Fatalf("overview = %+v", ov)
+	}
+	if ov.LatencyMaxMS == nil || *ov.LatencyMaxMS != 700 {
+		t.Fatalf("max latency = %+v", ov.LatencyMaxMS)
+	}
+	if ov.LatencyP50MS == nil || ov.LatencyP95MS == nil ||
+		*ov.LatencyP50MS != 300 || *ov.LatencyP95MS != 300 {
+		t.Fatalf("fallback percentiles = %+v %+v", ov.LatencyP50MS, ov.LatencyP95MS)
+	}
+}

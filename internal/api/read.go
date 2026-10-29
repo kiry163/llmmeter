@@ -1,9 +1,11 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
 	"net/http"
 	"strconv"
@@ -16,6 +18,10 @@ import (
 const (
 	// dateLayout is the local-date format of from/to query parameters.
 	dateLayout = "2006-01-02"
+
+	// healthProbeTimeout bounds the write probe so /api/health answers
+	// promptly even while the database is busy.
+	healthProbeTimeout = 500 * time.Millisecond
 
 	// defaultRangeDays is the length of the default range ending today.
 	defaultRangeDays = 7
@@ -64,23 +70,30 @@ func (s *Server) me(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// health reports process and database liveness.
+// health reports process and database liveness. dbWritable comes from a real
+// write-transaction probe with a short deadline, so a read-only or locked
+// database is reported instead of a plain SELECT answering.
 type health struct {
 	OK         bool   `json:"ok"`
 	DBWritable bool   `json:"dbWritable"`
 	QueueDepth int    `json:"queueDepth"`
 	Version    string `json:"version"`
+	LastError  string `json:"lastError,omitempty"`
 }
 
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {
-	var one int
-	err := s.store.DB().QueryRowContext(r.Context(), "SELECT 1").Scan(&one)
+	ctx, cancel := context.WithTimeout(r.Context(), healthProbeTimeout)
+	defer cancel()
+	err := s.store.ProbeWritable(ctx)
 	ok := err == nil
 	h := health{
 		OK:         ok,
 		DBWritable: ok,
 		QueueDepth: s.store.QueueDepth(),
 		Version:    s.version,
+	}
+	if werr := s.store.LastError(); werr != nil {
+		h.LastError = werr.Error()
 	}
 	status := http.StatusOK
 	if !ok {
@@ -108,6 +121,7 @@ type overviewStats struct {
 	LatencyP50MS *int64 `json:"latencyP50Ms"`
 	LatencyP95MS *int64 `json:"latencyP95Ms"`
 	LatencyAvgMS *int64 `json:"latencyAvgMs"`
+	LatencyMaxMS *int64 `json:"latencyMaxMs"`
 }
 
 // overviewBody is the overview response, including the equal-length period
@@ -170,6 +184,7 @@ func statsDTO(o store.Overview) overviewStats {
 		LatencyP50MS:     o.LatencyP50MS,
 		LatencyP95MS:     o.LatencyP95MS,
 		LatencyAvgMS:     o.LatencyAvgMS,
+		LatencyMaxMS:     o.LatencyMaxMS,
 	}
 }
 
@@ -610,7 +625,22 @@ func (s *Server) retentionDays() int {
 	return 0
 }
 
-// writeInternal answers an unexpected failure without leaking its details.
-func writeInternal(w http.ResponseWriter, _ error) {
+// writeInternal answers an unexpected failure without leaking its details to
+// the client, while logging the sanitized error for operators.
+func writeInternal(w http.ResponseWriter, err error) {
+	slog.Error("api: internal error", "error", sanitizeLogError(err))
 	writeAPIError(w, http.StatusInternalServerError, codeInternal, "internal server error")
+}
+
+// sanitizeLogError strips query strings from an error message so a URL logged
+// at error level cannot carry credentials into the log.
+func sanitizeLogError(err error) string {
+	if err == nil {
+		return "unknown"
+	}
+	msg := err.Error()
+	if i := strings.IndexByte(msg, '?'); i >= 0 {
+		msg = msg[:i]
+	}
+	return msg
 }

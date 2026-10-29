@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/http/cookiejar"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
@@ -302,5 +303,111 @@ func TestTimeoutOverflowRejected(t *testing.T) {
 	// The stored timeout is untouched.
 	if rec := doGET(t, seeded, "/api/settings"); !strings.Contains(rec.Body.String(), `"timeoutS":30`) {
 		t.Fatalf("timeout changed: %s", rec.Body.String())
+	}
+}
+
+func TestSettingsPatchAtomicWithPassword(t *testing.T) {
+	srv := newAPIServerWithSeed(t, true)
+	// Install the initial password from loopback (no session needed yet).
+	rec := doPATCH(t, srv, "/api/settings", `{"newPassword":"hunter22"}`)
+	if rec.Code != 200 {
+		t.Fatalf("initial password = %d %s", rec.Code, rec.Body.String())
+	}
+
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &http.Client{Jar: jar}
+	rec = doAs(t, client, srv, http.MethodPost, "/api/auth/login", `{"password":"hunter22"}`)
+	if rec.Code != 200 {
+		t.Fatalf("login = %d %s", rec.Code, rec.Body.String())
+	}
+
+	// A valid new password plus an invalid timezone must change nothing.
+	rec = doAs(t, client, srv, http.MethodPatch, "/api/settings",
+		`{"timezone":"Mars/Olympus","newPassword":"newpass123"}`)
+	if rec.Code != 400 || !strings.Contains(rec.Body.String(), `"timezone"`) {
+		t.Fatalf("combined patch = %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := doPOST(t, srv, "/api/auth/login", `{"password":"hunter22"}`); rec.Code != 200 {
+		t.Fatalf("old password rejected after failed patch: %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := doPOST(t, srv, "/api/auth/login", `{"password":"newpass123"}`); rec.Code != 401 {
+		t.Fatalf("new password accepted after failed patch: %d", rec.Code)
+	}
+}
+
+func TestClearAdminPassword(t *testing.T) {
+	srv := newAPIServerWithSeed(t, true)
+	if rec := doPATCH(t, srv, "/api/settings", `{"newPassword":"hunter22"}`); rec.Code != 200 {
+		t.Fatalf("set password = %d %s", rec.Code, rec.Body.String())
+	}
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &http.Client{Jar: jar}
+	if rec := doAs(t, client, srv, http.MethodPost, "/api/auth/login", `{"password":"hunter22"}`); rec.Code != 200 {
+		t.Fatalf("login = %d %s", rec.Code, rec.Body.String())
+	}
+
+	rec := doAs(t, client, srv, http.MethodPatch, "/api/settings",
+		`{"clearPassword":true,"currentPassword":"wrong"}`)
+	if rec.Code != 400 || !strings.Contains(rec.Body.String(), `"currentPassword"`) {
+		t.Fatalf("wrong current password = %d %s", rec.Code, rec.Body.String())
+	}
+
+	rec = doAs(t, client, srv, http.MethodPatch, "/api/settings",
+		`{"clearPassword":true,"currentPassword":"hunter22"}`)
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"adminPasswordSet":false`) {
+		t.Fatalf("clear = %d %s", rec.Code, rec.Body.String())
+	}
+	// Clearing removes the password entirely, so loopback is trusted again.
+	if rec := doGET(t, srv, "/api/settings"); rec.Code != 200 {
+		t.Fatalf("loopback after clear = %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := doAs(t, client, srv, http.MethodPost, "/api/auth/login", `{"password":"hunter22"}`); rec.Code != 401 {
+		t.Fatalf("cleared password still accepted: %d", rec.Code)
+	}
+}
+
+func TestClearPasswordRejectedOffLoopback(t *testing.T) {
+	srv := newAPIServerWithListen(t, true, "0.0.0.0:8100")
+	rec := doPATCH(t, srv, "/api/settings", `{"clearPassword":true}`)
+	if rec.Code != 400 || !strings.Contains(rec.Body.String(), `"clearPassword"`) {
+		t.Fatalf("non-loopback clear = %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestUpstreamProbeFallsBackToVersionedModels(t *testing.T) {
+	var paths []string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		if r.URL.Path == "/models" {
+			http.NotFound(w, r)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(upstream.Close)
+	srv := newAPIServer(t, false)
+
+	rec := doPOST(t, srv, "/api/upstream/test", fmt.Sprintf(`{"baseUrl":%q}`, upstream.URL))
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"endpoint":"/v1/models"`) {
+		t.Fatalf("fallback probe = %d %s (paths %v)", rec.Code, rec.Body.String(), paths)
+	}
+	if len(paths) != 2 || paths[0] != "/models" || paths[1] != "/v1/models" {
+		t.Fatalf("probe paths = %v", paths)
+	}
+
+	// A base that already ends in /v1 is not doubled up.
+	paths = nil
+	rec = doPOST(t, srv, "/api/upstream/test", fmt.Sprintf(`{"baseUrl":%q}`, upstream.URL+"/v1"))
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"endpoint":"/models"`) {
+		t.Fatalf("versioned base probe = %d %s", rec.Code, rec.Body.String())
+	}
+	if len(paths) != 1 || paths[0] != "/v1/models" {
+		t.Fatalf("versioned base paths = %v", paths)
 	}
 }
