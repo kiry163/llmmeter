@@ -1,6 +1,6 @@
 # llmmeter
 
-本机运行的 OpenAI 兼容透传网关：所有请求原样转发到唯一的上游，逐条记录 token、花费与上下行字节，并提供一个实时统计面板。为 omp、codex、OpenAI SDK 这类客户端设计，上游通常是 DeepSeek 等 OpenAI 兼容服务。
+本机运行的 OpenAI 兼容透传网关：除下文说明的流式 usage 注入外，所有请求原样转发到唯一的上游，逐条记录 token、花费与上下行字节，并提供一个实时统计面板。为 omp、codex、OpenAI SDK 这类客户端设计，上游通常是 DeepSeek 等 OpenAI 兼容服务。
 
 - 单二进制内嵌前端与 SQLite，运行时不依赖 Node 或外部数据库。
 - 上游、价格、时区、保留与访问控制都在面板里配置并即时生效，没有 YAML 或配置文件。
@@ -20,7 +20,8 @@ make build          # npm ci + 前端构建 + go build -o llmmeter
 
 ## 首次配置
 
-1. 本机打开 `/setup`，填写上游 `baseUrl`（如 `https://api.deepseek.com/v1`）、上游 API key、超时、时区，可选设置管理密码。
+1. 本机打开 `/setup`，填写上游 `baseUrl`（如 `https://api.deepseek.com`）、上游 API key、超时、时区，可选设置管理密码。
+   **不要带 `/v1`**：客户端请求路径会原样拼在其后，填 `https://api.deepseek.com/v1` 会变成 `/v1/v1/chat/completions`。
 2. 提交后生成 gateway key（`sk-local-…`）。**明文只显示这一次**，请立刻保存；之后可在设置页轮换。
 3. Setup 只接受来自本机的请求；要开放给其他机器，先在本机设置管理密码，再用非回环地址启动（见“认证与远程访问”）。
 
@@ -55,12 +56,12 @@ wire_api = "chat"
 
 ## 价格与峰谷窗口
 
-在“价格”页按上游返回的 `model` 名称建模型。费率单位是 **USD / 百万 token**：
+在“价格”页按**客户端请求体里的 `model` 字段**建模型（与上游返回的 `model` 无关；仅当请求体没有 `model` 时才回退到上游响应中的模型名）。费率单位是 **USD / 百万 token**：
 
 - `input`、`output`、`cacheRead`、`cacheWrite`、`reasoning`；`reasoning` 留空时按 `output` 计价。
 - 可叠加时间窗：选择星期、起止时刻（按设置中的时区解释），并覆盖任意若干费率。
   - `end < start` 表示跨午夜，星期按窗口开始那天判断。
-  - 多个窗口同时命中时，取列表中最先创建的一个。
+  - 多个窗口同时命中时，按**列表顺序**取第一个（即提交数组的顺序/sort_order，可在价格页用上移、下移调整），与创建时间无关。
   - 窗口内未写的费率回落到 base 价。
 - 计价使用**请求完成时刻**所在窗口；命中窗口的费率快照会写入该条记录，之后改价不影响历史。
 - 没有配置价格的模型：token 照常记录，成本为 0，请求标记为 `unpriced`。
@@ -78,8 +79,10 @@ wire_api = "chat"
 ## 流量口径
 
 - **所有**被转发的路径都会落库（`chat`、`responses`、`models`、`audio`、`other`），不只是对话请求。
-- 请求体字节 = 实际发往上游的字节数，流式 chat 缺少 `stream_options` 时注入的 `include_usage` 也计入；响应体字节 = 实际上游返回的字节数（含压缩后的原始字节）。
-- 请求/响应头字节是按 HTTP/1.1 文本格式估算的（状态行/请求行 + 每个 header 的 `name: value`），HTTP/2 会压缩头部，因此只是近似值。
+- 请求体字节 = 实际发往上游的字节数，流式 chat 缺少 `stream_options` 时注入的 `include_usage` 也计入。
+- 响应体字节 = 网关从上游读到的字节数。请求上游时禁用了透明解压（`DisableCompression`），因此是上游实际发出的线上字节，而不是解压后的长度。
+- 请求/响应头字节按 HTTP/1.1 文本格式估算（请求行/状态行 + 每个 header 的 `name: value` + 结尾空行）。HTTP/2 会压缩头部，所以这部分只是近似值。
+- 客户端中途断开后，网关仍会继续读取上游响应最多 **3 秒 / 2 MiB**，以便补全 usage 与字节记账；该条记录标记为 `clientDisconnected`，字节数仍按上游实际收发计入。
 - token usage 只解析 `/v1/chat/completions` 与 `/v1/responses`。拿不到 usage 时如实标记 `no_usage`、`parse_failed`、`too_large` 或 `error`，绝不估算。
 
 ## 认证与远程访问
@@ -94,7 +97,7 @@ wire_api = "chat"
 ## 保留、备份与恢复
 
 - 请求明细默认保留 **90 天**，可在设置页调整为 7–3650 天；每天本地时间 03:00 清理过期明细。
-- 按分钟聚合的流量（`traffic_minutes`）**永久保留**，删除明细后总览与历史图表仍有数据，但请求详情不可再查。
+- 按分钟聚合的流量（`traffic_minutes`）**永久保留**：明细被清理后，总览的请求数/token/字节/花费、序列与 breakdown 图表仍有数据；但 priced/unpriced/unmetered 计数与延迟分位数来自明细表，过期后不再可得，请求详情也不可再查。
 - 全部数据就在一个 SQLite 文件（默认 `llmmeter.db`）里。备份时停止进程后复制该文件即可；不停机时用 `sqlite3 llmmeter.db ".backup backup.db"`（WAL 模式下不要只拷主文件）。
 
 ## 限制
