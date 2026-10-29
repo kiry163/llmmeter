@@ -318,6 +318,33 @@ func TestStopFlushesRemainingDeltas(t *testing.T) {
 	}
 }
 
+func TestCloseSubscribersClosesChannel(t *testing.T) {
+	h := New(&fakeSink{}, time.Now)
+	ch, cancel := h.Subscribe(60 * time.Second)
+	defer cancel()
+
+	h.CloseSubscribers()
+	select {
+	case _, ok := <-ch:
+		if ok {
+			t.Fatal("channel delivered a frame after CloseSubscribers")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("channel not closed by CloseSubscribers")
+	}
+	cancel() // idempotent after the channel was closed globally
+
+	// Subscribers registered after the sweep must still receive frames.
+	next, nextCancel := h.Subscribe(60 * time.Second)
+	defer nextCancel()
+	h.broadcastOnce()
+	select {
+	case <-next:
+	case <-time.After(2 * time.Second):
+		t.Fatal("new subscriber did not receive a frame")
+	}
+}
+
 func TestSubscribeCancelClosesChannel(t *testing.T) {
 	h := New(&fakeSink{}, time.Now)
 	ch, cancel := h.Subscribe(60 * time.Second)

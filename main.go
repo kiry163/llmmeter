@@ -125,6 +125,10 @@ func run(args []string) error {
 
 	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancelShutdown()
+	// SSE handlers only return when their subscriber channel closes; sweep them
+	// first so Shutdown drains ordinary in-flight requests instead of waiting
+	// out the full deadline with live dashboards attached.
+	hub.CloseSubscribers()
 	shutdownErr := httpSrv.Shutdown(shutdownCtx)
 
 	cancel()
@@ -168,12 +172,20 @@ func pruneLoop(ctx context.Context, repo *settings.Repo, st *store.Store, now fu
 	ticker := time.NewTicker(time.Minute)
 	defer ticker.Stop()
 
+	var locName string
 	var loc *time.Location
 	var next time.Time
 	for {
 		snap := repo.Snapshot()
-		if snap.Location != loc {
-			loc = snap.Location
+		loc = snap.Location
+		if loc == nil {
+			loc = time.Local
+		}
+		// settings.Refresh builds a new *time.Location on every write, so
+		// compare the zone name rather than the pointer: only an actual
+		// timezone change should move the schedule.
+		if loc.String() != locName {
+			locName = loc.String()
 			next = nextPrune(now(), loc)
 		}
 		if !now().Before(next) {

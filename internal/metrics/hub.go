@@ -262,6 +262,19 @@ func (h *Hub) Subscribe(window time.Duration) (<-chan []byte, func()) {
 	return ch, cancel
 }
 
+// CloseSubscribers closes and removes every current SSE subscriber. Streaming
+// handlers blocked on their channel return immediately, letting the HTTP
+// server finish a graceful shutdown without waiting out the deadline. New
+// subscribers registered afterwards are unaffected.
+func (h *Hub) CloseSubscribers() {
+	h.subMu.Lock()
+	defer h.subMu.Unlock()
+	for id, s := range h.subs {
+		close(s.ch)
+		delete(h.subs, id)
+	}
+}
+
 // broadcastOnce sends one snapshot to every subscriber. A subscriber that
 // cannot keep up is closed and removed.
 func (h *Hub) broadcastOnce() {
