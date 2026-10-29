@@ -37,12 +37,6 @@ const (
 	drainWindow = 3 * time.Second
 	// drainLimit caps the bytes read for accounting after a client disconnect.
 	drainLimit = 2 << 20
-	// disconnectSettle is how long a finished stream waits for a late
-	// disconnect signal before the record is written. An HTTP client that
-	// closes a response body early keeps draining the connection for up to
-	// 50ms before the close becomes visible to the server, so a stream that
-	// ends right after the client left would otherwise never be flagged.
-	disconnectSettle = 100 * time.Millisecond
 	// copyBuffer is the size of one proxy read/write chunk.
 	copyBuffer = 32 << 10
 	// defaultUpstreamTimeout applies when the snapshot carries no timeout.
@@ -60,6 +54,9 @@ var sharedClient = &http.Client{
 		TLSHandshakeTimeout:   10 * time.Second,
 		ExpectContinueTimeout: time.Second,
 		ForceAttemptHTTP2:     true,
+		// Count response body bytes as they arrive on the wire; transparent
+		// gzip would hide both the compressed size and the encoding headers.
+		DisableCompression: true,
 	},
 }
 
@@ -174,7 +171,7 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		res.status = http.StatusBadGateway
 		res.usageStatus = usage.StatusError
 		res.errText = "invalid upstream URL"
-		g.complete(snap, r, inflight, class, started, res)
+		g.complete(snap, r, inflight, class, started, g.now(), res)
 		writeError(w, http.StatusBadGateway, "upstream_error")
 		return
 	}
@@ -199,7 +196,7 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		res.status = http.StatusBadGateway
 		res.usageStatus = usage.StatusError
 		res.errText = upstreamErrorText(err)
-		g.complete(snap, r, inflight, class, started, res)
+		g.complete(snap, r, inflight, class, started, g.now(), res)
 		writeError(w, http.StatusBadGateway, "upstream_error")
 		return
 	}
@@ -274,15 +271,11 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	res.reqBody = cr.Count()
-	if res.stream && !disconnected.Load() {
-		// Catch a client that left just before the upstream finished.
-		settle := time.NewTimer(disconnectSettle)
-		select {
-		case <-r.Context().Done():
-			disconnected.Store(true)
-		case <-settle.C:
-		}
-		settle.Stop()
+	completed := g.now()
+	// The watcher may not have been scheduled yet; sample the signal directly
+	// so a disconnect observed while the body ended is still recorded.
+	if !disconnected.Load() && r.Context().Err() != nil {
+		disconnected.Store(true)
 	}
 	res.clientDisconnected = res.clientDisconnected || disconnected.Load()
 
@@ -296,12 +289,11 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	g.complete(snap, r, inflight, class, started, res)
+	g.complete(snap, r, inflight, class, started, completed, res)
 }
 
 // complete prices the exchange, enqueues its record and feeds the live metrics.
-func (g *Gateway) complete(snap *settings.Snapshot, r *http.Request, inflight *metrics.Inflight, class string, started time.Time, res *proxyResult) {
-	completed := g.now()
+func (g *Gateway) complete(snap *settings.Snapshot, r *http.Request, inflight *metrics.Inflight, class string, started, completed time.Time, res *proxyResult) {
 	loc := snap.Location
 	if loc == nil {
 		loc = time.UTC

@@ -243,7 +243,9 @@ func TestDisconnectDrainsUpstreamAndRecordsUsage(t *testing.T) {
 	gwServer := httptest.NewServer(g)
 	defer gwServer.Close()
 
-	req, _ := http.NewRequest("POST", gwServer.URL+"/v1/chat/completions",
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req, _ := http.NewRequestWithContext(ctx, "POST", gwServer.URL+"/v1/chat/completions",
 		strings.NewReader(`{"model":"m","stream":true}`))
 	req.Header.Set("Authorization", "Bearer "+repo.Snapshot().GatewayKey)
 	resp, err := http.DefaultClient.Do(req)
@@ -252,7 +254,10 @@ func TestDisconnectDrainsUpstreamAndRecordsUsage(t *testing.T) {
 	}
 	buf := make([]byte, 1)
 	resp.Body.Read(buf)
-	resp.Body.Close() // 客户端提前断开
+	cancel() // 客户端提前断开：取消请求上下文，连接立即关闭
+	resp.Body.Close()
+	// 让代理进程观察到上下文取消后再放行上游剩余数据，避免与记录竞争。
+	time.Sleep(50 * time.Millisecond)
 	close(release)
 
 	deadline := time.Now().Add(5 * time.Second)
@@ -288,6 +293,56 @@ func TestMalformedUsageMarksParseFailed(t *testing.T) {
 	st.Flush()
 	rows, _ := st.Requests(store.RequestFilter{From: "2026-10-29", To: "2026-10-29", Limit: 10})
 	if len(rows) != 1 || rows[0].UsageStatus != usage.StatusParseFailed {
+		t.Fatalf("rows = %+v", rows)
+	}
+}
+
+func TestLargeNonStreamResponseUsageParsed(t *testing.T) {
+	body := `{"model":"deepseek-chat","usage":{"prompt_tokens":11,"completion_tokens":2,"total_tokens":13},"pad":"` +
+		strings.Repeat("x", 3<<19) + `"}`
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, body)
+	}))
+	defer upstream.Close()
+	g, st, repo := newTestGateway(t, upstream.URL)
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"deepseek-chat"}`))
+	req.Header.Set("Authorization", "Bearer "+repo.Snapshot().GatewayKey)
+	rec := httptest.NewRecorder()
+	g.ServeHTTP(rec, req)
+	if rec.Body.Len() != len(body) {
+		t.Fatalf("client body = %d want %d", rec.Body.Len(), len(body))
+	}
+	st.Flush()
+	rows, _ := st.Requests(store.RequestFilter{From: "2026-10-29", To: "2026-10-29", Limit: 10})
+	if len(rows) != 1 || rows[0].UsageStatus != usage.StatusOK || rows[0].Usage.PromptTokens != 11 {
+		t.Fatalf("rows = %+v", rows)
+	}
+	if rows[0].RespBodyBytes != int64(len(body)) {
+		t.Fatalf("resp body bytes = %d want %d", rows[0].RespBodyBytes, len(body))
+	}
+}
+
+func TestResponseBytesMatchWireBodyWithoutTransparentGzip(t *testing.T) {
+	body := `{"model":"deepseek-chat","usage":{"prompt_tokens":3,"completion_tokens":1,"total_tokens":4}}`
+	acceptEncoding := make(chan string, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		acceptEncoding <- r.Header.Get("Accept-Encoding")
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, body)
+	}))
+	defer upstream.Close()
+	g, st, repo := newTestGateway(t, upstream.URL)
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"deepseek-chat"}`))
+	req.Header.Set("Authorization", "Bearer "+repo.Snapshot().GatewayKey)
+	req.Header.Set("Accept-Encoding", "gzip")
+	g.ServeHTTP(httptest.NewRecorder(), req)
+	if got := <-acceptEncoding; got != "" {
+		t.Fatalf("upstream received Accept-Encoding %q", got)
+	}
+	st.Flush()
+	rows, _ := st.Requests(store.RequestFilter{From: "2026-10-29", To: "2026-10-29", Limit: 10})
+	if len(rows) != 1 || rows[0].RespBodyBytes != int64(len(body)) || rows[0].Usage.PromptTokens != 3 {
 		t.Fatalf("rows = %+v", rows)
 	}
 }

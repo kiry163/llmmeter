@@ -8,10 +8,15 @@ import (
 	"github.com/kiry163/llmmeter/internal/usage"
 )
 
-// maxBuffered is the largest request body, response body or SSE line held in
-// memory for usage parsing. Anything bigger is forwarded unchanged and
-// reported as too_large.
+// maxBuffered bounds the request body and each SSE line held in memory for
+// usage parsing. Anything bigger is forwarded unchanged and reported as
+// too_large.
 const maxBuffered = 1 << 20
+
+// maxResponseBuffered bounds a non-streaming response body held in memory for
+// usage parsing. JSON chat/responses payloads can legitimately be several MiB,
+// so this limit is larger than the request/line one.
+const maxResponseBuffered = 10 << 20
 
 // lineBuffer splits a byte stream into complete lines while bounding the memory
 // held for any single line. A line longer than maxBuffered is dropped and sets
@@ -189,7 +194,7 @@ func (t *usageTracker) feed(p []byte) {
 	if t.tooLarge {
 		return
 	}
-	if len(t.body)+len(p) > maxBuffered {
+	if len(t.body)+len(p) > maxResponseBuffered {
 		t.tooLarge = true
 		t.body = nil
 		return
