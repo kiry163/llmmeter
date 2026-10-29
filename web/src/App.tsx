@@ -4,6 +4,7 @@ import {
   QueryClient,
   QueryClientProvider,
   useQuery,
+  useQueryClient,
 } from "@tanstack/react-query";
 import { useEffect, type ReactNode } from "react";
 import {
@@ -16,9 +17,16 @@ import {
   useNavigate,
 } from "react-router-dom";
 import { UnauthorizedError, api } from "./api/client";
+import type { Me } from "./api/types";
 import { Layout } from "./components/Layout";
 import { Button, ErrorText, Spinner, ToastProvider } from "./components/ui";
-import { UNAUTHORIZED_EVENT, notifyUnauthorized, safeNext } from "./lib/auth";
+import {
+  UNAUTHORIZED_EVENT,
+  loggedOutMe,
+  loginPathFor,
+  notifyUnauthorized,
+  safeNext,
+} from "./lib/auth";
 import { Login } from "./pages/Login";
 import { Overview } from "./pages/Overview";
 import { Pricing } from "./pages/Pricing";
@@ -159,16 +167,21 @@ function AppGuard() {
 /** UnauthorizedRedirect catches expired sessions from any protected call. */
 function UnauthorizedRedirect() {
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
 
   useEffect(() => {
     const onUnauthorized = () => {
       const { pathname, search } = window.location;
-      if (pathname === "/login" || pathname === "/setup") return;
-      navigate(`/login?next=${encodeURIComponent(`${pathname}${search}`)}`, { replace: true });
+      const target = loginPathFor(pathname, search);
+      if (!target) return;
+      // AuthGate reads this cache; leaving authenticated:true would bounce
+      // /login straight back to the protected route that just failed.
+      queryClient.setQueryData<Me>(["me"], loggedOutMe);
+      navigate(target, { replace: true });
     };
     window.addEventListener(UNAUTHORIZED_EVENT, onUnauthorized);
     return () => window.removeEventListener(UNAUTHORIZED_EVENT, onUnauthorized);
-  }, [navigate]);
+  }, [navigate, queryClient]);
 
   return null;
 }

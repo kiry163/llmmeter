@@ -1,4 +1,5 @@
 import { UnauthorizedError } from "../api/client";
+import type { Me } from "../api/types";
 
 /** UNAUTHORIZED_EVENT is dispatched when a protected call loses its session. */
 export const UNAUTHORIZED_EVENT = "llmmeter:unauthorized";
@@ -8,6 +9,24 @@ export function notifyUnauthorized(error: unknown): void {
   if (error instanceof UnauthorizedError) {
     window.dispatchEvent(new Event(UNAUTHORIZED_EVENT));
   }
+}
+
+/**
+ * loginPathFor returns the login URL for a lost session, or null when the
+ * viewer is already on an auth page. Keeping this pure lets the guard and the
+ * 401 handler share one rule.
+ */
+export function loginPathFor(pathname: string, search: string): string | null {
+  if (pathname === "/login" || pathname === "/setup") return null;
+  return `/login?next=${encodeURIComponent(`${pathname}${search}`)}`;
+}
+
+/**
+ * loggedOutMe clears the cached authentication flag before a 401 redirect so
+ * AuthGate does not bounce /login back to the route that just failed.
+ */
+export function loggedOutMe(current: Me | undefined): Me {
+  return { authRequired: current?.authRequired ?? true, authenticated: false };
 }
 
 /**
