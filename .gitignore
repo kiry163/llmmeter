@@ -1,3 +1,13 @@
-
 # isolated worktrees
 .worktrees/
+
+# web
+web/node_modules/
+web/dist/*
+!web/dist/.gitkeep
+
+# build output and local data
+llmmeter
+dev.db
+dev.db-shm
+dev.db-wal
