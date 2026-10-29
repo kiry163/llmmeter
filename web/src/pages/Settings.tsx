@@ -221,11 +221,15 @@ function SettingsForm({ settings }: { settings: SettingsData }) {
         }
       >
         <div className="space-y-3">
-          <Field label="Base URL" error={errors.baseUrl}>
+          <Field
+            label="Base URL"
+            hint="不要带 /v1，客户端请求路径会原样拼接"
+            error={errors.baseUrl}
+          >
             <Input
               value={baseUrl}
               onChange={(event) => setBaseUrl(event.target.value)}
-              placeholder="https://api.openai.com/v1"
+              placeholder="https://api.deepseek.com"
               autoComplete="off"
             />
           </Field>
