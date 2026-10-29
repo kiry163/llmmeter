@@ -2,10 +2,7 @@ module github.com/kiry163/llmmeter
 
 go 1.27.1
 
-require (
-	gopkg.in/yaml.v3 v3.0.1
-	modernc.org/sqlite v1.61.0
-)
+require modernc.org/sqlite v1.61.0
 
 require (
 	github.com/dustin/go-humanize v1.1.0 // indirect
