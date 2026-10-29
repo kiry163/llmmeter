@@ -23,33 +23,68 @@ export const RANGE_LABELS: Record<RangePreset, string> = {
 
 const DATE_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
 
-function formatDay(date: Date): string {
-  const month = String(date.getMonth() + 1).padStart(2, "0");
-  const day = String(date.getDate()).padStart(2, "0");
-  return `${date.getFullYear()}-${month}-${day}`;
-}
+/** DAY_MS is one calendar day in milliseconds. */
+const DAY_MS = 86_400_000;
 
-function shiftDay(date: Date, days: number): Date {
-  const shifted = new Date(date.getFullYear(), date.getMonth(), date.getDate());
-  shifted.setDate(shifted.getDate() + days);
-  return shifted;
+interface DayParts {
+  year: number;
+  month: number;
+  day: number;
 }
 
 /**
- * presetRange resolves a shortcut against nowLocal. The API accepts local
- * dates only, so "24h" is the two-calendar-day window ending today.
+ * dayParts reads the calendar date of date in timeZone. Calendar arithmetic is
+ * done on UTC midnights below, so the result is independent of the browser zone.
  */
-export function presetRange(preset: RangePreset, nowLocal: Date = new Date()): DateRange {
-  const to = formatDay(nowLocal);
+function dayParts(date: Date, timeZone?: string): DayParts {
+  if (!timeZone) {
+    return { year: date.getFullYear(), month: date.getMonth() + 1, day: date.getDate() };
+  }
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(date);
+  const pick = (type: Intl.DateTimeFormatPartTypes): number =>
+    Number(parts.find((part) => part.type === type)?.value ?? "0");
+  return { year: pick("year"), month: pick("month"), day: pick("day") };
+}
+
+/** dayNumber maps a calendar date to days since the epoch. */
+function dayNumber(parts: DayParts): number {
+  return Date.UTC(parts.year, parts.month - 1, parts.day) / DAY_MS;
+}
+
+/** formatDayNumber renders a days-since-epoch value as YYYY-MM-DD. */
+function formatDayNumber(day: number): string {
+  const date = new Date(day * DAY_MS);
+  const month = String(date.getUTCMonth() + 1).padStart(2, "0");
+  const dayOfMonth = String(date.getUTCDate()).padStart(2, "0");
+  return `${date.getUTCFullYear()}-${month}-${dayOfMonth}`;
+}
+
+/**
+ * presetRange resolves a shortcut against nowLocal in timeZone (the browser
+ * zone when omitted). The API accepts dates in the configured zone only, so
+ * "24h" is the two-calendar-day window ending today there.
+ */
+export function presetRange(
+  preset: RangePreset,
+  nowLocal: Date = new Date(),
+  timeZone?: string,
+): DateRange {
+  const today = dayNumber(dayParts(nowLocal, timeZone));
+  const to = formatDayNumber(today);
   switch (preset) {
     case "today":
       return { from: to, to };
     case "24h":
-      return { from: formatDay(shiftDay(nowLocal, -1)), to };
+      return { from: formatDayNumber(today - 1), to };
     case "7d":
-      return { from: formatDay(shiftDay(nowLocal, -6)), to };
+      return { from: formatDayNumber(today - 6), to };
     case "30d":
-      return { from: formatDay(shiftDay(nowLocal, -29)), to };
+      return { from: formatDayNumber(today - 29), to };
     case "custom":
       return { from: to, to };
   }

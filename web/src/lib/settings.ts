@@ -114,6 +114,22 @@ export function validateRetention(raw: string): string | undefined {
   return undefined;
 }
 
+/**
+ * listenIsLoopback reports whether a listen address binds only the local
+ * machine. An empty or wildcard host (":8100", "0.0.0.0:8100") is not.
+ */
+export function listenIsLoopback(listen: string): boolean {
+  const value = listen.trim();
+  if (value === "") return false;
+  const bracketed = /^\[([^\]]+)\](?::\d+)?$/.exec(value);
+  let host = bracketed ? bracketed[1] : value;
+  if (!bracketed && (value.match(/:/g)?.length ?? 0) === 1) {
+    host = value.slice(0, value.lastIndexOf(":"));
+  }
+  if (host === "") return false;
+  return host.toLowerCase() === "localhost" || host === "127.0.0.1" || host === "::1";
+}
+
 /** SettingsDraft is the editable state of the settings form. */
 export interface SettingsDraft {
   timeoutS: string;

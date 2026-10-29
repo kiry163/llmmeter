@@ -5,7 +5,15 @@ import { api } from "../api/client";
 import type { RatesSnapshot, RequestRecord } from "../api/types";
 import { Filters } from "../components/Filters";
 import { Badge, Button, Card, Drawer, ErrorText, Spinner } from "../components/ui";
-import { formatBytes, formatCost, formatDuration, formatTime, formatTokens } from "../lib/format";
+import { useTimezone } from "../hooks/useTimezone";
+import {
+  formatBytes,
+  formatBytesWithExact,
+  formatCost,
+  formatDuration,
+  formatTime,
+  formatTokens,
+} from "../lib/format";
 import {
   REQUESTS_PAGE_LIMIT,
   USAGE_STATUS_LABELS,
@@ -74,11 +82,7 @@ function RatesView({ rates }: { rates: RatesSnapshot }) {
   );
 }
 
-function byteCell(bytes: number): string {
-  return `${formatBytes(bytes)} · ${formatTokens(bytes)} B`;
-}
-
-function RequestDetail({ record }: { record: RequestRecord }) {
+function RequestDetail({ record, timeZone }: { record: RequestRecord; timeZone?: string }) {
   const upBytes = record.reqBodyBytes + record.reqHeaderBytes;
   const downBytes = record.respBodyBytes + record.respHeaderBytes;
 
@@ -104,8 +108,8 @@ function RequestDetail({ record }: { record: RequestRecord }) {
       </Section>
 
       <Section title="时间">
-        <Row label="开始" value={formatTime(record.startedAt)} />
-        <Row label="完成" value={formatTime(record.completedAt)} />
+        <Row label="开始" value={formatTime(record.startedAt, timeZone)} />
+        <Row label="完成" value={formatTime(record.completedAt, timeZone)} />
         <Row label="本地日期" value={record.localDay || "—"} />
         <Row label="总耗时" value={formatDuration(record.latencyMs)} />
         <Row
@@ -115,10 +119,10 @@ function RequestDetail({ record }: { record: RequestRecord }) {
       </Section>
 
       <Section title="流量">
-        <Row label="请求头" value={byteCell(record.reqHeaderBytes)} />
-        <Row label="请求体" value={byteCell(record.reqBodyBytes)} />
-        <Row label="响应头" value={byteCell(record.respHeaderBytes)} />
-        <Row label="响应体" value={byteCell(record.respBodyBytes)} />
+        <Row label="请求头（估算）" value={formatBytesWithExact(record.reqHeaderBytes)} />
+        <Row label="请求体" value={formatBytesWithExact(record.reqBodyBytes)} />
+        <Row label="响应头（估算）" value={formatBytesWithExact(record.respHeaderBytes)} />
+        <Row label="响应体" value={formatBytesWithExact(record.respBodyBytes)} />
         <Row
           label="合计"
           value={`上行 ${formatBytes(upBytes)} · 下行 ${formatBytes(downBytes)}`}
@@ -161,8 +165,12 @@ function RequestDetail({ record }: { record: RequestRecord }) {
 export function Requests() {
   const [searchParams, setSearchParams] = useSearchParams();
   const [selectedId, setSelectedId] = useState<number | null>(null);
+  const timeZone = useTimezone();
 
-  const filters = useMemo(() => parseRequestsFilters(searchParams), [searchParams]);
+  const filters = useMemo(
+    () => parseRequestsFilters(searchParams, timeZone),
+    [searchParams, timeZone],
+  );
   const apiParams = useMemo(() => filtersToApiParams(filters), [filters]);
   const queryKey = buildRequestsQuery(apiParams);
 
@@ -271,7 +279,7 @@ export function Requests() {
                       className="cursor-pointer border-b border-line/60 hover:bg-line/20 focus:bg-line/20 focus:outline-none"
                     >
                       <td className="py-2 pr-3 whitespace-nowrap">
-                        {formatTime(record.startedAt)}
+                        {formatTime(record.startedAt, timeZone)}
                       </td>
                       <td className="py-2 pr-3">
                         <Badge tone="info">{record.pathClass}</Badge>
@@ -339,7 +347,7 @@ export function Requests() {
       >
         {detail.isPending && <Spinner />}
         {detail.isError && <ErrorText error={detail.error} />}
-        {detail.data && <RequestDetail record={detail.data} />}
+        {detail.data && <RequestDetail record={detail.data} timeZone={timeZone} />}
       </Drawer>
     </div>
   );

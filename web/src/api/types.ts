@@ -18,6 +18,7 @@ export interface Health {
   dbWritable: boolean;
   queueDepth: number;
   version: string;
+  lastError?: string;
 }
 
 export interface OverviewStats {
@@ -37,6 +38,7 @@ export interface OverviewStats {
   latencyP50Ms: number | null;
   latencyP95Ms: number | null;
   latencyAvgMs: number | null;
+  latencyMaxMs: number | null;
 }
 
 export interface Overview {
@@ -219,6 +221,7 @@ export interface SettingsPatch {
   retentionDays?: number;
   currentPassword?: string;
   newPassword?: string;
+  clearPassword?: boolean;
 }
 
 export interface GatewayKeyResponse {

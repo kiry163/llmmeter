@@ -15,6 +15,7 @@ import {
 } from "../components/ui";
 import { formatBytes } from "../lib/format";
 import {
+  listenIsLoopback,
   redactSettings,
   timezoneOptions,
   validateSettings,
@@ -83,6 +84,7 @@ function SettingsForm({ settings }: { settings: SettingsData }) {
   } | null>(null);
   const [confirmRotate, setConfirmRotate] = useState(false);
   const [rotatedKey, setRotatedKey] = useState<string | null>(null);
+  const [confirmClear, setConfirmClear] = useState(false);
 
   function resetForm(data: SettingsData) {
     setBaseUrl(data.upstream.baseUrl);
@@ -94,6 +96,7 @@ function SettingsForm({ settings }: { settings: SettingsData }) {
     setCurrentPassword("");
     setNewPassword("");
     setConfirmPassword("");
+    setConfirmClear(false);
     setErrors({});
   }
 
@@ -134,6 +137,25 @@ function SettingsForm({ settings }: { settings: SettingsData }) {
       }
       resetForm(data);
       toast("设置已保存", "success");
+    },
+  });
+
+  const clearPassword = useMutation({
+    mutationFn: (current: string) =>
+      api.patchSettings({ clearPassword: true, currentPassword: current }),
+    onSuccess: (data) => {
+      queryClient.setQueryData(["settings"], data);
+      void queryClient.invalidateQueries({ queryKey: ["settings"] });
+      void queryClient.invalidateQueries({ queryKey: ["bootstrap"] });
+      void queryClient.invalidateQueries({ queryKey: ["me"] });
+      setCurrentPassword("");
+      setNewPassword("");
+      setConfirmPassword("");
+      setConfirmClear(false);
+      toast("管理密码已清除", "success");
+    },
+    onError: (error) => {
+      toast(error instanceof Error ? error.message : "清除密码失败", "error");
     },
   });
 
@@ -203,6 +225,7 @@ function SettingsForm({ settings }: { settings: SettingsData }) {
   }
 
   const saveFields = save.error instanceof ApiError ? Object.entries(save.error.fields) : [];
+  const loopback = listenIsLoopback(settings.listen);
   const testClasses =
     testState?.tone === "success" ? "text-xs text-success" : "text-xs text-warning";
 
@@ -369,6 +392,55 @@ function SettingsForm({ settings }: { settings: SettingsData }) {
               ? "修改密码后当前会话将失效，需要重新登录。"
               : "未设置密码时仅允许本机访问，设置后可远程登录管理界面。"}
           </p>
+          {settings.adminPasswordSet && (
+            <div className="border-t border-line pt-3">
+              {loopback ? (
+                confirmClear ? (
+                  <div className="flex flex-wrap items-center gap-2 text-sm">
+                    <span className="text-danger">
+                      清除后本机将免登录访问，确认继续？
+                    </span>
+                    <Button
+                      variant="danger"
+                      disabled={clearPassword.isPending}
+                      onClick={() => {
+                        if (currentPassword === "") {
+                          setErrors((prev) => ({
+                            ...prev,
+                            currentPassword: "清除密码需要当前密码",
+                          }));
+                          return;
+                        }
+                        clearPassword.mutate(currentPassword);
+                      }}
+                    >
+                      {clearPassword.isPending ? "清除中…" : "确认清除"}
+                    </Button>
+                    <Button variant="ghost" onClick={() => setConfirmClear(false)}>
+                      取消
+                    </Button>
+                  </div>
+                ) : (
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Button
+                      variant="secondary"
+                      onClick={() => setConfirmClear(true)}
+                      disabled={clearPassword.isPending}
+                    >
+                      清除密码
+                    </Button>
+                    <span className="text-xs text-muted">
+                      需要当前密码；清除后本机免登录，仅在回环监听时可用。
+                    </span>
+                  </div>
+                )
+              ) : (
+                <p className="text-xs text-muted">
+                  当前监听地址不是回环，清除密码后将无法远程登录且重启会拒绝启动，因此已禁用。
+                </p>
+              )}
+            </div>
+          )}
         </div>
       </Card>
 

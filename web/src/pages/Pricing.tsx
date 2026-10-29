@@ -3,6 +3,7 @@ import { useEffect, useState, type ReactNode } from "react";
 import { ApiError, api } from "../api/client";
 import type { Model, ModelInput, Window, WindowInput } from "../api/types";
 import { Badge, Button, Card, Drawer, ErrorText, Input, Spinner, useToast } from "../components/ui";
+import { useTimezone } from "../hooks/useTimezone";
 import {
   WEEKDAY_LABELS,
   activeWindow,
@@ -129,8 +130,8 @@ function rateText4(value: number | null): string {
   return `$${value.toFixed(4)}/M`;
 }
 
-function currentLabel(model: Model, now: Date): ReactNode {
-  const matched = activeWindow(model.windows, now);
+function currentLabel(model: Model, now: Date, timeZone?: string): ReactNode {
+  const matched = activeWindow(model.windows, now, timeZone);
   if (matched) return <Badge tone="success">当前：{matched.label}</Badge>;
   return <Badge tone="neutral">基础价</Badge>;
 }
@@ -298,6 +299,7 @@ export function Pricing() {
   const queryClient = useQueryClient();
   const toast = useToast();
   const models = useQuery({ queryKey: ["models"], queryFn: api.getModels });
+  const timeZone = useTimezone();
 
   const [editorOpen, setEditorOpen] = useState(false);
   const [editingId, setEditingId] = useState<number | null>(null);
@@ -455,7 +457,7 @@ export function Pricing() {
                         <Badge tone="info">{model.windows.length} 个</Badge>
                       </span>
                     </td>
-                    <td className="py-2 pr-3">{currentLabel(model, now)}</td>
+                    <td className="py-2 pr-3">{currentLabel(model, now, timeZone)}</td>
                     <td className="py-2 text-right">
                       {confirmDeleteId === model.id ? (
                         <span className="inline-flex items-center gap-1">

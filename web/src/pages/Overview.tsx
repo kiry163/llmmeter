@@ -11,7 +11,14 @@ import { TimeRange } from "../components/TimeRange";
 import type { RangeSelection } from "../components/TimeRange";
 import { Badge, Card, ErrorText, Spinner } from "../components/ui";
 import { useLive } from "../hooks/useLive";
-import { formatBytes, formatCost, formatDuration, formatTokens } from "../lib/format";
+import { useTimezone } from "../hooks/useTimezone";
+import {
+  formatBytes,
+  formatCost,
+  formatDuration,
+  formatOptionalDuration,
+  formatTokens,
+} from "../lib/format";
 import { autoInterval, isDateString, isRangePreset, presetRange, rangeDays } from "../lib/range";
 import type { RangePreset } from "../lib/range";
 
@@ -126,7 +133,7 @@ const BREAKDOWN_COLUMNS: readonly BreakdownColumn[] = [
   },
 ];
 
-function parseRangeSelection(params: URLSearchParams): RangeSelection {
+function parseRangeSelection(params: URLSearchParams, timeZone?: string): RangeSelection {
   const raw = params.get("range");
   const preset = isRangePreset(raw) ? raw : DEFAULT_RANGE_PRESET;
   if (preset === "custom") {
@@ -135,9 +142,9 @@ function parseRangeSelection(params: URLSearchParams): RangeSelection {
     if (isDateString(from) && isDateString(to) && from <= to) {
       return { preset, from, to };
     }
-    return { preset, ...presetRange("7d") };
+    return { preset, ...presetRange("7d", new Date(), timeZone) };
   }
-  return { preset, ...presetRange(preset) };
+  return { preset, ...presetRange(preset, new Date(), timeZone) };
 }
 
 function parseMetric(params: URLSearchParams): MetricKey {
@@ -326,7 +333,11 @@ function breakdownValue(row: BreakdownRow, key: BreakdownSortKey): string | numb
 /** Overview combines the live SSE snapshot with historical range queries. */
 export function Overview() {
   const [searchParams, setSearchParams] = useSearchParams();
-  const selection = useMemo(() => parseRangeSelection(searchParams), [searchParams]);
+  const timeZone = useTimezone();
+  const selection = useMemo(
+    () => parseRangeSelection(searchParams, timeZone),
+    [searchParams, timeZone],
+  );
   const metric = parseMetric(searchParams);
   const interval = autoInterval(rangeDays(selection));
   const { snapshot, mode } = useLive();
@@ -420,6 +431,7 @@ export function Overview() {
 
   const stats = overview.data?.current;
   const previous = overview.data?.previous;
+  const partial = overview.data?.partial ?? false;
 
   return (
     <div className="space-y-6">
@@ -436,7 +448,7 @@ export function Overview() {
       </header>
 
       <div className="rounded-lg border border-line bg-surface-raised p-3">
-        <TimeRange value={selection} onChange={updateRange} />
+        <TimeRange value={selection} onChange={updateRange} timeZone={timeZone} />
       </div>
 
       <section className="space-y-3" aria-labelledby="live-heading">
@@ -540,15 +552,17 @@ export function Overview() {
               }}
             />
             <StatCard
-              label="P95 延迟"
-              value={
-                stats.latencyP95Ms == null ? "—" : formatDuration(stats.latencyP95Ms)
+              label={partial ? "P95 延迟（近似）" : "P95 延迟"}
+              value={formatOptionalDuration(stats.latencyP95Ms)}
+              hint={
+                partial
+                  ? `明细已过保留期，按聚合估算 · 均值 ${formatOptionalDuration(
+                      stats.latencyAvgMs,
+                    )} · 最慢 ${formatOptionalDuration(stats.latencyMaxMs)}`
+                  : `P50 ${formatOptionalDuration(
+                      stats.latencyP50Ms,
+                    )} · 平均 ${formatOptionalDuration(stats.latencyAvgMs)}`
               }
-              hint={`P50 ${
-                stats.latencyP50Ms == null ? "—" : formatDuration(stats.latencyP50Ms)
-              } · 平均 ${
-                stats.latencyAvgMs == null ? "—" : formatDuration(stats.latencyAvgMs)
-              }`}
               delta={{
                 current: stats.latencyP95Ms,
                 previous: previous.latencyP95Ms,

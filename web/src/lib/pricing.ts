@@ -156,15 +156,44 @@ function describeDays(mask: number): string {
   return parts.join("、");
 }
 
+const WEEKDAY_INDEX: Record<string, number> = {
+  Sun: 0,
+  Mon: 1,
+  Tue: 2,
+  Wed: 3,
+  Thu: 4,
+  Fri: 5,
+  Sat: 6,
+};
+
+/** wallClock reads the wall-clock minute and weekday in timeZone. */
+function wallClock(at: Date, timeZone?: string): { minute: number; weekday: number } {
+  if (!timeZone) {
+    return { minute: at.getHours() * 60 + at.getMinutes(), weekday: at.getDay() };
+  }
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    hour: "2-digit",
+    minute: "2-digit",
+    weekday: "short",
+    hour12: false,
+  }).formatToParts(at);
+  const pick = (type: Intl.DateTimeFormatPartTypes): string =>
+    parts.find((part) => part.type === type)?.value ?? "";
+  // Some engines render midnight as "24" with hour12:false.
+  const hour = Number(pick("hour")) % 24;
+  return { minute: hour * 60 + Number(pick("minute")), weekday: WEEKDAY_INDEX[pick("weekday")] ?? 0 };
+}
+
 /**
  * windowMatches reports whether at falls inside window, replicating the
- * backend's local wall-clock rule: the day mask applies to the start day for
- * the evening part and to the previous day for the part after midnight.
+ * backend's local wall-clock rule in timeZone (the backend's configured zone):
+ * the day mask applies to the start day for the evening part and to the
+ * previous day for the part after midnight.
  */
-export function windowMatches(window: WindowTiming, at: Date): boolean {
+export function windowMatches(window: WindowTiming, at: Date, timeZone?: string): boolean {
   if (window.endMinute === window.startMinute) return false;
-  const minute = at.getHours() * 60 + at.getMinutes();
-  const weekday = at.getDay();
+  const { minute, weekday } = wallClock(at, timeZone);
   const current = 1 << ((weekday + 6) % 7);
   const previous = 1 << ((weekday + 5) % 7);
   if (window.endMinute > window.startMinute) {
@@ -176,7 +205,11 @@ export function windowMatches(window: WindowTiming, at: Date): boolean {
   );
 }
 
-/** activeWindow returns the first window matching at, if any. */
-export function activeWindow<T extends WindowTiming>(windows: readonly T[], at: Date): T | null {
-  return windows.find((window) => windowMatches(window, at)) ?? null;
+/** activeWindow returns the first window matching at in timeZone, if any. */
+export function activeWindow<T extends WindowTiming>(
+  windows: readonly T[],
+  at: Date,
+  timeZone?: string,
+): T | null {
+  return windows.find((window) => windowMatches(window, at, timeZone)) ?? null;
 }

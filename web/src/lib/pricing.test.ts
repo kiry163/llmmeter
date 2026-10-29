@@ -1,5 +1,6 @@
 import { expect, it } from "vitest";
 import {
+  activeWindow,
   describeWindow,
   parseRateInput,
   parseTimeInput,
@@ -119,6 +120,14 @@ it("matches cross-midnight windows against the previous day", () => {
   expect(
     windowMatches({ ...fridayNight, daysMask: 1 << 5 }, new Date(2026, 9, 31, 1, 0)),
   ).toBe(false);
+});
+
+it("matches windows in the configured timezone", () => {
+  const mondayMorning = { label: "peak", daysMask: 1, startMinute: 540, endMinute: 720 };
+  const at = new Date("2026-10-26T01:30:00Z");
+  expect(windowMatches(mondayMorning, at, "UTC")).toBe(false);
+  expect(windowMatches(mondayMorning, at, "Asia/Shanghai")).toBe(true);
+  expect(activeWindow([mondayMorning], at, "Asia/Shanghai")).toBe(mondayMorning);
 });
 
 it("parses rates with blank meaning inherit", () => {

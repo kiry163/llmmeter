@@ -2,6 +2,7 @@ import { expect, it } from "vitest";
 import type { Settings } from "../api/types";
 import {
   browserTimezone,
+  listenIsLoopback,
   maskValue,
   redactSettings,
   timezoneOptions,
@@ -116,4 +117,14 @@ it("offers common and browser timezones", () => {
   expect(options).toContain("Pacific/Auckland");
   expect(options).toContain(browserTimezone());
   expect(new Set(options).size).toBe(options.length);
+});
+
+it("detects loopback listen addresses", () => {
+  expect(listenIsLoopback("127.0.0.1:8100")).toBe(true);
+  expect(listenIsLoopback("localhost:8100")).toBe(true);
+  expect(listenIsLoopback("[::1]:8100")).toBe(true);
+  expect(listenIsLoopback("0.0.0.0:8100")).toBe(false);
+  expect(listenIsLoopback(":8100")).toBe(false);
+  expect(listenIsLoopback("192.168.1.5:8100")).toBe(false);
+  expect(listenIsLoopback("")).toBe(false);
 });

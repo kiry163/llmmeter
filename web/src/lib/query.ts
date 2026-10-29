@@ -60,7 +60,10 @@ export interface RequestsFilters {
  * parseRequestsFilters reads the explorer filters from the URL. Unknown values
  * fall back to the defaults so a hand-edited URL never triggers a bad request.
  */
-export function parseRequestsFilters(params: URLSearchParams): RequestsFilters {
+export function parseRequestsFilters(
+  params: URLSearchParams,
+  timeZone?: string,
+): RequestsFilters {
   const rawPreset = params.get("range");
   const rawFrom = params.get("from");
   const rawTo = params.get("to");
@@ -70,7 +73,7 @@ export function parseRequestsFilters(params: URLSearchParams): RequestsFilters {
 
   if (isRangePreset(rawPreset) && rawPreset !== "custom") {
     preset = rawPreset;
-    ({ from, to } = presetRange(preset));
+    ({ from, to } = presetRange(preset, new Date(), timeZone));
   } else if (
     rawPreset === "custom" &&
     isDateString(rawFrom) &&
@@ -81,7 +84,7 @@ export function parseRequestsFilters(params: URLSearchParams): RequestsFilters {
     from = rawFrom;
     to = rawTo;
   } else {
-    ({ from, to } = presetRange(DEFAULT_RANGE_PRESET));
+    ({ from, to } = presetRange(DEFAULT_RANGE_PRESET, new Date(), timeZone));
   }
 
   const rawModel = (params.get("model") ?? "").trim();

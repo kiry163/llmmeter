@@ -9,11 +9,13 @@ export interface RangeSelection extends DateRange {
 export interface TimeRangeProps {
   value: RangeSelection;
   onChange: (next: RangeSelection) => void;
+  /** timeZone is the configured zone presets are resolved in. */
+  timeZone?: string;
   className?: string;
 }
 
 /** TimeRange renders the preset shortcuts and the editable date bounds. */
-export function TimeRange({ value, onChange, className = "" }: TimeRangeProps) {
+export function TimeRange({ value, onChange, timeZone, className = "" }: TimeRangeProps) {
   return (
     <div
       className={`flex flex-col gap-2 lg:flex-row lg:items-center lg:justify-between ${className}`}
@@ -28,7 +30,7 @@ export function TimeRange({ value, onChange, className = "" }: TimeRangeProps) {
               onChange(
                 preset === "custom"
                   ? { preset, from: value.from, to: value.to }
-                  : { preset, ...presetRange(preset) },
+                  : { preset, ...presetRange(preset, new Date(), timeZone) },
               )
             }
             className="px-2.5 py-1"

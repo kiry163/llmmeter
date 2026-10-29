@@ -51,6 +51,21 @@ export function formatDuration(ms: number): string {
   return `${hours}h ${minutes}m`;
 }
 
+/** formatOptionalDuration renders a nullable duration, em dash when absent. */
+export function formatOptionalDuration(ms: number | null | undefined): string {
+  return ms == null ? "—" : formatDuration(ms);
+}
+
+/**
+ * formatBytesWithExact renders a byte count and, when different, its exact
+ * integer value too. Sub-KiB values render once instead of twice.
+ */
+export function formatBytesWithExact(bytes: number): string {
+  const primary = formatBytes(bytes);
+  const exact = `${formatTokens(bytes)} B`;
+  return primary === exact ? primary : `${primary} · ${exact}`;
+}
+
 /** formatTime renders an RFC 3339 timestamp in tz (local when omitted). */
 export function formatTime(iso: string, tz?: string): string {
   const date = new Date(iso);
