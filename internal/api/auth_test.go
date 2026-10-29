@@ -300,3 +300,71 @@ func TestIsLoopback(t *testing.T) {
 		}
 	}
 }
+
+// assertAPIError decodes the shared ApiError envelope and checks its shape.
+func assertAPIError(t *testing.T, rec *httptest.ResponseRecorder, status int, code string) {
+	t.Helper()
+	if rec.Code != status {
+		t.Fatalf("status=%d want %d", rec.Code, status)
+	}
+	if ct := rec.Header().Get("Content-Type"); ct != "application/json" {
+		t.Fatalf("content-type=%q want application/json", ct)
+	}
+	var body struct {
+		Error struct {
+			Code    string            `json:"code"`
+			Message string            `json:"message"`
+			Fields  map[string]string `json:"fields"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode envelope: %v (body=%q)", err, rec.Body.String())
+	}
+	if body.Error.Code != code {
+		t.Fatalf("error.code=%q want %q", body.Error.Code, code)
+	}
+	if body.Error.Message == "" {
+		t.Fatal("error.message must be set")
+	}
+	if body.Error.Fields == nil {
+		t.Fatal("error.fields must be an object, not null")
+	}
+}
+
+func TestAPIErrorEnvelope(t *testing.T) {
+	a := api.NewAuth(newTestRepoWithPassword(t, "hunter22"), time.Now)
+
+	// 401 from Require.
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/api/overview", nil)
+	req.RemoteAddr = "127.0.0.1:5000"
+	a.Require(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })).ServeHTTP(rec, req)
+	assertAPIError(t, rec, http.StatusUnauthorized, "unauthorized")
+
+	// 403 from RequireLoopback.
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest("POST", "/api/setup", nil)
+	req.RemoteAddr = "192.0.2.7:9999"
+	a.RequireLoopback(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })).ServeHTTP(rec, req)
+	assertAPIError(t, rec, http.StatusForbidden, "forbidden")
+
+	// 403 from CSRF.
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest("POST", "/api/models", nil)
+	req.Header.Set("Origin", "http://evil.example")
+	a.CSRF(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })).ServeHTTP(rec, req)
+	assertAPIError(t, rec, http.StatusForbidden, "forbidden")
+
+	// Login failures.
+	rec = httptest.NewRecorder()
+	req = jsonReq(`{"password":"nope"}`)
+	req.RemoteAddr = "198.51.100.4:1111"
+	a.Login(rec, req)
+	assertAPIError(t, rec, http.StatusUnauthorized, "unauthorized")
+
+	rec = httptest.NewRecorder()
+	req = jsonReq(`not json`)
+	req.RemoteAddr = "198.51.100.4:1111"
+	a.Login(rec, req)
+	assertAPIError(t, rec, http.StatusBadRequest, "validation")
+}

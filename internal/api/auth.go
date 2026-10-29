@@ -108,7 +108,7 @@ func (a *Auth) Authenticated(r *http.Request) bool {
 func (a *Auth) Require(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !a.Authenticated(r) {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			writeAPIError(w, http.StatusUnauthorized, "unauthorized", "authentication required")
 			return
 		}
 		next.ServeHTTP(w, r)
@@ -120,7 +120,7 @@ func (a *Auth) Require(next http.Handler) http.Handler {
 func (a *Auth) RequireLoopback(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !IsLoopback(r) {
-			http.Error(w, "forbidden", http.StatusForbidden)
+			writeAPIError(w, http.StatusForbidden, "forbidden", "loopback required")
 			return
 		}
 		next.ServeHTTP(w, r)
@@ -147,7 +147,7 @@ func (a *Auth) CSRF(next http.Handler) http.Handler {
 				return
 			}
 		}
-		http.Error(w, "csrf check failed", http.StatusForbidden)
+		writeAPIError(w, http.StatusForbidden, "forbidden", "csrf check failed")
 	})
 }
 
@@ -156,7 +156,7 @@ func (a *Auth) CSRF(next http.Handler) http.Handler {
 func (a *Auth) Login(w http.ResponseWriter, r *http.Request) {
 	if !a.allowLogin(clientIP(r)) {
 		w.Header().Set("Retry-After", "60")
-		http.Error(w, "too many login attempts", http.StatusTooManyRequests)
+		writeAPIError(w, http.StatusTooManyRequests, "validation", "too many login attempts")
 		return
 	}
 
@@ -165,13 +165,13 @@ func (a *Auth) Login(w http.ResponseWriter, r *http.Request) {
 	}
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxLoginBody))
 	if err := dec.Decode(&in); err != nil {
-		http.Error(w, "invalid request body", http.StatusBadRequest)
+		writeAPIError(w, http.StatusBadRequest, "validation", "invalid request body")
 		return
 	}
 
 	snap := a.repo.Snapshot()
 	if snap == nil || snap.AdminPasswordHash == "" || !settings.VerifyPassword(snap.AdminPasswordHash, in.Password) {
-		http.Error(w, "invalid password", http.StatusUnauthorized)
+		writeAPIError(w, http.StatusUnauthorized, "unauthorized", "invalid password")
 		return
 	}
 
@@ -295,6 +295,17 @@ func (a *Auth) allowLogin(ip string) bool {
 	}
 	v.count++
 	return true
+}
+
+// writeAPIError writes the API error envelope used by every /api failure.
+func writeAPIError(w http.ResponseWriter, status int, code, message string) {
+	writeJSON(w, status, map[string]any{
+		"error": map[string]any{
+			"code":    code,
+			"message": message,
+			"fields":  map[string]string{},
+		},
+	})
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
