@@ -97,33 +97,29 @@ func (h *Hub) Snapshot(window time.Duration) Snapshot {
 	for i := windowS - 1; i >= 0; i-- {
 		sec := end - i
 		s := &h.ring[slotIndex(sec)]
-		if s.second != sec {
-			continue
-		}
-		requests += s.requests
-		errors += s.errors
-		upBytes += s.upBytes
-		downBytes += s.downBytes
-		for b := range s.latency {
-			latency[b] += s.latency[b]
-		}
-		for model, mc := range s.models {
-			acc := models[model]
-			if acc == nil {
-				acc = &modelCount{}
-				models[model] = acc
+		point := SparkPoint{OffsetS: int(sec - end)}
+		if s.second == sec {
+			requests += s.requests
+			errors += s.errors
+			upBytes += s.upBytes
+			downBytes += s.downBytes
+			for b := range s.latency {
+				latency[b] += s.latency[b]
 			}
-			acc.requests += mc.requests
-			acc.errors += mc.errors
+			for model, mc := range s.models {
+				acc := models[model]
+				if acc == nil {
+					acc = &modelCount{}
+					models[model] = acc
+				}
+				acc.requests += mc.requests
+				acc.errors += mc.errors
+			}
+			point.Requests = s.requests
+			point.UpBytes = s.upBytes
+			point.DownBytes = s.downBytes
 		}
-		if s.requests > 0 || s.upBytes > 0 || s.downBytes > 0 {
-			spark = append(spark, SparkPoint{
-				OffsetS:   int(sec - end),
-				Requests:  s.requests,
-				UpBytes:   s.upBytes,
-				DownBytes: s.downBytes,
-			})
-		}
+		spark = append(spark, point)
 	}
 
 	seconds := float64(windowS)

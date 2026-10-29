@@ -192,7 +192,9 @@ func (h *Hub) flush() {
 	cutoff := h.now().Add(-minuteRetention)
 	var deltas []store.MinuteDelta
 	for key, a := range h.minutes {
-		if a.lastActivity.Before(cutoff) {
+		// An idle key may still hold a delta that no flush has published yet;
+		// keep it until it is fully flushed instead of dropping traffic.
+		if a.total == a.flushed && a.lastActivity.Before(cutoff) {
 			delete(h.minutes, key)
 			continue
 		}

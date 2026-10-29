@@ -131,11 +131,53 @@ func TestSnapshotWindowExcludesOldTraffic(t *testing.T) {
 	fresh.CompletedAt = now.Add(-2 * time.Second)
 	h.Finished(h.Started("chat", "m"), fresh)
 
-	if s := h.Snapshot(60 * time.Second); s.QPS != 1.0/60 || len(s.Spark) != 1 || s.Spark[0].OffsetS != -2 || s.Spark[0].Requests != 1 {
+	s := h.Snapshot(60 * time.Second)
+	if s.QPS != 1.0/60 || len(s.Spark) != 60 || sparkRequests(s.Spark) != 1 {
 		t.Fatalf("snapshot = %+v", s)
 	}
-	if s := h.Snapshot(300 * time.Second); s.QPS != 2.0/300 || len(s.Spark) != 2 || s.Spark[0].OffsetS != -61 {
+	if p := s.Spark[57]; p.OffsetS != -2 || p.Requests != 1 {
+		t.Fatalf("spark[-2s] = %+v", p)
+	}
+	s = h.Snapshot(300 * time.Second)
+	if s.QPS != 2.0/300 || len(s.Spark) != 300 || sparkRequests(s.Spark) != 2 {
 		t.Fatalf("snapshot 300 = %+v", s)
+	}
+	if p := s.Spark[238]; p.OffsetS != -61 || p.Requests != 1 {
+		t.Fatalf("spark[-61s] = %+v", p)
+	}
+}
+
+func sparkRequests(points []SparkPoint) int64 {
+	var n int64
+	for _, p := range points {
+		n += p.Requests
+	}
+	return n
+}
+
+func TestSparkOnePointPerSecond(t *testing.T) {
+	now := time.Date(2026, 10, 29, 12, 0, 30, 0, time.UTC)
+	h := New(&fakeSink{}, func() time.Time { return now })
+	s := h.Snapshot(60 * time.Second)
+	if len(s.Spark) != 60 || sparkRequests(s.Spark) != 0 {
+		t.Fatalf("idle spark = %+v", s.Spark)
+	}
+	for i, p := range s.Spark {
+		if p.OffsetS != i-59 || p.Requests != 0 || p.UpBytes != 0 || p.DownBytes != 0 {
+			t.Fatalf("idle spark[%d] = %+v", i, p)
+		}
+	}
+
+	h.Finished(h.Started("chat", "m"), Observation{
+		CompletedAt: now, LocalDay: "2026-10-29", MinuteOfDay: 720,
+		PathClass: "chat", Model: "m", Status: 200, ReqBytes: 3, RespBytes: 4,
+	})
+	s = h.Snapshot(60 * time.Second)
+	if len(s.Spark) != 60 || sparkRequests(s.Spark) != 1 {
+		t.Fatalf("spark = %+v", s.Spark)
+	}
+	if p := s.Spark[59]; p.OffsetS != 0 || p.Requests != 1 || p.UpBytes != 3 || p.DownBytes != 4 {
+		t.Fatalf("spark[0s] = %+v", p)
 	}
 }
 
@@ -166,7 +208,7 @@ func TestSnapshotJSONFieldNames(t *testing.T) {
 	if err := json.Unmarshal(got["spark"], &spark); err != nil {
 		t.Fatal(err)
 	}
-	if len(spark) != 1 {
+	if len(spark) != 60 {
 		t.Fatalf("spark = %s", got["spark"])
 	}
 	for _, key := range []string{"offsetS", "requests", "upBytes", "downBytes"} {
@@ -233,6 +275,31 @@ func TestMinuteAccumulatorSumsAndPrunes(t *testing.T) {
 	h.mu.Unlock()
 	if keys != 1 {
 		t.Fatalf("stale minute keys not pruned: %d", keys)
+	}
+}
+
+func TestPendingDeltaSurvivesRetention(t *testing.T) {
+	sink := &fakeSink{}
+	now := time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)
+	h := New(sink, func() time.Time { return now })
+	h.Finished(h.Started("chat", "m"), Observation{
+		CompletedAt: now, LocalDay: "2026-10-29", MinuteOfDay: 720,
+		PathClass: "chat", Model: "m", Status: 200, ReqBytes: 9,
+	})
+	now = now.Add(3 * time.Minute)
+	h.FlushForTest()
+	if len(sink.deltas) != 1 || sink.deltas[0].Requests != 1 || sink.deltas[0].ReqBytes != 9 {
+		t.Fatalf("deltas = %+v", sink.deltas)
+	}
+	h.FlushForTest()
+	if len(sink.deltas) != 1 {
+		t.Fatalf("pending delta resent: %+v", sink.deltas)
+	}
+	h.mu.Lock()
+	keys := len(h.minutes)
+	h.mu.Unlock()
+	if keys != 0 {
+		t.Fatalf("flushed idle keys not pruned: %d", keys)
 	}
 }
 
