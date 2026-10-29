@@ -258,3 +258,49 @@ func TestUpstreamTest(t *testing.T) {
 		t.Fatalf("snapshot key probe = %d %s", rec.Code, rec.Body.String())
 	}
 }
+
+func TestConfigWritesBlockedBeforeSetup(t *testing.T) {
+	srv := newAPIServer(t, false)
+	rec := doPATCH(t, srv, "/api/settings", `{"retentionDays":30}`)
+	if rec.Code != 409 || !strings.Contains(rec.Body.String(), `"code":"conflict"`) ||
+		!strings.Contains(rec.Body.String(), "setup required") {
+		t.Fatalf("pre-setup patch = %d %s", rec.Code, rec.Body.String())
+	}
+	rec = doPOST(t, srv, "/api/gateway-key/rotate", "")
+	if rec.Code != 409 || !strings.Contains(rec.Body.String(), "setup required") {
+		t.Fatalf("pre-setup rotate = %d %s", rec.Code, rec.Body.String())
+	}
+	rec = doPOST(t, srv, "/api/setup",
+		`{"upstream":{"baseUrl":"https://api.example.com","apiKey":"sk-secret-1234","timeoutS":30}}`)
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"gatewayKey":"sk-local-`) {
+		t.Fatalf("setup after refused writes = %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestTimeoutOverflowRejected(t *testing.T) {
+	// 2^55+1 seconds wraps to 1s when multiplied by time.Second.
+	const overflowing = 36028797018963969
+
+	srv := newAPIServer(t, false)
+	rec := doPOST(t, srv, "/api/setup",
+		fmt.Sprintf(`{"upstream":{"baseUrl":"https://api.example.com","apiKey":"sk-secret-1234","timeoutS":%d}}`, overflowing))
+	if rec.Code != 400 || !strings.Contains(rec.Body.String(), `"timeoutS"`) {
+		t.Fatalf("overflow setup = %d %s", rec.Code, rec.Body.String())
+	}
+	// Setup is still possible afterwards.
+	rec = doPOST(t, srv, "/api/setup",
+		`{"upstream":{"baseUrl":"https://api.example.com","apiKey":"sk-secret-1234","timeoutS":30}}`)
+	if rec.Code != 200 {
+		t.Fatalf("setup after overflow = %d %s", rec.Code, rec.Body.String())
+	}
+
+	seeded := newAPIServerWithSeed(t, true)
+	rec = doPATCH(t, seeded, "/api/settings", fmt.Sprintf(`{"upstream":{"timeoutS":%d}}`, overflowing))
+	if rec.Code != 400 || !strings.Contains(rec.Body.String(), `"timeoutS"`) {
+		t.Fatalf("overflow patch = %d %s", rec.Code, rec.Body.String())
+	}
+	// The stored timeout is untouched.
+	if rec := doGET(t, seeded, "/api/settings"); !strings.Contains(rec.Body.String(), `"timeoutS":30`) {
+		t.Fatalf("timeout changed: %s", rec.Body.String())
+	}
+}
