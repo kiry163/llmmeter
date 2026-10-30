@@ -24,7 +24,21 @@ export interface LineChartProps {
   empty?: boolean;
   emptyLabel?: string;
   className?: string;
+  /**
+   * onEvents binds ECharts event handlers by event name (for example
+   * "click"). Memoize it: the handlers are rebound whenever it changes.
+   */
+  onEvents?: ChartEventHandlers;
 }
+
+/** ChartEventParams is the subset of ECharts event payloads the UI reads. */
+export interface ChartEventParams {
+  seriesName?: string;
+  name?: string;
+  seriesIndex?: number;
+}
+
+export type ChartEventHandlers = Record<string, (params: ChartEventParams) => void>;
 
 /**
  * LineChart owns a single ECharts instance and keeps it sized to its
@@ -38,6 +52,7 @@ export function LineChart({
   empty = false,
   emptyLabel = "暂无数据",
   className = "",
+  onEvents,
 }: LineChartProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<EChartsType | null>(null);
@@ -70,6 +85,20 @@ export function LineChart({
   useEffect(() => {
     chartRef.current?.setOption(option, { notMerge: true });
   }, [option]);
+
+  useEffect(() => {
+    const chart = chartRef.current;
+    if (!chart || !onEvents) return;
+    const entries = Object.entries(onEvents);
+    for (const [name, handler] of entries) {
+      chart.on(name, handler as never);
+    }
+    return () => {
+      for (const [name, handler] of entries) {
+        chart.off(name, handler as never);
+      }
+    };
+  }, [onEvents]);
 
   return (
     <div

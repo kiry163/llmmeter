@@ -17,7 +17,7 @@ func RootHandler(api, spa, gw http.Handler) http.Handler {
 		spa.ServeHTTP(w, r)
 	})
 	mux.Handle("GET /{$}", page)
-	for _, path := range []string{"/logs", "/requests", "/pricing", "/settings", "/setup", "/login"} {
+	for _, path := range []string{"/analysis", "/logs", "/requests", "/pricing", "/settings", "/setup", "/login"} {
 		mux.Handle("GET "+path, page)
 	}
 	mux.Handle("GET /assets/", spa)

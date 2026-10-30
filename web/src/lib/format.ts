@@ -63,6 +63,18 @@ export function formatRate(value: number | null): string {
 }
 
 /**
+ * formatPercent renders a 0–1 ratio as a percentage: one decimal at or above
+ * 10%, two decimals below it, and trailing zeros dropped. Em dash when absent.
+ */
+export function formatPercent(ratio: number): string {
+  if (!Number.isFinite(ratio)) return "—";
+  const percent = ratio * 100;
+  if (percent === 0) return "0%";
+  const fixed = Math.abs(percent) >= 10 ? percent.toFixed(1) : percent.toFixed(2);
+  return `${fixed.replace(/\.?0+$/, "")}%`;
+}
+
+/**
  * formatBytesWithExact renders a byte count and, when different, its exact
  * integer value too. Sub-KiB values render once instead of twice.
  */

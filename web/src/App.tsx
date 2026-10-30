@@ -27,6 +27,7 @@ import {
   notifyUnauthorized,
   safeNext,
 } from "./lib/auth";
+import { Analysis } from "./pages/Analysis";
 import { Logs } from "./pages/Logs";
 import { Login } from "./pages/Login";
 import { Overview } from "./pages/Overview";
@@ -207,6 +208,7 @@ export function App() {
               <Route element={<Layout />}>
                 <Route index element={<Overview />} />
                 <Route path="logs" element={<Logs />} />
+                <Route path="analysis" element={<Analysis />} />
                 <Route path="requests" element={<RedirectKeepSearch to="/logs" />} />
                 <Route path="pricing" element={<RedirectKeepSearch to="/settings" />} />
                 <Route path="settings" element={<Settings />} />
