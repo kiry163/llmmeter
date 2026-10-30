@@ -5,8 +5,8 @@ import { useLive } from "../hooks/useLive";
 
 const navItems = [
   { to: "/", label: "总览", end: true },
-  { to: "/requests", label: "请求", end: false },
-  { to: "/pricing", label: "价格", end: false },
+  { to: "/logs", label: "日志", end: false },
+  { to: "/analysis", label: "分析", end: false },
   { to: "/settings", label: "设置", end: false },
 ];
 
@@ -16,12 +16,16 @@ function navClass({ isActive }: { isActive: boolean }): string {
   return isActive ? `${base} bg-accent/15 text-accent` : `${base} text-muted hover:text-ink`;
 }
 
+const liveLabels = { sse: "实时", poll: "轮询", down: "未连接" } as const;
+const liveDots = { sse: "bg-success", poll: "bg-warning", down: "bg-danger" } as const;
+
+/**
+ * Layout is the app shell: fixed 208px sidebar on desktop, a horizontal
+ * topbar on narrow screens, and a 1440px content column.
+ */
 export function Layout() {
   const bootstrap = useQuery({ queryKey: ["bootstrap"], queryFn: api.bootstrap });
   const { mode } = useLive();
-  const liveLabel = mode === "sse" ? "实时" : mode === "poll" ? "轮询" : "未连接";
-  const liveDot =
-    mode === "sse" ? "bg-success" : mode === "poll" ? "bg-warning" : "bg-danger";
 
   return (
     <div className="min-h-screen bg-surface text-ink md:flex">
@@ -37,13 +41,16 @@ export function Layout() {
             aria-live="polite"
           >
             <span
-              className={`inline-block h-2 w-2 rounded-full ${liveDot}`}
+              className={`inline-block h-2 w-2 rounded-full ${liveDots[mode]}`}
               aria-hidden="true"
             />
-            {liveLabel}
+            {liveLabels[mode]}
           </div>
         </div>
-        <nav className="flex gap-1 overflow-x-auto px-2 pb-2 md:mt-2 md:flex-col md:px-2">
+        <nav
+          className="flex gap-1 overflow-x-auto px-2 pb-2 md:mt-2 md:flex-col md:px-2"
+          aria-label="主导航"
+        >
           {navItems.map((item) => (
             <NavLink key={item.to} to={item.to} end={item.end} className={navClass}>
               {item.label}
@@ -55,8 +62,10 @@ export function Layout() {
           <div>版本 {bootstrap.data?.version ?? "…"}</div>
         </div>
       </aside>
-      <main className="min-w-0 flex-1 p-4 pb-24 md:p-6 md:pb-6">
-        <Outlet />
+      <main className="min-w-0 flex-1">
+        <div className="mx-auto w-full max-w-[1440px] p-4 pb-24 md:p-6 md:pb-6">
+          <Outlet />
+        </div>
       </main>
     </div>
   );

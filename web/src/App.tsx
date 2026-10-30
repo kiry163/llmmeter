@@ -29,7 +29,6 @@ import {
 } from "./lib/auth";
 import { Login } from "./pages/Login";
 import { Overview } from "./pages/Overview";
-import { Pricing } from "./pages/Pricing";
 import { Requests } from "./pages/Requests";
 import { Settings } from "./pages/Settings";
 import { Setup } from "./pages/Setup";
@@ -186,6 +185,15 @@ function UnauthorizedRedirect() {
   return null;
 }
 
+/**
+ * RedirectKeepSearch moves an old route to its replacement without dropping
+ * the query string (range and filter state survive the migration).
+ */
+function RedirectKeepSearch({ to }: { to: string }) {
+  const { search, hash } = useLocation();
+  return <Navigate to={{ pathname: to, search, hash }} replace />;
+}
+
 export function App() {
   return (
     <QueryClientProvider client={queryClient}>
@@ -198,8 +206,9 @@ export function App() {
               <Route path="login" element={<Login />} />
               <Route element={<Layout />}>
                 <Route index element={<Overview />} />
-                <Route path="requests" element={<Requests />} />
-                <Route path="pricing" element={<Pricing />} />
+                <Route path="logs" element={<Requests />} />
+                <Route path="requests" element={<RedirectKeepSearch to="/logs" />} />
+                <Route path="pricing" element={<RedirectKeepSearch to="/settings" />} />
                 <Route path="settings" element={<Settings />} />
               </Route>
             </Route>

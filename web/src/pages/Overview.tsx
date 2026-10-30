@@ -6,9 +6,8 @@ import { useSearchParams } from "react-router-dom";
 import { api } from "../api/client";
 import type { BreakdownRow, Interval, LiveSparkPoint, SeriesPoint } from "../api/types";
 import { LineChart } from "../components/charts";
+import { RangeBar } from "../components/RangeBar";
 import { StatCard } from "../components/StatCard";
-import { TimeRange } from "../components/TimeRange";
-import type { RangeSelection } from "../components/TimeRange";
 import { Badge, Card, ErrorText, Spinner } from "../components/ui";
 import { useLive } from "../hooks/useLive";
 import { useTimezone } from "../hooks/useTimezone";
@@ -19,8 +18,8 @@ import {
   formatOptionalDuration,
   formatTokens,
 } from "../lib/format";
-import { autoInterval, isDateString, isRangePreset, presetRange, rangeDays } from "../lib/range";
-import type { RangePreset } from "../lib/range";
+import { autoInterval, parseRangeSelection, rangeDays } from "../lib/range";
+import type { RangeSelection } from "../lib/range";
 
 type MetricKey = "traffic" | "requests" | "tokens" | "cost";
 
@@ -66,7 +65,6 @@ const INTERVAL_LABELS: Record<Interval, string> = {
   day: "按天",
 };
 
-const DEFAULT_RANGE_PRESET: RangePreset = "7d";
 const DEFAULT_METRIC: MetricKey = "traffic";
 
 const CHART_PALETTE = ["#4f7cf7", "#f59e0b", "#10b981", "#ef4444"];
@@ -132,20 +130,6 @@ const BREAKDOWN_COLUMNS: readonly BreakdownColumn[] = [
     render: (row) => formatTokens(row.unpriced),
   },
 ];
-
-function parseRangeSelection(params: URLSearchParams, timeZone?: string): RangeSelection {
-  const raw = params.get("range");
-  const preset = isRangePreset(raw) ? raw : DEFAULT_RANGE_PRESET;
-  if (preset === "custom") {
-    const from = params.get("from");
-    const to = params.get("to");
-    if (isDateString(from) && isDateString(to) && from <= to) {
-      return { preset, from, to };
-    }
-    return { preset, ...presetRange("7d", new Date(), timeZone) };
-  }
-  return { preset, ...presetRange(preset, new Date(), timeZone) };
-}
 
 function parseMetric(params: URLSearchParams): MetricKey {
   const raw = params.get("metric") ?? "";
@@ -448,7 +432,7 @@ export function Overview() {
       </header>
 
       <div className="rounded-lg border border-line bg-surface-raised p-3">
-        <TimeRange value={selection} onChange={updateRange} timeZone={timeZone} />
+        <RangeBar value={selection} onChange={updateRange} timeZone={timeZone} />
       </div>
 
       <section className="space-y-3" aria-labelledby="live-heading">

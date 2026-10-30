@@ -1,12 +1,9 @@
+import type { ReactElement } from "react";
 import { presetRange, RANGE_LABELS, RANGE_PRESETS } from "../lib/range";
-import type { DateRange, RangePreset } from "../lib/range";
+import type { RangeSelection } from "../lib/range";
 import { Button, Input } from "./ui";
 
-export interface RangeSelection extends DateRange {
-  preset: RangePreset;
-}
-
-export interface TimeRangeProps {
+export interface RangeBarProps {
   value: RangeSelection;
   onChange: (next: RangeSelection) => void;
   /** timeZone is the configured zone presets are resolved in. */
@@ -14,8 +11,16 @@ export interface TimeRangeProps {
   className?: string;
 }
 
-/** TimeRange renders the preset shortcuts and the editable date bounds. */
-export function TimeRange({ value, onChange, timeZone, className = "" }: TimeRangeProps) {
+/**
+ * RangeBar renders the range shortcuts and editable date bounds. It owns no
+ * data fetching: callers keep the selection in the URL and refetch on change.
+ */
+export function RangeBar({
+  value,
+  onChange,
+  timeZone,
+  className = "",
+}: RangeBarProps): ReactElement {
   return (
     <div
       className={`flex flex-col gap-2 lg:flex-row lg:items-center lg:justify-between ${className}`}

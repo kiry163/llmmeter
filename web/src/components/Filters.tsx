@@ -6,7 +6,7 @@ import {
   USAGE_STATUS_LABELS,
 } from "../lib/query";
 import type { PricedFilter, RequestsFilters } from "../lib/query";
-import { TimeRange } from "./TimeRange";
+import { RangeBar } from "./RangeBar";
 import { Button, Input, Select } from "./ui";
 
 export interface FiltersProps {
@@ -58,7 +58,7 @@ function StatusInput({ value, onChange }: { value: string; onChange: (next: stri
 export function Filters({ filters, models, onChange, onReset, className = "" }: FiltersProps) {
   return (
     <div className={`space-y-3 ${className}`}>
-      <TimeRange
+      <RangeBar
         value={{ preset: filters.preset, from: filters.from, to: filters.to }}
         onChange={(selection) => onChange({ ...filters, ...selection })}
       />

@@ -1,5 +1,5 @@
 import { expect, it } from "vitest";
-import { autoInterval, presetRange } from "./range";
+import { autoInterval, parseRangeSelection, presetRange } from "./range";
 
 it("picks interval by span", () => {
   expect(autoInterval(1)).toBe("minute");
@@ -25,4 +25,21 @@ it("resolves presets in the configured zone, not the browser zone", () => {
   expect(presetRange("24h", at, "Asia/Shanghai")).toEqual({
     from: "2026-10-29", to: "2026-10-30",
   });
+});
+
+it("reads custom bounds from the URL", () => {
+  expect(
+    parseRangeSelection(new URLSearchParams("range=custom&from=2026-10-01&to=2026-10-07")),
+  ).toEqual({ preset: "custom", from: "2026-10-01", to: "2026-10-07" });
+});
+
+it("falls back for incomplete or reversed custom bounds", () => {
+  const reversed = parseRangeSelection(
+    new URLSearchParams("range=custom&from=2026-10-09&to=2026-10-07"),
+  );
+  expect(reversed.preset).toBe("custom");
+  expect(reversed.from <= reversed.to).toBe(true);
+
+  const unknown = parseRangeSelection(new URLSearchParams("range=bogus"));
+  expect(unknown.preset).toBe("7d");
 });

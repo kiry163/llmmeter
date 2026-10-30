@@ -1,5 +1,5 @@
 import type { RequestParams } from "../api/client";
-import { isDateString, isRangePreset, presetRange } from "./range";
+import { DEFAULT_RANGE_PRESET, isDateString, isRangePreset, presetRange } from "./range";
 import type { RangePreset } from "./range";
 
 /** REQUESTS_PAGE_LIMIT is the page size used by the explorer. */
@@ -41,8 +41,6 @@ export const PRICED_FILTER_LABELS: Record<PricedFilter, string> = {
   priced: "已定价",
   unpriced: "未定价",
 };
-
-const DEFAULT_RANGE_PRESET: RangePreset = "7d";
 
 /** RequestsFilters is the filter set persisted in the URL. */
 export interface RequestsFilters {

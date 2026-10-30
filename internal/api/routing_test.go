@@ -20,6 +20,7 @@ func TestRootRouting(t *testing.T) {
 		{"/api", "api"},
 		{"/assets/index.js", "spa"},
 		{"/", "spa"},
+		{"/logs", "spa"},
 		{"/requests", "spa"},
 		{"/pricing", "spa"},
 		{"/settings", "spa"},
