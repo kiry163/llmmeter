@@ -7,6 +7,16 @@ import type { EChartsCoreOption, EChartsType } from "echarts/core";
 
 use([EChartsLineChart, GridComponent, TooltipComponent, LegendComponent, CanvasRenderer]);
 
+/** Shared chart theme: sequential palette, muted axis ink and tooltip surface. */
+export const CHART_PALETTE = ["#4f7cf7", "#f59e0b", "#10b981", "#ef4444"];
+export const CHART_MUTED = "#8b95a5";
+export const CHART_GRID = "rgba(139, 149, 165, 0.22)";
+export const CHART_TOOLTIP = {
+  backgroundColor: "rgba(17, 24, 39, 0.92)",
+  borderWidth: 0,
+  textStyle: { color: "#f8fafc", fontSize: 12 },
+};
+
 export interface LineChartProps {
   option: EChartsCoreOption;
   ariaLabel: string;

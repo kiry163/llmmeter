@@ -7,6 +7,13 @@ it("picks interval by span", () => {
   expect(autoInterval(30)).toBe("day");
 });
 
+it("auto interval boundaries", () => {
+  expect(autoInterval(2)).toBe("minute");
+  expect(autoInterval(3)).toBe("hour");
+  expect(autoInterval(7)).toBe("hour");
+  expect(autoInterval(8)).toBe("day");
+});
+
 it("builds preset ranges", () => {
   expect(presetRange("7d", new Date(2026, 9, 29))).toEqual({
     from: "2026-10-23", to: "2026-10-29",
