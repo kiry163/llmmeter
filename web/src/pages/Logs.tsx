@@ -30,10 +30,7 @@ import {
 import type { RequestsFilters } from "../lib/query";
 import { presetRange } from "../lib/range";
 import { tokensPerSecond } from "../lib/speed";
-import { usageLabel, usageTone } from "../lib/usage";
-
-const TOO_LARGE_HINT =
-  "请求体、响应体或 SSE 单行超过解析上限；字节与转发正常，tokens 与成本未解析。";
+import { TOO_LARGE_HINT, usageLabel, usageTone } from "../lib/usage";
 
 const SKELETON_ROWS = [0, 1, 2, 3, 4, 5];
 

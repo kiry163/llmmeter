@@ -13,7 +13,7 @@ import {
   formatTokens,
 } from "../lib/format";
 import { tokensPerSecond } from "../lib/speed";
-import { usageLabel, usageTone } from "../lib/usage";
+import { TOO_LARGE_HINT, usageLabel, usageTone } from "../lib/usage";
 import { Badge, Drawer, ErrorText, Spinner } from "./ui";
 
 function statusTone(status: number): "success" | "warning" | "danger" {
@@ -143,9 +143,14 @@ function RequestBody({ record, timeZone }: { record: RequestRecord; timeZone?: s
         <Row
           label="用量状态"
           value={
-            <Badge tone={usageTone(record.usageStatus)}>{usageLabel(record.usageStatus)}</Badge>
+            <span title={record.usageStatus === "too_large" ? TOO_LARGE_HINT : undefined}>
+              <Badge tone={usageTone(record.usageStatus)}>{usageLabel(record.usageStatus)}</Badge>
+            </span>
           }
         />
+        {record.usageStatus === "too_large" && (
+          <p className="pb-2 text-xs text-muted">{TOO_LARGE_HINT}</p>
+        )}
         <Row label="客户端断开" value={record.clientDisconnected ? "是" : "否"} />
         <Row
           label="错误"

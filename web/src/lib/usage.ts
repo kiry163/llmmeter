@@ -25,6 +25,10 @@ export function usageLabel(status: string): string {
   return usageLabels[status] ?? status;
 }
 
+/** TOO_LARGE_HINT explains too_large wherever the status is shown. */
+export const TOO_LARGE_HINT =
+  "请求体、响应体或 SSE 单行超过解析上限；字节与转发正常，tokens 与成本未解析。";
+
 /** usageTone maps a usage status to a badge tone; unknown is neutral. */
 export function usageTone(status: string): UsageTone {
   return usageTones[status] ?? "neutral";
