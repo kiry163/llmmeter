@@ -65,6 +65,7 @@ type RequestFilter struct {
 	Status      *int
 	UsageStatus *string
 	Priced      *bool
+	Stream      *bool
 	BeforeID    int64
 	Limit       int
 }
@@ -386,6 +387,10 @@ func (s *Store) Requests(f RequestFilter) ([]Record, error) {
 	if f.Priced != nil {
 		q += " AND priced = ?"
 		args = append(args, boolInt(*f.Priced))
+	}
+	if f.Stream != nil {
+		q += " AND stream = ?"
+		args = append(args, boolInt(*f.Stream))
 	}
 	if f.BeforeID > 0 {
 		q += " AND id < ?"
