@@ -14,6 +14,11 @@ export interface DataTableProps<T> {
   rowKey: (row: T) => string;
   onRowClick?: (row: T) => void;
   empty?: ReactNode;
+  /**
+   * scrollClassName is appended to the scroll wrapper. Give it a max height to
+   * turn the wrapper into a real scroll container so the header can pin.
+   */
+  scrollClassName?: string;
 }
 
 /**
@@ -26,9 +31,10 @@ export function DataTable<T>({
   rowKey,
   onRowClick,
   empty,
+  scrollClassName = "",
 }: DataTableProps<T>): ReactElement {
   return (
-    <div className="overflow-x-auto">
+    <div className={`overflow-x-auto ${scrollClassName}`}>
       <table className="w-full text-left text-sm">
         <thead className="sticky top-0 z-10 bg-surface-raised text-xs text-muted">
           <tr className="border-b border-line">
