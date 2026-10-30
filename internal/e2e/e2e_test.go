@@ -103,6 +103,12 @@ func TestEndToEndAccountingAndAPI(t *testing.T) {
 	var hits2 atomic.Int64
 	upstream2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hits2.Add(1)
+		// The model catalog probes /models; fail it so the catalog has to
+		// report an upstream error while still serving observed traffic.
+		if r.URL.Path == "/models" || r.URL.Path == "/v1/models" {
+			http.Error(w, "boom: sk-up", http.StatusInternalServerError)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		io.WriteString(w, `{"model":"m","usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`)
 	}))
@@ -170,5 +176,86 @@ func TestEndToEndAccountingAndAPI(t *testing.T) {
 	}
 	if live < 2 {
 		t.Fatalf("live snapshot requests = %d", live)
+	}
+
+	// Model catalog: the upstream listing fails, but the endpoint must still
+	// answer 200 with the observed model and a redacted upstream error.
+	rec = httptest.NewRecorder()
+	root.ServeHTTP(rec, localRequest("GET", "/api/model-catalog", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("catalog = %d %s", rec.Code, rec.Body.String())
+	}
+	catalogJSON := rec.Body.String()
+	if strings.Contains(catalogJSON, "sk-up") {
+		t.Fatalf("catalog leaked the upstream API key: %s", catalogJSON)
+	}
+	var catalog struct {
+		Upstream []json.RawMessage `json:"upstream"`
+		Observed []struct {
+			Model string `json:"model"`
+		} `json:"observed"`
+		UpstreamError string `json:"upstreamError"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &catalog); err != nil {
+		t.Fatal(err)
+	}
+	observed := false
+	for _, o := range catalog.Observed {
+		if o.Model == "m" {
+			observed = true
+		}
+	}
+	if catalog.Upstream == nil || catalog.Observed == nil {
+		t.Fatalf("catalog arrays missing: %s", catalogJSON)
+	}
+	if !observed || catalog.UpstreamError == "" {
+		t.Fatalf("catalog observed=%v error=%q: %s", observed, catalog.UpstreamError, catalogJSON)
+	}
+
+	// Analysis: the recorded traffic shows up in the aggregated sections.
+	// The minute aggregates live in the hub until its next flush.
+	hub.FlushForTest()
+	if err := st.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	today := time.Now().UTC().Format("2006-01-02")
+	rec = httptest.NewRecorder()
+	root.ServeHTTP(rec, localRequest("GET",
+		"/api/analysis?from="+today+"&to="+today+"&interval=auto", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("analysis = %d %s", rec.Code, rec.Body.String())
+	}
+	var analysis struct {
+		Range struct {
+			Interval string `json:"interval"`
+		} `json:"range"`
+		Trend  []json.RawMessage `json:"trend"`
+		Models []struct {
+			Key string `json:"key"`
+		} `json:"models"`
+		Paths []struct {
+			Key string `json:"key"`
+		} `json:"paths"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &analysis); err != nil {
+		t.Fatal(err)
+	}
+	if analysis.Range.Interval == "" || analysis.Trend == nil ||
+		analysis.Models == nil || analysis.Paths == nil {
+		t.Fatalf("analysis shape = %s", rec.Body.String())
+	}
+	hasModel, hasPath := false, false
+	for _, m := range analysis.Models {
+		if m.Key == "m" {
+			hasModel = true
+		}
+	}
+	for _, p := range analysis.Paths {
+		if p.Key == "chat" {
+			hasPath = true
+		}
+	}
+	if !hasModel || !hasPath {
+		t.Fatalf("analysis missing recorded traffic: %s", rec.Body.String())
 	}
 }
