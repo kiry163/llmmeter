@@ -1,4 +1,5 @@
 import type {
+  AnalysisBody,
   ApiError as ApiErrorShape,
   ApiErrorCode,
   Bootstrap,
@@ -6,10 +7,12 @@ import type {
   BreakdownBy,
   GatewayKeyResponse,
   Health,
+  ImportModelsResult,
   Interval,
   LiveSnapshot,
   Me,
   Model,
+  ModelCatalog,
   ModelInput,
   ModelPatch,
   ModelsResponse,
@@ -157,12 +160,17 @@ export interface BreakdownParams extends RangeParams {
   by: BreakdownBy;
 }
 
+export interface AnalysisParams extends RangeParams {
+  interval?: Interval;
+}
+
 export interface RequestParams extends RangeParams {
   model?: string;
   pathClass?: string;
   status?: number;
   usageStatus?: string;
   priced?: boolean;
+  stream?: boolean;
   beforeId?: number;
   limit?: number;
 }
@@ -187,6 +195,11 @@ export const api = {
       `/breakdown${query({ from: params.from, to: params.to, by: params.by })}`,
     ),
 
+  getAnalysis: (params: AnalysisParams = {}): Promise<AnalysisBody> =>
+    request<AnalysisBody>(
+      `/analysis${query({ from: params.from, to: params.to, interval: params.interval })}`,
+    ),
+
   getRequests: (params: RequestParams = {}): Promise<RequestsPage> =>
     request<RequestsPage>(
       `/requests${query({
@@ -197,6 +210,7 @@ export const api = {
         status: params.status,
         usageStatus: params.usageStatus,
         priced: params.priced,
+        stream: params.stream,
         before_id: params.beforeId,
         limit: params.limit,
       })}`,
@@ -204,10 +218,21 @@ export const api = {
 
   getRequest: (id: number): Promise<RequestRecord> => request<RequestRecord>(`/requests/${id}`),
 
+  getModelCatalog: (refresh = false): Promise<ModelCatalog> =>
+    request<ModelCatalog>(
+      `/model-catalog${query({ refresh: refresh ? 1 : undefined })}`,
+    ),
+
   getModels: (): Promise<ModelsResponse> => request<ModelsResponse>("/models"),
 
   createModel: (input: ModelInput): Promise<Model> =>
     request<Model>("/models", { method: "POST", body: JSON.stringify(input) }),
+
+  importModels: (names: string[]): Promise<ImportModelsResult> =>
+    request<ImportModelsResult>("/models/import", {
+      method: "POST",
+      body: JSON.stringify({ names }),
+    }),
 
   updateModel: (id: number, patch: ModelPatch): Promise<Model> =>
     request<Model>(`/models/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),

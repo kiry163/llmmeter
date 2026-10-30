@@ -5,6 +5,7 @@ import {
   formatCost,
   formatDuration,
   formatOptionalDuration,
+  formatRate,
 } from "./format";
 
 describe("format", () => {
@@ -25,5 +26,10 @@ describe("format", () => {
     expect(formatDuration(65_000)).toBe("1m 5s");
     expect(formatOptionalDuration(null)).toBe("—");
     expect(formatOptionalDuration(900)).toBe("900ms");
+  });
+  it("formats rates and handles null", () => {
+    expect(formatRate(null)).toBe("—");
+    expect(formatRate(129.09)).toBe("129.1 t/s");
+    expect(formatRate(0)).toBe("0.0 t/s");
   });
 });

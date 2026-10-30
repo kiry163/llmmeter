@@ -56,6 +56,12 @@ export function formatOptionalDuration(ms: number | null | undefined): string {
   return ms == null ? "—" : formatDuration(ms);
 }
 
+/** formatRate renders tokens per second with one decimal, em dash when absent. */
+export function formatRate(value: number | null): string {
+  if (value === null || !Number.isFinite(value)) return "—";
+  return `${value.toFixed(1)} t/s`;
+}
+
 /**
  * formatBytesWithExact renders a byte count and, when different, its exact
  * integer value too. Sub-KiB values render once instead of twice.

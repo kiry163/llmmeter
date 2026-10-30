@@ -54,6 +54,7 @@ export interface RequestsFilters {
   status: string;
   usageStatus: UsageStatusFilter | "";
   priced: PricedFilter;
+  stream?: "all" | "stream" | "nonstream";
 }
 
 /**
