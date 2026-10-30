@@ -37,6 +37,7 @@ import {
   formatTime,
   formatTokens,
 } from "../lib/format";
+import { filterModelRows, parseModelFilter, trendHasModel } from "../lib/analysis";
 import { autoInterval, parseRangeSelection, rangeDays } from "../lib/range";
 import type { RangeSelection } from "../lib/range";
 
@@ -146,6 +147,7 @@ function buildTrendOption(
   buckets: AnalysisTrendBucket[],
   interval: Interval,
   metric: MetricKey,
+  modelFilter: string,
 ): EChartsCoreOption {
   const formatter = METRIC_FORMATTERS[metric];
   const totals = new Map<string, number>();
@@ -154,9 +156,13 @@ function buildTrendOption(
       totals.set(model, (totals.get(model) ?? 0) + metricValue(stats, metric));
     }
   }
-  const models = [...totals.keys()].sort(
-    (left, right) => (totals.get(right) ?? 0) - (totals.get(left) ?? 0),
-  );
+  const models = modelFilter
+    ? trendHasModel(buckets, modelFilter)
+      ? [modelFilter]
+      : []
+    : [...totals.keys()].sort(
+        (left, right) => (totals.get(right) ?? 0) - (totals.get(left) ?? 0),
+      );
 
   return {
     animationDuration: 250,
@@ -319,11 +325,7 @@ function HealthSection({
   return (
     <Card title="异常与慢请求">
       <div className="grid grid-cols-2 gap-2 lg:grid-cols-4">
-        <Metric
-          label="请求"
-          value={formatTokens(health.requests)}
-          hint={partial ? "仅保留期内" : undefined}
-        />
+        <Metric label="请求" value={formatTokens(health.requests)} />
         <Metric
           label="错误"
           value={formatTokens(health.errors)}
@@ -333,20 +335,26 @@ function HealthSection({
         <Metric
           label="未计量"
           value={formatTokens(health.unmetered)}
-          hint="用量未解析"
+          hint={partial ? "用量未解析 · 仅保留期内" : "用量未解析"}
         />
         <Metric
           label="未解析（响应过大）"
           value={formatTokens(health.tooLarge)}
-          hint="点击查看日志"
+          hint={partial ? "仅保留期内 · 点击查看日志" : "点击查看日志"}
           onClick={() => onOpenLogs({ usageStatus: "too_large" })}
         />
         <Metric
           label="客户端断开"
           value={formatTokens(health.clientDisconnected)}
-          hint="请求未完成即断开"
+          hint={partial ? "请求未完成即断开 · 仅保留期内" : "请求未完成即断开"}
         />
-        <Metric label="慢请求" value={formatTokens(health.slow.countOver)} hint={`总耗时 ${slowHint}`} />
+        <Metric
+          label="慢请求"
+          value={formatTokens(health.slow.countOver)}
+          hint={
+            partial ? `总耗时 ${slowHint} · 仅保留期内` : `总耗时 ${slowHint}`
+          }
+        />
         <Metric
           label="P95 总耗时"
           value={health.slow.p95Ms === null ? "—" : formatDuration(health.slow.p95Ms)}
@@ -390,6 +398,7 @@ export function Analysis(): ReactElement {
   );
   const metric = parseMetric(searchParams);
   const topTab = parseTopTab(searchParams);
+  const modelFilter = parseModelFilter(searchParams);
   const interval = autoInterval(rangeDays(selection));
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [modelSort, setModelSort] = useState<RankSort | null>(null);
@@ -406,8 +415,8 @@ export function Analysis(): ReactElement {
   const partial = data?.range.partial ?? false;
 
   const trendOption = useMemo(
-    () => buildTrendOption(data?.trend ?? [], interval, metric),
-    [data?.trend, interval, metric],
+    () => buildTrendOption(data?.trend ?? [], interval, metric, modelFilter),
+    [data?.trend, interval, metric, modelFilter],
   );
 
   const openLogs = useCallback(
@@ -445,11 +454,12 @@ export function Analysis(): ReactElement {
     );
   };
 
-  const updateParam = (key: string, value: string) => {
+  const updateParam = (key: string, value: string | null) => {
     setSearchParams(
       (current) => {
         const params = new URLSearchParams(current);
-        params.set(key, value);
+        if (value === null) params.delete(key);
+        else params.set(key, value);
         return params;
       },
       { replace: true },
@@ -460,13 +470,13 @@ export function Analysis(): ReactElement {
   const effectivePathSort = effectiveSort(pathSort, metric);
 
   const modelRows = useMemo(() => {
-    const rows = [...(data?.models ?? [])];
+    const rows = filterModelRows(data?.models ?? [], modelFilter);
     rows.sort((left, right) => {
       const diff = rankValue(left, effectiveModelSort.key) - rankValue(right, effectiveModelSort.key);
       return effectiveModelSort.direction === "desc" ? -diff : diff;
     });
     return rows;
-  }, [data?.models, effectiveModelSort]);
+  }, [data?.models, effectiveModelSort, modelFilter]);
 
   const pathRows = useMemo(() => {
     const rows = [...(data?.paths ?? [])];
@@ -594,6 +604,19 @@ export function Analysis(): ReactElement {
               {selection.from} 至 {selection.to} · {INTERVAL_LABELS[interval]}
             </span>
             {partial && <Badge tone="warning">仅保留期内</Badge>}
+            {modelFilter && (
+              <span className="inline-flex items-center gap-1 rounded-full bg-accent/15 px-2 py-0.5 text-xs font-medium text-accent">
+                模型：{modelFilter}
+                <button
+                  type="button"
+                  onClick={() => updateParam("model", null)}
+                  aria-label={`移除模型筛选 ${modelFilter}`}
+                  className="rounded-full px-1 leading-none hover:bg-accent/20"
+                >
+                  ×
+                </button>
+              </span>
+            )}
             {analysis.isFetching && (
               <span className="text-xs text-muted" role="status">
                 更新中…
@@ -649,8 +672,13 @@ export function Analysis(): ReactElement {
                 option={trendOption}
                 ariaLabel={`按模型拆分的${METRIC_LABELS[metric]}趋势图`}
                 height={320}
-                empty={data.trend.length === 0}
-                emptyLabel="该区间暂无数据"
+                empty={
+                  data.trend.length === 0 ||
+                  (modelFilter !== "" && !trendHasModel(data.trend, modelFilter))
+                }
+                emptyLabel={
+                  modelFilter ? `该区间无模型 ${modelFilter} 的数据` : "该区间暂无数据"
+                }
                 onEvents={trendEvents}
               />
             </Card>
@@ -714,7 +742,13 @@ export function Analysis(): ReactElement {
               rows={modelRows}
               rowKey={(row) => row.key || UNKNOWN_KEY}
               onRowClick={(row) => openLogs(row.key ? { model: row.key } : {})}
-              empty={<span className="text-sm text-muted">该区间暂无数据</span>}
+              empty={
+                <span className="text-sm text-muted">
+                  {modelFilter
+                    ? `该区间无模型 ${modelFilter} 的记录`
+                    : "该区间暂无数据"}
+                </span>
+              }
             />
           </Card>
 
