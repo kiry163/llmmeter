@@ -17,7 +17,7 @@ import (
 
 func TestSetupOnceAndMasking(t *testing.T) {
 	srv := newAPIServer(t, false)
-	body := `{"upstream":{"baseUrl":"https://api.example.com","apiKey":"sk-secret-1234","timeoutS":30},"timezone":"Asia/Shanghai","adminPassword":"hunter22"}`
+	body := `{"upstream":{"baseUrl":"https://api.example.com","apiKey":"sk-secret-1234"},"timezone":"Asia/Shanghai","adminPassword":"hunter22"}`
 	rec := doPOST(t, srv, "/api/setup", body)
 	if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"gatewayKey":"sk-local-`) {
 		t.Fatalf("setup = %d %s", rec.Code, rec.Body.String())
@@ -140,12 +140,9 @@ func TestModelsCRUDAndWindows(t *testing.T) {
 
 func TestSettingsPatchAndRotation(t *testing.T) {
 	srv := newAPIServerWithSeed(t, true)
-	rec := doPATCH(t, srv, "/api/settings", `{"retentionDays":30,"upstream":{"timeoutS":60}}`)
+	rec := doPATCH(t, srv, "/api/settings", `{"retentionDays":30,"upstream":{"baseUrl":"https://api.example.com"}}`)
 	if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"retentionDays":30`) {
 		t.Fatalf("patch = %d %s", rec.Code, rec.Body.String())
-	}
-	if !strings.Contains(rec.Body.String(), `"timeoutS":60`) {
-		t.Fatalf("timeoutS not applied: %s", rec.Body.String())
 	}
 	rec = doPATCH(t, srv, "/api/settings", `{"retentionDays":1}`)
 	if rec.Code != 400 {
@@ -272,37 +269,9 @@ func TestConfigWritesBlockedBeforeSetup(t *testing.T) {
 		t.Fatalf("pre-setup rotate = %d %s", rec.Code, rec.Body.String())
 	}
 	rec = doPOST(t, srv, "/api/setup",
-		`{"upstream":{"baseUrl":"https://api.example.com","apiKey":"sk-secret-1234","timeoutS":30}}`)
+		`{"upstream":{"baseUrl":"https://api.example.com","apiKey":"sk-secret-1234"}}`)
 	if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"gatewayKey":"sk-local-`) {
 		t.Fatalf("setup after refused writes = %d %s", rec.Code, rec.Body.String())
-	}
-}
-
-func TestTimeoutOverflowRejected(t *testing.T) {
-	// 2^55+1 seconds wraps to 1s when multiplied by time.Second.
-	const overflowing = 36028797018963969
-
-	srv := newAPIServer(t, false)
-	rec := doPOST(t, srv, "/api/setup",
-		fmt.Sprintf(`{"upstream":{"baseUrl":"https://api.example.com","apiKey":"sk-secret-1234","timeoutS":%d}}`, overflowing))
-	if rec.Code != 400 || !strings.Contains(rec.Body.String(), `"timeoutS"`) {
-		t.Fatalf("overflow setup = %d %s", rec.Code, rec.Body.String())
-	}
-	// Setup is still possible afterwards.
-	rec = doPOST(t, srv, "/api/setup",
-		`{"upstream":{"baseUrl":"https://api.example.com","apiKey":"sk-secret-1234","timeoutS":30}}`)
-	if rec.Code != 200 {
-		t.Fatalf("setup after overflow = %d %s", rec.Code, rec.Body.String())
-	}
-
-	seeded := newAPIServerWithSeed(t, true)
-	rec = doPATCH(t, seeded, "/api/settings", fmt.Sprintf(`{"upstream":{"timeoutS":%d}}`, overflowing))
-	if rec.Code != 400 || !strings.Contains(rec.Body.String(), `"timeoutS"`) {
-		t.Fatalf("overflow patch = %d %s", rec.Code, rec.Body.String())
-	}
-	// The stored timeout is untouched.
-	if rec := doGET(t, seeded, "/api/settings"); !strings.Contains(rec.Body.String(), `"timeoutS":30`) {
-		t.Fatalf("timeout changed: %s", rec.Body.String())
 	}
 }
 

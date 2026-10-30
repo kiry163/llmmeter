@@ -55,7 +55,7 @@ func newTestGateway(t *testing.T, upstreamURL string) (*gateway.Gateway, *store.
 		t.Fatal(err)
 	}
 	if _, err := repo.Setup(ctx, settings.SetupInput{
-		Upstream: settings.Upstream{BaseURL: upstreamURL, APIKey: "sk-up", Timeout: 10 * time.Second},
+		Upstream: settings.Upstream{BaseURL: upstreamURL, APIKey: "sk-up"},
 		Timezone: "UTC",
 	}); err != nil {
 		t.Fatal(err)

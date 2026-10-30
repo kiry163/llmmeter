@@ -2,20 +2,66 @@ import { LineChart as EChartsLineChart } from "echarts/charts";
 import { GridComponent, LegendComponent, TooltipComponent } from "echarts/components";
 import { init, use } from "echarts/core";
 import { CanvasRenderer } from "echarts/renderers";
-import { useEffect, useRef } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import type { EChartsCoreOption, EChartsType } from "echarts/core";
+import { readTheme, useTheme } from "../lib/theme";
 
 use([EChartsLineChart, GridComponent, TooltipComponent, LegendComponent, CanvasRenderer]);
 
-/** Shared chart theme: sequential palette, muted axis ink and tooltip surface. */
-export const CHART_PALETTE = ["#4f7cf7", "#f59e0b", "#10b981", "#ef4444"];
-export const CHART_MUTED = "#8b95a5";
-export const CHART_GRID = "rgba(139, 149, 165, 0.22)";
+export const CHART_PALETTE = ["#38e8ff", "#8b7bff", "#3ddc97", "#ffb454", "#ff7ab6", "#7aa2ff"];
+export const CHART_MUTED = "#8d99ad";
+export const CHART_GRID = "rgba(148, 163, 184, 0.15)";
 export const CHART_TOOLTIP = {
-  backgroundColor: "rgba(17, 24, 39, 0.92)",
-  borderWidth: 0,
-  textStyle: { color: "#f8fafc", fontSize: 12 },
+  backgroundColor: "rgba(13, 19, 28, 0.96)",
+  borderWidth: 1,
+  borderColor: "rgba(148, 163, 184, 0.26)",
+  textStyle: { color: "#e8eef8", fontSize: 12 },
 };
+
+export interface ChartTheme {
+  palette: string[];
+  muted: string;
+  grid: string;
+  text: string;
+  surface: string;
+  border: string;
+  fontFamily: string;
+}
+
+function css(name: string, fallback: string): string {
+  if (typeof document === "undefined") return fallback;
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fallback;
+}
+
+/** useChartTheme reads the CSS tokens so canvas colors follow the theme. */
+export function useChartTheme(): ChartTheme {
+  const theme = useTheme();
+  return useMemo(() => {
+    void theme;
+    return {
+      palette: [1, 2, 3, 4, 5, 6].map((n) => css(`--c${n}`, CHART_PALETTE[n - 1])),
+      muted: css("--muted", CHART_MUTED),
+      grid: css("--line", CHART_GRID),
+      text: css("--fg", "#e8eef8"),
+      surface: css("--panel-solid", "#0d131c"),
+      border: css("--line-strong", "rgba(148,163,184,.26)"),
+      fontFamily: css("--font-ui", "sans-serif"),
+    };
+  }, [theme]);
+}
+
+/** chartTooltip is the shared ECharts tooltip style. */
+export function chartTooltip(theme: ChartTheme): EChartsCoreOption["tooltip"] {
+  return {
+    trigger: "axis",
+    backgroundColor: theme.surface,
+    borderColor: theme.border,
+    borderWidth: 1,
+    padding: [8, 10],
+    textStyle: { color: theme.text, fontSize: 11, fontFamily: theme.fontFamily },
+    axisPointer: { lineStyle: { color: theme.muted, opacity: 0.4 } },
+  };
+}
 
 export interface LineChartProps {
   option: EChartsCoreOption;
@@ -24,35 +70,26 @@ export interface LineChartProps {
   empty?: boolean;
   emptyLabel?: string;
   className?: string;
-  /**
-   * onEvents binds ECharts event handlers by event name (for example
-   * "click"). Memoize it: the handlers are rebound whenever it changes.
-   */
   onEvents?: ChartEventHandlers;
 }
 
 /** ChartEventParams is the subset of ECharts event payloads the UI reads. */
 export interface ChartEventParams {
-  /** componentType is "series" for curve clicks and "legend" for legend clicks. */
   componentType?: string;
   seriesName?: string;
   name?: string;
-  /** value carries the legend entry name on legend clicks. */
   value?: unknown;
   seriesIndex?: number;
+  dataIndex?: number;
 }
 
 export type ChartEventHandlers = Record<string, (params: ChartEventParams) => void>;
 
-/**
- * LineChart owns a single ECharts instance and keeps it sized to its
- * container. Options are replaced (not merged) so metric switches cannot leave
- * stale series behind.
- */
+/** LineChart owns one ECharts instance and keeps it sized to its container. */
 export function LineChart({
   option,
   ariaLabel,
-  height = 260,
+  height = 300,
   empty = false,
   emptyLabel = "暂无数据",
   className = "",
@@ -106,17 +143,14 @@ export function LineChart({
 
   return (
     <div
-      className={`relative w-full ${className}`}
+      className={`chart-canvas ${className}`.trim()}
       style={{ height }}
       role="img"
       aria-label={ariaLabel}
+      data-theme={readTheme()}
     >
-      <div ref={containerRef} className="absolute inset-0" aria-hidden="true" />
-      {empty && (
-        <div className="absolute inset-0 flex items-center justify-center text-sm text-muted">
-          {emptyLabel}
-        </div>
-      )}
+      <div ref={containerRef} className="chart-canvas-inner" aria-hidden="true" />
+      {empty && <div className="chart-empty">{emptyLabel}</div>}
     </div>
   );
 }

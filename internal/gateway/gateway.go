@@ -32,28 +32,20 @@ const (
 )
 
 const (
-	// drainWindow bounds how long the gateway keeps reading upstream after the
-	// client went away, so accounting can still complete.
-	drainWindow = 3 * time.Second
-	// drainLimit caps the bytes read for accounting after a client disconnect.
-	drainLimit = 2 << 20
 	// copyBuffer is the size of one proxy read/write chunk.
 	copyBuffer = 32 << 10
-	// defaultUpstreamTimeout applies when the snapshot carries no timeout.
-	defaultUpstreamTimeout = 300 * time.Second
 )
 
 // sharedClient is shared by every Gateway so connections are pooled across
-// settings changes. Per-request deadlines come from the settings snapshot.
+// settings changes. It deliberately has no Timeout: upstream requests are not
+// cancelled by the gateway once started.
 var sharedClient = &http.Client{
 	Transport: &http.Transport{
-		Proxy:                 http.ProxyFromEnvironment,
-		MaxIdleConns:          256,
-		MaxIdleConnsPerHost:   64,
-		IdleConnTimeout:       90 * time.Second,
-		TLSHandshakeTimeout:   10 * time.Second,
-		ExpectContinueTimeout: time.Second,
-		ForceAttemptHTTP2:     true,
+		Proxy:               http.ProxyFromEnvironment,
+		MaxIdleConns:        256,
+		MaxIdleConnsPerHost: 64,
+		IdleConnTimeout:     90 * time.Second,
+		ForceAttemptHTTP2:   true,
 		// Count response body bytes as they arrive on the wire; transparent
 		// gzip would hide both the compressed size and the encoding headers.
 		DisableCompression: true,
@@ -156,14 +148,9 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.URL.RawQuery != "" {
 		target += "?" + r.URL.RawQuery
 	}
-	timeout := snap.Upstream.Timeout
-	if timeout <= 0 {
-		timeout = defaultUpstreamTimeout
-	}
-	// The upstream exchange outlives a client disconnect so that the drain
-	// window can still capture usage.
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), timeout)
-	defer cancel()
+	// The upstream exchange is detached from the client context and runs to
+	// completion. The gateway never cancels a started upstream request.
+	ctx := context.WithoutCancel(r.Context())
 
 	cr := &countingReader{r: prep.body}
 	outReq, err := http.NewRequestWithContext(ctx, r.Method, target, cr)
@@ -228,15 +215,14 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		select {
 		case <-r.Context().Done():
+			// The client is gone. Keep reading the upstream response to
+			// completion so usage and bytes are still accounted for.
 			disconnected.Store(true)
-			// Unblock a stalled upstream read once the drain window closes.
-			time.AfterFunc(drainWindow, func() { resp.Body.Close() })
 		case <-done:
 		}
 	}()
 
 	buf := make([]byte, copyBuffer)
-	var drained int64
 	for {
 		n, readErr := resp.Body.Read(buf)
 		if n > 0 {
@@ -249,20 +235,16 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if tracker != nil {
 				tracker.feed(chunk)
 			}
-			if disconnected.Load() {
-				drained += int64(n)
-			} else if _, writeErr := w.Write(chunk); writeErr != nil {
-				// Keep reading upstream so usage is still accounted for.
-				disconnected.Store(true)
-				time.AfterFunc(drainWindow, func() { resp.Body.Close() })
-			} else if canFlush {
-				flusher.Flush()
+			if !disconnected.Load() {
+				if _, writeErr := w.Write(chunk); writeErr != nil {
+					// Keep reading upstream so usage is still accounted for.
+					disconnected.Store(true)
+				} else if canFlush {
+					flusher.Flush()
+				}
 			}
 			if disconnected.Load() {
 				res.clientDisconnected = true
-				if drained >= drainLimit {
-					break
-				}
 			}
 		}
 		if readErr != nil {
@@ -457,9 +439,6 @@ func bearerMatches(header, key string) bool {
 // upstreamErrorText describes a failed upstream exchange without leaking the
 // request URL.
 func upstreamErrorText(err error) string {
-	if errors.Is(err, context.DeadlineExceeded) {
-		return "upstream timeout"
-	}
 	return "upstream request failed"
 }
 

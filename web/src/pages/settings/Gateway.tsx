@@ -3,22 +3,13 @@ import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { ApiError, api } from "../../api/client";
 import type { Settings as SettingsData, SettingsPatch } from "../../api/types";
-import {
-  Badge,
-  Button,
-  Card,
-  ErrorText,
-  Field,
-  Input,
-  Select,
-  Spinner,
-  useToast,
-} from "../../components/ui";
+import { Badge, Button, ErrorText, Spinner, useToast } from "../../components/ui";
 import {
   listenIsLoopback,
   redactSettings,
   timezoneOptions,
   validateClearPassword,
+  validateRetention,
   validateSettings,
   type FormErrors,
 } from "../../lib/settings";
@@ -27,25 +18,48 @@ import {
 const FIELD_LABELS: Record<string, string> = {
   baseUrl: "上游 Base URL",
   apiKey: "上游 API Key",
-  timeoutS: "超时",
   timezone: "时区",
   retentionDays: "明细保留天数",
   currentPassword: "当前密码",
   newPassword: "新密码",
+  clearPassword: "清除密码",
 };
 
+type PasswordMode = "change" | "clear" | null;
+
+function errorMessage(error: unknown, fallback: string): string {
+  return error instanceof Error ? error.message : fallback;
+}
+
 /**
- * Gateway is the upstream and access settings subpage. It also owns the
- * retention field shared with the data subpage.
+ * Gateway is the upstream and access settings subpage. The upstream card saves
+ * the OpenAI-compatible client settings; the access card owns the gateway key,
+ * timezone, admin password and detail retention.
  */
 export function Gateway() {
   const settings = useQuery({ queryKey: ["settings"], queryFn: api.getSettings });
 
   return (
-    <div className="space-y-4">
+    <div className="settings-panel active">
       {settings.isPending && <Spinner />}
       {settings.isError && <ErrorText error={settings.error} />}
       {settings.data && <GatewayForm settings={settings.data} />}
+    </div>
+  );
+}
+
+/** FieldErrors renders the per-field messages of a rejected API request. */
+function FieldErrors({ error }: { error: unknown }) {
+  if (!(error instanceof ApiError)) return null;
+  const entries = Object.entries(error.fields);
+  if (entries.length === 0) return null;
+  return (
+    <div role="alert">
+      {entries.map(([field, message]) => (
+        <small key={field} className="form-error">
+          {FIELD_LABELS[field] ?? field}：{message}
+        </small>
+      ))}
     </div>
   );
 }
@@ -55,66 +69,75 @@ function GatewayForm({ settings }: { settings: SettingsData }) {
   const navigate = useNavigate();
   const toast = useToast();
   const redacted = redactSettings(settings);
+  const loopback = listenIsLoopback(settings.listen);
 
   const [baseUrl, setBaseUrl] = useState(settings.upstream.baseUrl);
-  const [timeoutS, setTimeoutS] = useState(String(settings.upstream.timeoutS));
+  const [apiKey, setApiKey] = useState("");
   const [timezone, setTimezone] = useState(settings.timezone);
   const [retentionDays, setRetentionDays] = useState(String(settings.retentionDays));
-  const [apiKey, setApiKey] = useState("");
-  const [replacingKey, setReplacingKey] = useState(false);
+  const [passwordMode, setPasswordMode] = useState<PasswordMode>(null);
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [errors, setErrors] = useState<FormErrors>({});
-  const [testState, setTestState] = useState<{
-    tone: "success" | "warning";
-    text: string;
-  } | null>(null);
+  const [testState, setTestState] = useState<{ ok: boolean; message: string } | null>(null);
   const [confirmRotate, setConfirmRotate] = useState(false);
   const [rotatedKey, setRotatedKey] = useState<string | null>(null);
-  const [confirmClear, setConfirmClear] = useState(false);
 
-  function resetForm(data: SettingsData) {
-    setBaseUrl(data.upstream.baseUrl);
-    setTimeoutS(String(data.upstream.timeoutS));
-    setTimezone(data.timezone);
-    setRetentionDays(String(data.retentionDays));
-    setApiKey("");
-    setReplacingKey(false);
+  function cancelPasswordEdit() {
+    setPasswordMode(null);
     setCurrentPassword("");
     setNewPassword("");
     setConfirmPassword("");
-    setConfirmClear(false);
-    setErrors({});
+    setErrors((prev) => {
+      const next = { ...prev };
+      delete next.currentPassword;
+      delete next.newPassword;
+      delete next.confirmPassword;
+      return next;
+    });
   }
 
   const test = useMutation({
-    mutationFn: () =>
-      api.testUpstream({ baseUrl: baseUrl.trim(), apiKey: apiKey.trim() }),
+    mutationFn: () => api.testUpstream({ baseUrl: baseUrl.trim(), apiKey: apiKey.trim() }),
     onSuccess: (result) => {
-      setTestState(
-        result.ok
-          ? { tone: "success", text: "上游连接正常" }
-          : {
-              tone: "warning",
-              text: `连接失败：${result.message ?? `HTTP ${result.status}`}`,
-            },
-      );
+      setTestState({
+        ok: result.ok,
+        message: result.ok
+          ? "上游连接正常"
+          : `连接失败：${result.message ?? `HTTP ${result.status}`}`,
+      });
     },
     onError: (error) => {
       setTestState({
-        tone: "warning",
-        text: `连接失败：${error instanceof Error ? error.message : String(error)}`,
+        ok: false,
+        message: `连接失败：${error instanceof Error ? error.message : String(error)}`,
       });
     },
   });
 
-  const save = useMutation({
+  const saveUpstream = useMutation({
+    mutationFn: (patch: SettingsPatch) => api.patchSettings(patch),
+    onSuccess: (data) => {
+      queryClient.setQueryData(["settings"], data);
+      void queryClient.invalidateQueries({ queryKey: ["settings"] });
+      void queryClient.invalidateQueries({ queryKey: ["bootstrap"] });
+      void queryClient.invalidateQueries({ queryKey: ["me"] });
+      setBaseUrl(data.upstream.baseUrl);
+      setApiKey("");
+      setErrors({});
+      toast("上游设置已保存", "success");
+    },
+    onError: (error) => toast(errorMessage(error, "保存上游设置失败"), "error"),
+  });
+
+  const saveAccess = useMutation({
     mutationFn: (patch: SettingsPatch) => api.patchSettings(patch),
     onSuccess: (data, patch) => {
       queryClient.setQueryData(["settings"], data);
       void queryClient.invalidateQueries({ queryKey: ["settings"] });
       void queryClient.invalidateQueries({ queryKey: ["bootstrap"] });
+      void queryClient.invalidateQueries({ queryKey: ["me"] });
       if (patch.newPassword) {
         // Changing the password rotates the session epoch, so the old cookie
         // is no longer accepted; ask for the new password.
@@ -123,9 +146,13 @@ function GatewayForm({ settings }: { settings: SettingsData }) {
         navigate("/login", { replace: true });
         return;
       }
-      resetForm(data);
-      toast("设置已保存", "success");
+      setTimezone(data.timezone);
+      setRetentionDays(String(data.retentionDays));
+      cancelPasswordEdit();
+      setErrors({});
+      toast("网关设置已保存", "success");
     },
+    onError: (error) => toast(errorMessage(error, "保存网关设置失败"), "error"),
   });
 
   const clearPassword = useMutation({
@@ -136,15 +163,10 @@ function GatewayForm({ settings }: { settings: SettingsData }) {
       void queryClient.invalidateQueries({ queryKey: ["settings"] });
       void queryClient.invalidateQueries({ queryKey: ["bootstrap"] });
       void queryClient.invalidateQueries({ queryKey: ["me"] });
-      setCurrentPassword("");
-      setNewPassword("");
-      setConfirmPassword("");
-      setConfirmClear(false);
+      cancelPasswordEdit();
       toast("管理密码已清除", "success");
     },
-    onError: (error) => {
-      toast(error instanceof Error ? error.message : "清除密码失败", "error");
-    },
+    onError: (error) => toast(errorMessage(error, "清除密码失败"), "error"),
   });
 
   const rotate = useMutation({
@@ -153,11 +175,11 @@ function GatewayForm({ settings }: { settings: SettingsData }) {
       setRotatedKey(data.gatewayKey);
       setConfirmRotate(false);
       void queryClient.invalidateQueries({ queryKey: ["settings"] });
+      void queryClient.invalidateQueries({ queryKey: ["bootstrap"] });
+      void queryClient.invalidateQueries({ queryKey: ["me"] });
       toast("Gateway key 已轮换", "success");
     },
-    onError: (error) => {
-      toast(error instanceof Error ? error.message : "轮换失败", "error");
-    },
+    onError: (error) => toast(errorMessage(error, "轮换失败"), "error"),
   });
 
   const logout = useMutation({
@@ -166,40 +188,54 @@ function GatewayForm({ settings }: { settings: SettingsData }) {
       queryClient.clear();
       navigate("/login", { replace: true });
     },
-    onError: (error) => {
-      toast(error instanceof Error ? error.message : "退出失败", "error");
-    },
+    onError: (error) => toast(errorMessage(error, "退出失败"), "error"),
   });
 
-  function submit() {
-    const nextErrors = validateSettings({
-      timeoutS,
-      retentionDays,
-      currentPassword,
-      newPassword,
-      confirmPassword,
-      passwordSet: settings.adminPasswordSet,
-    });
+  function submitUpstream() {
+    const nextErrors: FormErrors = {};
     if (baseUrl.trim() === "") nextErrors.baseUrl = "请填写上游 Base URL";
-    setErrors(nextErrors);
+    setErrors((prev) => ({ ...prev, ...nextErrors }));
     if (Object.keys(nextErrors).length > 0) return;
 
     const upstream: NonNullable<SettingsPatch["upstream"]> = {
       baseUrl: baseUrl.trim(),
-      timeoutS: Number(timeoutS),
     };
     if (apiKey.trim() !== "") upstream.apiKey = apiKey.trim();
+    saveUpstream.mutate({ upstream });
+  }
+
+  function submitAccess() {
+    const nextErrors: FormErrors = {};
+    const retention = validateRetention(retentionDays);
+    if (retention) nextErrors.retentionDays = retention;
+
+    if (passwordMode === "change") {
+      const passwordErrors = validateSettings({
+        retentionDays,
+        currentPassword,
+        newPassword,
+        confirmPassword,
+        passwordSet: settings.adminPasswordSet,
+      });
+      if (newPassword === "") passwordErrors.newPassword = "请输入新密码";
+      if (settings.adminPasswordSet && currentPassword === "") {
+        passwordErrors.currentPassword = "请输入当前密码";
+      }
+      Object.assign(nextErrors, passwordErrors);
+    }
+
+    setErrors((prev) => ({ ...prev, ...nextErrors }));
+    if (Object.keys(nextErrors).length > 0) return;
 
     const patch: SettingsPatch = {
-      upstream,
       timezone,
       retentionDays: Number(retentionDays),
     };
-    if (newPassword !== "") {
+    if (passwordMode === "change") {
       patch.newPassword = newPassword;
-      if (currentPassword !== "") patch.currentPassword = currentPassword;
+      if (settings.adminPasswordSet) patch.currentPassword = currentPassword;
     }
-    save.mutate(patch);
+    saveAccess.mutate(patch);
   }
 
   function requestClear() {
@@ -208,6 +244,11 @@ function GatewayForm({ settings }: { settings: SettingsData }) {
       setErrors((prev) => ({ ...prev, currentPassword: error }));
       return;
     }
+    setErrors((prev) => {
+      const next = { ...prev };
+      delete next.currentPassword;
+      return next;
+    });
     clearPassword.mutate(currentPassword);
   }
 
@@ -221,300 +262,335 @@ function GatewayForm({ settings }: { settings: SettingsData }) {
     }
   }
 
-  const saveFields = save.error instanceof ApiError ? Object.entries(save.error.fields) : [];
-  const loopback = listenIsLoopback(settings.listen);
-  const testClasses =
-    testState?.tone === "success" ? "text-xs text-success" : "text-xs text-warning";
-
   return (
-    <div className="space-y-4">
-      <Card
-        title="上游"
-        actions={
-          <Button
-            variant="secondary"
-            onClick={() => test.mutate()}
-            disabled={test.isPending}
-          >
-            {test.isPending ? "测试中…" : "测试连接"}
-          </Button>
-        }
-      >
-        <div className="space-y-3">
-          <Field
-            label="Base URL"
-            hint="不要带 /v1，客户端请求路径会原样拼接"
-            error={errors.baseUrl}
-          >
-            <Input
-              value={baseUrl}
-              onChange={(event) => setBaseUrl(event.target.value)}
-              placeholder="https://api.deepseek.com"
-              autoComplete="off"
-            />
-          </Field>
-
-          <Field label="API Key" hint="明文不会回显">
-            {replacingKey ? (
-              <div className="flex gap-2">
-                <Input
-                  type="password"
-                  value={apiKey}
-                  onChange={(event) => setApiKey(event.target.value)}
-                  placeholder="输入新的 API Key"
-                  autoComplete="off"
-                  autoFocus
-                />
-                <Button
-                  variant="ghost"
-                  onClick={() => {
-                    setReplacingKey(false);
-                    setApiKey("");
-                  }}
-                >
-                  取消
-                </Button>
-              </div>
-            ) : (
-              <div className="flex items-center gap-2">
-                <span className="text-sm">{redacted.upstream.apiKey}</span>
-                <Button variant="secondary" onClick={() => setReplacingKey(true)}>
-                  替换
-                </Button>
-              </div>
-            )}
-            {replacingKey && (
-              <span className="mt-1 block text-xs text-muted">
-                留空保存表示保持当前 key 不变。
-              </span>
-            )}
-          </Field>
-
-          <Field label="超时（秒）" error={errors.timeoutS}>
-            <Input
-              type="number"
-              min={1}
-              max={3600}
-              value={timeoutS}
-              onChange={(event) => setTimeoutS(event.target.value)}
-            />
-          </Field>
-
-          {testState && (
-            <p className={testClasses} role="status">
-              {testState.text}
-            </p>
-          )}
-        </div>
-      </Card>
-
-      <Card title="时间与保留">
-        <div className="grid gap-3 sm:grid-cols-2">
-          <Field label="时区" hint="影响日期分桶与高峰价匹配">
-            <Select
-              className="w-full"
-              value={timezone}
-              onChange={(event) => setTimezone(event.target.value)}
-            >
-              {timezoneOptions(timezone).map((zone) => (
-                <option key={zone} value={zone}>
-                  {zone}
-                </option>
-              ))}
-            </Select>
-          </Field>
-          <Field label="明细保留（天）" hint="7–3650" error={errors.retentionDays}>
-            <Input
-              type="number"
-              min={7}
-              max={3650}
-              value={retentionDays}
-              onChange={(event) => setRetentionDays(event.target.value)}
-            />
-          </Field>
-        </div>
-        <p className="mt-3 text-xs text-muted">
-          超出保留期的请求明细会被删除；聚合统计不随明细清理，永久保留。
-        </p>
-      </Card>
-
-      <Card
-        title="管理密码"
-        actions={
-          settings.adminPasswordSet ? (
-            <Button
-              variant="ghost"
-              onClick={() => logout.mutate()}
-              disabled={logout.isPending}
-            >
-              退出登录
-            </Button>
-          ) : (
-            <Badge tone="warning">未设置</Badge>
-          )
-        }
-      >
-        <div className="space-y-3">
-          {settings.adminPasswordSet && (
-            <Field label="当前密码" error={errors.currentPassword}>
-              <Input
-                type="password"
-                value={currentPassword}
-                onChange={(event) => setCurrentPassword(event.target.value)}
-                autoComplete="current-password"
-              />
-            </Field>
-          )}
-          <div className="grid gap-3 sm:grid-cols-2">
-            <Field
-              label="新密码"
-              hint={settings.adminPasswordSet ? "留空则不修改" : "可选，至少 8 位"}
-              error={errors.newPassword}
-            >
-              <Input
-                type="password"
-                value={newPassword}
-                onChange={(event) => setNewPassword(event.target.value)}
-                autoComplete="new-password"
-              />
-            </Field>
-            <Field label="确认新密码" error={errors.confirmPassword}>
-              <Input
-                type="password"
-                value={confirmPassword}
-                onChange={(event) => setConfirmPassword(event.target.value)}
-                autoComplete="new-password"
-              />
-            </Field>
-          </div>
-          <p className="text-xs text-muted">
-            {settings.adminPasswordSet
-              ? "修改密码后当前会话将失效，需要重新登录。"
-              : "未设置密码时仅允许本机访问，设置后可远程登录管理界面。"}
-          </p>
-          {settings.adminPasswordSet && (
-            <div className="border-t border-line pt-3">
-              {loopback ? (
-                confirmClear ? (
-                  <div className="flex flex-wrap items-center gap-2 text-sm">
-                    <span className="text-danger">
-                      清除后本机将免登录访问，确认继续？
-                    </span>
-                    <Button
-                      variant="danger"
-                      disabled={clearPassword.isPending}
-                      onClick={requestClear}
-                    >
-                      {clearPassword.isPending ? "清除中…" : "确认清除"}
-                    </Button>
-                    <Button variant="ghost" onClick={() => setConfirmClear(false)}>
-                      取消
-                    </Button>
-                  </div>
-                ) : (
-                  <div className="flex flex-wrap items-center gap-2">
-                    <Button
-                      variant="secondary"
-                      onClick={() => setConfirmClear(true)}
-                      disabled={clearPassword.isPending}
-                    >
-                      清除密码
-                    </Button>
-                    <span className="text-xs text-muted">
-                      需要当前密码；清除后本机免登录，仅在回环监听时可用。
-                    </span>
-                  </div>
-                )
-              ) : (
-                <p className="text-xs text-muted">
-                  当前监听地址不是回环，清除密码后将无法远程登录且重启会拒绝启动，因此已禁用。
-                </p>
-              )}
+    <>
+      <div className="settings-grid">
+        <article className="card settings-card">
+          <div className="card-head">
+            <div>
+              <div className="card-title">上游</div>
+              <div className="card-sub">OpenAI 兼容服务</div>
             </div>
-          )}
-        </div>
-      </Card>
+          </div>
+          <div className="settings-body form-grid">
+            <label className="form-field span-2">
+              <span>Base URL</span>
+              <input
+                value={baseUrl}
+                onChange={(event) => setBaseUrl(event.target.value)}
+                placeholder="https://api.deepseek.com"
+                autoComplete="off"
+              />
+              {errors.baseUrl && (
+                <small className="form-error" role="alert">
+                  {errors.baseUrl}
+                </small>
+              )}
+            </label>
 
-      <Card title="Gateway Key">
-        <div className="space-y-3">
-          <div className="flex flex-wrap items-center gap-2 text-sm">
-            <span className="text-muted">当前</span>
-            {settings.gatewayKey.set ? (
-              <Badge tone="success">{redacted.gatewayKey}</Badge>
-            ) : (
-              <Badge tone="warning">未生成</Badge>
+            <label className="form-field span-2">
+              <span>上游 API Key</span>
+              <input
+                type="password"
+                value={apiKey}
+                onChange={(event) => setApiKey(event.target.value)}
+                placeholder="留空表示不修改"
+                autoComplete="new-password"
+              />
+              <small>当前 {redacted.upstream.apiKey}</small>
+              {errors.apiKey && (
+                <small className="form-error" role="alert">
+                  {errors.apiKey}
+                </small>
+              )}
+            </label>
+
+            <div className="form-field">
+              <span>连接</span>
+              <div className="inline-key">
+                <Button
+                  variant="secondary"
+                  onClick={() => test.mutate()}
+                  disabled={test.isPending || baseUrl.trim() === ""}
+                >
+                  {test.isPending ? "测试中…" : "测试连接"}
+                </Button>
+                {testState && (
+                  <Badge tone={testState.ok ? "success" : "danger"}>{testState.message}</Badge>
+                )}
+              </div>
+            </div>
+
+            {saveUpstream.isError && (
+              <div className="span-2">
+                <ErrorText error={saveUpstream.error} />
+                <FieldErrors error={saveUpstream.error} />
+              </div>
+            )}
+
+            <div className="form-actions span-2">
+              <Button onClick={submitUpstream} disabled={saveUpstream.isPending}>
+                {saveUpstream.isPending ? "保存中…" : "保存上游"}
+              </Button>
+            </div>
+          </div>
+        </article>
+
+        <article className="card settings-card">
+          <div className="card-head">
+            <div>
+              <div className="card-title">网关与访问</div>
+              <div className="card-sub">本机监听与鉴权</div>
+            </div>
+            {settings.adminPasswordSet && (
+              <Button
+                variant="ghost"
+                onClick={() => logout.mutate()}
+                disabled={logout.isPending}
+              >
+                {logout.isPending ? "退出中…" : "退出登录"}
+              </Button>
             )}
           </div>
+          <div className="settings-body form-grid">
+            <div className="form-field span-2">
+              <span>Gateway Key</span>
+              <div className="inline-key">
+                <code title={settings.gatewayKey.set ? "已生成" : "未生成"}>
+                  {redacted.gatewayKey}
+                </code>
+                <Button
+                  variant="secondary"
+                  onClick={() => setConfirmRotate(true)}
+                  disabled={rotate.isPending || confirmRotate}
+                >
+                  {rotate.isPending ? "轮换中…" : "轮换"}
+                </Button>
+              </div>
+              <small>明文只显示一次</small>
+            </div>
 
-          {rotatedKey ? (
-            <div className="rounded-md border border-warning/40 bg-warning/10 p-3">
-              <p className="mb-2 text-xs text-warning">
-                新 gateway key 明文仅显示一次，请立即复制保存。
-              </p>
-              <code className="block break-all rounded bg-surface px-3 py-2 text-sm">
-                {rotatedKey}
-              </code>
-              <div className="mt-2 flex flex-wrap gap-2">
+            {rotatedKey ? (
+              <div className="new-key span-2">
+                <code>{rotatedKey}</code>
                 <Button onClick={() => void copyRotatedKey()}>复制</Button>
                 <Button variant="ghost" onClick={() => setRotatedKey(null)}>
                   我已保存
                 </Button>
               </div>
+            ) : (
+              confirmRotate && (
+                <div className="inline-key span-2">
+                  <span className="form-error">轮换后旧 key 立即失效，确认继续？</span>
+                  <Button
+                    variant="danger"
+                    onClick={() => rotate.mutate()}
+                    disabled={rotate.isPending}
+                  >
+                    {rotate.isPending ? "轮换中…" : "确认轮换"}
+                  </Button>
+                  <Button variant="ghost" onClick={() => setConfirmRotate(false)}>
+                    取消
+                  </Button>
+                </div>
+              )
+            )}
+
+            {rotate.isError && (
+              <div className="span-2">
+                <ErrorText error={rotate.error} />
+              </div>
+            )}
+
+            <div className="form-field">
+              <span>有效监听</span>
+              <input value={settings.listen} readOnly aria-readonly="true" />
             </div>
-          ) : confirmRotate ? (
-            <div className="flex flex-wrap items-center gap-2 text-sm">
-              <span className="text-danger">轮换后旧 key 立即失效，确认继续？</span>
-              <Button
-                variant="danger"
-                onClick={() => rotate.mutate()}
-                disabled={rotate.isPending}
+
+            <label className="form-field">
+              <span>时区</span>
+              <select
+                value={timezone}
+                onChange={(event) => setTimezone(event.target.value)}
               >
-                {rotate.isPending ? "轮换中…" : "确认轮换"}
-              </Button>
-              <Button variant="ghost" onClick={() => setConfirmRotate(false)}>
-                取消
-              </Button>
+                {timezoneOptions(timezone).map((zone) => (
+                  <option key={zone} value={zone}>
+                    {zone}
+                  </option>
+                ))}
+              </select>
+              {errors.timezone && (
+                <small className="form-error" role="alert">
+                  {errors.timezone}
+                </small>
+              )}
+            </label>
+
+            <div className="form-field span-2">
+              <span>管理密码</span>
+              <div className="inline-key">
+                <span className={`status ${settings.adminPasswordSet ? "ok" : "warn"}`}>
+                  {settings.adminPasswordSet ? "已设置" : "未设置"}
+                </span>
+                {passwordMode === null && (
+                  <>
+                    <Button
+                      variant="secondary"
+                      onClick={() => setPasswordMode("change")}
+                      disabled={saveAccess.isPending || clearPassword.isPending}
+                    >
+                      {settings.adminPasswordSet ? "修改" : "设置"}
+                    </Button>
+                    {settings.adminPasswordSet && (
+                      <Button
+                        variant="secondary"
+                        onClick={() => setPasswordMode("clear")}
+                        disabled={!loopback || clearPassword.isPending}
+                        title={
+                          loopback
+                            ? "清除后本机免登录访问"
+                            : "仅回环监听时允许清除密码"
+                        }
+                      >
+                        清除
+                      </Button>
+                    )}
+                  </>
+                )}
+                {passwordMode !== null && (
+                  <Button variant="ghost" onClick={cancelPasswordEdit}>
+                    取消
+                  </Button>
+                )}
+              </div>
+              {settings.adminPasswordSet && !loopback && (
+                <small>当前监听不是回环地址，清除密码会导致重启被拒绝，因此已禁用。</small>
+              )}
             </div>
-          ) : (
-            <div className="flex flex-wrap items-center gap-2">
-              <Button variant="secondary" onClick={() => setConfirmRotate(true)}>
-                轮换
-              </Button>
-              <span className="text-xs text-muted">
-                轮换后需更新客户端配置中的 api_key。
-              </span>
-            </div>
-          )}
-        </div>
-      </Card>
 
-      <Card title="服务监听">
-        <div className="flex flex-wrap items-baseline gap-2 text-sm">
-          <span className="break-all">{redacted.listen}</span>
-          <span className="text-xs text-warning">修改需重启服务</span>
-        </div>
-      </Card>
+            {passwordMode === "change" && (
+              <>
+                {settings.adminPasswordSet && (
+                  <label className="form-field span-2">
+                    <span>当前密码</span>
+                    <input
+                      type="password"
+                      value={currentPassword}
+                      onChange={(event) => setCurrentPassword(event.target.value)}
+                      autoComplete="current-password"
+                    />
+                    {errors.currentPassword && (
+                      <small className="form-error" role="alert">
+                        {errors.currentPassword}
+                      </small>
+                    )}
+                  </label>
+                )}
+                <label className="form-field">
+                  <span>新密码</span>
+                  <input
+                    type="password"
+                    value={newPassword}
+                    onChange={(event) => setNewPassword(event.target.value)}
+                    autoComplete="new-password"
+                  />
+                  {errors.newPassword && (
+                    <small className="form-error" role="alert">
+                      {errors.newPassword}
+                    </small>
+                  )}
+                </label>
+                <label className="form-field">
+                  <span>确认新密码</span>
+                  <input
+                    type="password"
+                    value={confirmPassword}
+                    onChange={(event) => setConfirmPassword(event.target.value)}
+                    autoComplete="new-password"
+                  />
+                  {errors.confirmPassword && (
+                    <small className="form-error" role="alert">
+                      {errors.confirmPassword}
+                    </small>
+                  )}
+                </label>
+                <p className="settings-hint span-2">
+                  修改密码后当前会话将失效，需要重新登录。
+                </p>
+              </>
+            )}
 
-      {save.isError && (
-        <div className="space-y-1">
-          <ErrorText error={save.error} />
-          {saveFields.length > 0 && (
-            <ul className="space-y-0.5 text-xs text-danger">
-              {saveFields.map(([field, message]) => (
-                <li key={field}>
-                  {FIELD_LABELS[field] ?? field}：{message}
-                </li>
-              ))}
-            </ul>
-          )}
-        </div>
-      )}
+            {passwordMode === "clear" && (
+              <>
+                <label className="form-field span-2">
+                  <span>当前密码</span>
+                  <input
+                    type="password"
+                    value={currentPassword}
+                    onChange={(event) => setCurrentPassword(event.target.value)}
+                    autoComplete="current-password"
+                  />
+                  {errors.currentPassword && (
+                    <small className="form-error" role="alert">
+                      {errors.currentPassword}
+                    </small>
+                  )}
+                </label>
+                <div className="inline-key span-2">
+                  <span className="form-error">
+                    清除后本机将免登录访问，确认继续？
+                  </span>
+                  <Button
+                    variant="danger"
+                    onClick={requestClear}
+                    disabled={clearPassword.isPending}
+                  >
+                    {clearPassword.isPending ? "清除中…" : "确认清除"}
+                  </Button>
+                </div>
+                {clearPassword.isError && (
+                  <div className="span-2">
+                    <ErrorText error={clearPassword.error} />
+                    <FieldErrors error={clearPassword.error} />
+                  </div>
+                )}
+              </>
+            )}
 
-      <div className="flex justify-end">
-        <Button onClick={submit} disabled={save.isPending}>
-          {save.isPending ? "保存中…" : "保存设置"}
-        </Button>
+            <label className="form-field span-2">
+              <span>明细保留（天）</span>
+              <input
+                type="number"
+                min={7}
+                max={3650}
+                value={retentionDays}
+                onChange={(event) => setRetentionDays(event.target.value)}
+              />
+              {errors.retentionDays && (
+                <small className="form-error" role="alert">
+                  {errors.retentionDays}
+                </small>
+              )}
+            </label>
+
+            {saveAccess.isError && (
+              <div className="span-2">
+                <ErrorText error={saveAccess.error} />
+                <FieldErrors error={saveAccess.error} />
+              </div>
+            )}
+
+            {passwordMode !== "clear" && (
+              <div className="form-actions span-2">
+                <Button onClick={submitAccess} disabled={saveAccess.isPending}>
+                  {saveAccess.isPending ? "保存中…" : "保存网关设置"}
+                </Button>
+              </div>
+            )}
+          </div>
+        </article>
       </div>
-    </div>
+      <p className="settings-hint">修改监听地址需要重启进程；其余设置保存后即时生效。</p>
+    </>
   );
 }

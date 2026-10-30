@@ -43,16 +43,22 @@ type bootstrap struct {
 	AuthRequired bool   `json:"authRequired"`
 	Listen       string `json:"listen"`
 	Timezone     string `json:"timezone"`
+	EarliestDay  string `json:"earliestDay"`
 }
 
 func (s *Server) bootstrap(w http.ResponseWriter, _ *http.Request) {
 	snap := s.repo.Snapshot()
+	earliest, err := s.store.EarliestDay()
+	if err != nil {
+		slog.Error("api: earliest day", "error", sanitizeLogError(err))
+	}
 	writeJSON(w, http.StatusOK, bootstrap{
 		Version:      s.version,
 		NeedsSetup:   snap == nil || !snap.SetupDone,
 		AuthRequired: snap != nil && snap.AdminPasswordHash != "",
 		Listen:       s.listen,
 		Timezone:     s.location().String(),
+		EarliestDay:  earliest,
 	})
 }
 
@@ -198,6 +204,7 @@ type seriesPoint struct {
 	DownBytes        int64  `json:"downBytes"`
 	PromptTokens     int64  `json:"promptTokens"`
 	CompletionTokens int64  `json:"completionTokens"`
+	CacheReadTokens  int64  `json:"cacheReadTokens"`
 	CostNanoUSD      int64  `json:"costNanoUsd"`
 }
 
@@ -248,6 +255,7 @@ func (s *Server) series(w http.ResponseWriter, r *http.Request) {
 			DownBytes:        p.DownBytes,
 			PromptTokens:     p.PromptTokens,
 			CompletionTokens: p.CompletionTokens,
+			CacheReadTokens:  p.CacheReadTokens,
 			CostNanoUSD:      p.CostNanoUSD,
 		})
 	}
@@ -389,10 +397,20 @@ func decodeRates(raw string) json.RawMessage {
 	return json.RawMessage(raw)
 }
 
+// requestsSummary is the aggregate of every request matching the filters,
+// independent of the cursor page.
+type requestsSummary struct {
+	Requests    int64 `json:"requests"`
+	CostNanoUSD int64 `json:"costNanoUsd"`
+	TotalTokens int64 `json:"totalTokens"`
+	Errors      int64 `json:"errors"`
+}
+
 // requestsBody is the cursor page response.
 type requestsBody struct {
-	Requests     []recordDTO `json:"requests"`
-	NextBeforeID int64       `json:"nextBeforeId"`
+	Requests     []recordDTO     `json:"requests"`
+	NextBeforeID int64           `json:"nextBeforeId"`
+	Summary      requestsSummary `json:"summary"`
 }
 
 func (s *Server) requests(w http.ResponseWriter, r *http.Request) {
@@ -413,6 +431,13 @@ func (s *Server) requests(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		f.Status = &n
+	}
+	if v := q.Get("statusClass"); v != "" {
+		if v != "2xx" && v != "4xx" && v != "5xx" {
+			writeAPIError(w, http.StatusBadRequest, codeValidation, "statusClass must be 2xx, 4xx or 5xx")
+			return
+		}
+		f.StatusClass = v
 	}
 	if v := q.Get("usageStatus"); v != "" {
 		f.UsageStatus = &v
@@ -458,6 +483,11 @@ func (s *Server) requests(w http.ResponseWriter, r *http.Request) {
 		writeInternal(w, err)
 		return
 	}
+	summary, err := s.store.RequestsSummary(f)
+	if err != nil {
+		writeInternal(w, err)
+		return
+	}
 	out := make([]recordDTO, 0, len(rows))
 	for _, row := range rows {
 		out = append(out, recordToDTO(row))
@@ -466,7 +496,16 @@ func (s *Server) requests(w http.ResponseWriter, r *http.Request) {
 	if len(out) > 0 {
 		next = out[len(out)-1].ID
 	}
-	writeJSON(w, http.StatusOK, requestsBody{Requests: out, NextBeforeID: next})
+	writeJSON(w, http.StatusOK, requestsBody{
+		Requests:     out,
+		NextBeforeID: next,
+		Summary: requestsSummary{
+			Requests:    summary.Requests,
+			CostNanoUSD: summary.CostNanoUSD,
+			TotalTokens: summary.TotalTokens,
+			Errors:      summary.Errors,
+		},
+	})
 }
 
 func (s *Server) request(w http.ResponseWriter, r *http.Request) {

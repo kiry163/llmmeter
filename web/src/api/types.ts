@@ -6,6 +6,7 @@ export interface Bootstrap {
   authRequired: boolean;
   listen: string;
   timezone: string;
+  earliestDay: string;
 }
 
 export interface Me {
@@ -60,6 +61,7 @@ export interface SeriesPoint {
   downBytes: number;
   promptTokens: number;
   completionTokens: number;
+  cacheReadTokens: number;
   costNanoUsd: number;
 }
 
@@ -128,9 +130,17 @@ export interface RequestRecord {
   error: string;
 }
 
+export interface RequestsSummary {
+  requests: number;
+  costNanoUsd: number;
+  totalTokens: number;
+  errors: number;
+}
+
 export interface RequestsPage {
   requests: RequestRecord[];
   nextBeforeId: number;
+  summary: RequestsSummary;
 }
 
 export interface Window {
@@ -198,7 +208,6 @@ export interface MaskedGatewayKey {
 export interface Settings {
   upstream: {
     baseUrl: string;
-    timeoutS: number;
     apiKey: MaskedSecret;
   };
   timezone: string;
@@ -215,7 +224,6 @@ export interface SettingsPatch {
   upstream?: {
     baseUrl?: string;
     apiKey?: string;
-    timeoutS?: number;
   };
   timezone?: string;
   retentionDays?: number;
@@ -232,7 +240,6 @@ export interface SetupInput {
   upstream: {
     baseUrl: string;
     apiKey: string;
-    timeoutS: number;
   };
   timezone: string;
   adminPassword: string;

@@ -22,44 +22,50 @@ function statusTone(status: number): "success" | "warning" | "danger" {
   return "success";
 }
 
+const RATE_LABELS: Record<string, string> = {
+  model: "模型",
+  window: "窗口",
+  input_per_mtok: "输入 / M",
+  output_per_mtok: "输出 / M",
+  cache_read_per_mtok: "缓存读 / M",
+  cache_write_per_mtok: "缓存写 / M",
+  reasoning_per_mtok: "推理 / M",
+};
+
 function Section({ title, children }: { title: string; children: ReactNode }) {
   return (
-    <section>
-      <h3 className="mb-1 text-xs font-semibold uppercase tracking-wide text-muted">{title}</h3>
-      <div className="divide-y divide-line/60 rounded-md border border-line px-3 py-1">
-        {children}
-      </div>
+    <section className="drawer-section">
+      <h3>{title}</h3>
+      <dl className="kv">{children}</dl>
     </section>
   );
 }
 
-function Row({ label, value }: { label: string; value: ReactNode }) {
+function Row({ label, value, mono = false }: { label: string; value: ReactNode; mono?: boolean }) {
   return (
-    <div className="flex items-start justify-between gap-3 py-1.5">
-      <span className="shrink-0 text-muted">{label}</span>
-      <span className="break-all text-right">{value}</span>
-    </div>
+    <>
+      <dt>{label}</dt>
+      <dd className={mono ? "mono" : ""}>{value}</dd>
+    </>
   );
 }
 
 function RatesView({ rates }: { rates: RatesSnapshot }) {
   const entries = Object.entries(rates);
-  if (entries.length === 0) return <p className="text-xs text-muted">未定价</p>;
+  if (entries.length === 0) return <dd className="muted">未定价</dd>;
   return (
-    <dl className="space-y-1 text-xs">
+    <>
       {entries.map(([key, value]) => (
-        <div key={key} className="flex items-start justify-between gap-3">
-          <dt className="shrink-0 text-muted">{key}</dt>
-          <dd className="break-all text-right">
-            {typeof value === "object" && value !== null ? JSON.stringify(value) : String(value)}
-          </dd>
-        </div>
+        <Row
+          key={key}
+          label={RATE_LABELS[key] ?? key}
+          value={typeof value === "number" ? `$${value.toFixed(6)}` : String(value)}
+        />
       ))}
-    </dl>
+    </>
   );
 }
 
-/** RequestBody renders the five request detail sections from spec §3.2. */
 function RequestBody({ record, timeZone }: { record: RequestRecord; timeZone?: string }) {
   const upBytes = record.reqBodyBytes + record.reqHeaderBytes;
   const downBytes = record.respBodyBytes + record.respHeaderBytes;
@@ -71,8 +77,8 @@ function RequestBody({ record, timeZone }: { record: RequestRecord; timeZone?: s
   );
 
   return (
-    <div className="space-y-4 text-sm">
-      <div className="flex flex-wrap items-center gap-2">
+    <>
+      <div className="drawer-status">
         <Badge tone={statusTone(record.status)}>{record.status}</Badge>
         <Badge tone="info">{record.pathClass}</Badge>
         <Badge tone={record.stream ? "info" : "neutral"}>
@@ -85,29 +91,15 @@ function RequestBody({ record, timeZone }: { record: RequestRecord; timeZone?: s
       </div>
 
       <Section title="概要">
-        <Row label="请求 ID" value={`#${record.id}`} />
+        <Row label="请求 ID" value={`#${record.id}`} mono />
         <Row label="模型" value={record.model || "—"} />
-        <Row label="上游模型" value={record.upstreamModel || "—"} />
-        <Row label="路径" value={record.path || "—"} />
-        <Row label="流式" value={record.stream ? "是" : "否"} />
+        <Row label="上游模型" value={record.upstreamModel || "—"} mono />
+        <Row label="路径" value={record.path || "—"} mono />
         <Row label="开始" value={formatTime(record.startedAt, timeZone)} />
-        <Row label="完成" value={formatTime(record.completedAt, timeZone)} />
-        <Row label="本地日期" value={record.localDay || "—"} />
         <Row label="总耗时" value={formatDuration(record.latencyMs)} />
         <Row
           label="首字 TTFT"
           value={record.ttftMs === null ? "—" : formatDuration(record.ttftMs)}
-        />
-      </Section>
-
-      <Section title="流量">
-        <Row label="请求头（估算）" value={formatBytesWithExact(record.reqHeaderBytes)} />
-        <Row label="请求体" value={formatBytesWithExact(record.reqBodyBytes)} />
-        <Row label="响应头（估算）" value={formatBytesWithExact(record.respHeaderBytes)} />
-        <Row label="响应体" value={formatBytesWithExact(record.respBodyBytes)} />
-        <Row
-          label="合计"
-          value={`上行 ${formatBytes(upBytes)} · 下行 ${formatBytes(downBytes)}`}
         />
       </Section>
 
@@ -121,18 +113,21 @@ function RequestBody({ record, timeZone }: { record: RequestRecord; timeZone?: s
         <Row label="速度" value={formatRate(rate)} />
       </Section>
 
+      <Section title="流量">
+        <Row label="请求头（估算）" value={formatBytesWithExact(record.reqHeaderBytes)} />
+        <Row label="请求体" value={formatBytesWithExact(record.reqBodyBytes)} />
+        <Row label="响应头（估算）" value={formatBytesWithExact(record.respHeaderBytes)} />
+        <Row label="响应体" value={formatBytesWithExact(record.respBodyBytes)} />
+        <Row
+          label="合计"
+          value={`上行 ${formatBytes(upBytes)} · 下行 ${formatBytes(downBytes)}`}
+        />
+      </Section>
+
       <Section title="计费">
         <Row label="成本" value={record.priced ? formatCost(record.costNanoUsd) : "未定价"} />
         <Row label="窗口" value={record.windowLabel || "—"} />
-        <Row label="定价状态" value={record.priced ? "已定价" : "未定价"} />
-        <div className="py-2">
-          <div className="mb-1 text-muted">价格快照</div>
-          {record.rates ? (
-            <RatesView rates={record.rates} />
-          ) : (
-            <p className="text-xs text-muted">未定价</p>
-          )}
-        </div>
+        {record.rates ? <RatesView rates={record.rates} /> : <Row label="价格快照" value="未定价" />}
       </Section>
 
       <Section title="状态">
@@ -149,22 +144,18 @@ function RequestBody({ record, timeZone }: { record: RequestRecord; timeZone?: s
           }
         />
         {record.usageStatus === "too_large" && (
-          <p className="pb-2 text-xs text-muted">{TOO_LARGE_HINT}</p>
+          <Row label="说明" value={TOO_LARGE_HINT} />
         )}
         <Row label="客户端断开" value={record.clientDisconnected ? "是" : "否"} />
         <Row
           label="错误"
-          value={record.error ? <span className="text-danger">{record.error}</span> : "—"}
+          value={record.error ? <span className="danger-text">{record.error}</span> : "—"}
         />
       </Section>
-    </div>
+    </>
   );
 }
 
-/**
- * RequestDrawer loads one request by id and renders it in the shared drawer.
- * A null id keeps the drawer closed and the query idle.
- */
 export function RequestDrawer({
   requestId,
   onClose,
@@ -184,7 +175,7 @@ export function RequestDrawer({
       title={requestId === null ? "请求详情" : `请求 #${requestId}`}
       onClose={onClose}
     >
-      {requestId !== null && detail.isPending && <Spinner />}
+      {requestId !== null && detail.isPending && <Spinner label="加载请求…" />}
       {detail.isError && <ErrorText error={detail.error} />}
       {detail.data && <RequestBody record={detail.data} timeZone={timeZone} />}
     </Drawer>

@@ -40,11 +40,13 @@ type Overview struct {
 
 // SeriesPoint is one time bucket of the series query.
 type SeriesPoint struct {
-	Day                                         string
-	MinuteOfDay                                 int
-	Requests, Errors                            int64
-	UpBytes, DownBytes                          int64
-	PromptTokens, CompletionTokens, CostNanoUSD int64
+	Day                            string
+	MinuteOfDay                    int
+	Requests, Errors               int64
+	UpBytes, DownBytes             int64
+	PromptTokens, CompletionTokens int64
+	CacheReadTokens                int64
+	CostNanoUSD                    int64
 }
 
 // BreakdownRow is one key of the breakdown query.
@@ -58,17 +60,38 @@ type BreakdownRow struct {
 }
 
 // RequestFilter selects requests for the cursor list. Zero values mean "no
-// filter"; From and To are inclusive local_day bounds.
+// filter"; From and To are inclusive local_day bounds. StatusClass is one of
+// the 2xx, 4xx or 5xx classes and combines with an exact Status.
 type RequestFilter struct {
 	From, To    string
 	Model       string
 	PathClass   string
 	Status      *int
+	StatusClass string
 	UsageStatus *string
 	Priced      *bool
 	Stream      *bool
 	BeforeID    int64
 	Limit       int
+}
+
+// RequestsSummary aggregates the requests matched by a RequestFilter,
+// ignoring BeforeID and Limit. Errors counts statuses >= 400.
+type RequestsSummary struct {
+	Requests, CostNanoUSD, TotalTokens, Errors int64
+}
+
+// statusClassRange maps a status class filter to inclusive bounds.
+func statusClassRange(class string) (lo, hi int, ok bool) {
+	switch class {
+	case "2xx":
+		return 200, 299, true
+	case "4xx":
+		return 400, 499, true
+	case "5xx":
+		return 500, 599, true
+	}
+	return 0, 0, false
 }
 
 const (
@@ -203,25 +226,35 @@ func percentile(buckets []latencyBucket, pct int64) *int64 {
 	return &v
 }
 
+// EarliestDay returns the first local_day with traffic, or "" when the
+// traffic_minutes aggregate is empty.
+func (s *Store) EarliestDay() (string, error) {
+	var day sql.NullString
+	if err := s.db.QueryRow(`SELECT MIN(local_day) FROM traffic_minutes`).Scan(&day); err != nil {
+		return "", fmt.Errorf("earliest day: %w", err)
+	}
+	return day.String, nil
+}
+
 const (
 	seriesMinuteSQL = `
 SELECT local_day, minute_of_day,
        SUM(requests), SUM(errors), SUM(req_bytes), SUM(resp_bytes),
-       SUM(prompt_tokens), SUM(completion_tokens), SUM(cost_nano_usd)
+       SUM(prompt_tokens), SUM(completion_tokens), SUM(cache_read_tokens), SUM(cost_nano_usd)
 FROM traffic_minutes WHERE local_day BETWEEN ? AND ?
 GROUP BY local_day, minute_of_day ORDER BY local_day, minute_of_day`
 
 	seriesHourSQL = `
 SELECT local_day, minute_of_day / 60,
        SUM(requests), SUM(errors), SUM(req_bytes), SUM(resp_bytes),
-       SUM(prompt_tokens), SUM(completion_tokens), SUM(cost_nano_usd)
+       SUM(prompt_tokens), SUM(completion_tokens), SUM(cache_read_tokens), SUM(cost_nano_usd)
 FROM traffic_minutes WHERE local_day BETWEEN ? AND ?
 GROUP BY local_day, minute_of_day / 60 ORDER BY local_day, minute_of_day / 60`
 
 	seriesDaySQL = `
 SELECT local_day, 0,
        SUM(requests), SUM(errors), SUM(req_bytes), SUM(resp_bytes),
-       SUM(prompt_tokens), SUM(completion_tokens), SUM(cost_nano_usd)
+       SUM(prompt_tokens), SUM(completion_tokens), SUM(cache_read_tokens), SUM(cost_nano_usd)
 FROM traffic_minutes WHERE local_day BETWEEN ? AND ?
 GROUP BY local_day ORDER BY local_day`
 )
@@ -248,7 +281,7 @@ func (s *Store) Series(from, to string, iv Interval) ([]SeriesPoint, error) {
 		if err := rows.Scan(
 			&p.Day, &p.MinuteOfDay,
 			&p.Requests, &p.Errors, &p.UpBytes, &p.DownBytes,
-			&p.PromptTokens, &p.CompletionTokens, &p.CostNanoUSD,
+			&p.PromptTokens, &p.CompletionTokens, &p.CacheReadTokens, &p.CostNanoUSD,
 		); err != nil {
 			return nil, fmt.Errorf("scan series point: %w", err)
 		}
@@ -357,17 +390,11 @@ const selectRecordColumns = `id, started_at, completed_at, local_day, minute_of_
   window_label, rates_json, cost_nano_usd, priced,
   usage_status, client_disconnected, error`
 
-// Requests returns at most Limit records for the filter, newest first.
-func (s *Store) Requests(f RequestFilter) ([]Record, error) {
-	limit := f.Limit
-	if limit <= 0 {
-		limit = defaultRequestLimit
-	}
-	if limit > maxRequestLimit {
-		limit = maxRequestLimit
-	}
-
-	q := "SELECT " + selectRecordColumns + " FROM requests WHERE local_day BETWEEN ? AND ?"
+// requestWhere builds the WHERE clause shared by Requests and
+// RequestsSummary from the filter fields, appending cursor when asked. Limit
+// is never part of the filter.
+func requestWhere(f RequestFilter, cursor bool) (string, []any) {
+	q := " WHERE local_day BETWEEN ? AND ?"
 	args := []any{f.From, f.To}
 	if f.Model != "" {
 		q += " AND model = ?"
@@ -381,6 +408,10 @@ func (s *Store) Requests(f RequestFilter) ([]Record, error) {
 		q += " AND status = ?"
 		args = append(args, *f.Status)
 	}
+	if lo, hi, ok := statusClassRange(f.StatusClass); ok {
+		q += " AND status BETWEEN ? AND ?"
+		args = append(args, lo, hi)
+	}
 	if f.UsageStatus != nil {
 		q += " AND usage_status = ?"
 		args = append(args, *f.UsageStatus)
@@ -393,11 +424,26 @@ func (s *Store) Requests(f RequestFilter) ([]Record, error) {
 		q += " AND stream = ?"
 		args = append(args, boolInt(*f.Stream))
 	}
-	if f.BeforeID > 0 {
+	if cursor && f.BeforeID > 0 {
 		q += " AND id < ?"
 		args = append(args, f.BeforeID)
 	}
-	q += " ORDER BY id DESC LIMIT ?"
+	return q, args
+}
+
+// Requests returns at most Limit records for the filter, newest first.
+func (s *Store) Requests(f RequestFilter) ([]Record, error) {
+	limit := f.Limit
+	if limit <= 0 {
+		limit = defaultRequestLimit
+	}
+	if limit > maxRequestLimit {
+		limit = maxRequestLimit
+	}
+
+	where, args := requestWhere(f, true)
+	q := "SELECT " + selectRecordColumns + " FROM requests" + where +
+		" ORDER BY id DESC LIMIT ?"
 	args = append(args, limit)
 
 	rows, err := s.db.Query(q, args...)
@@ -418,6 +464,24 @@ func (s *Store) Requests(f RequestFilter) ([]Record, error) {
 		return nil, fmt.Errorf("iterate requests: %w", err)
 	}
 	return out, nil
+}
+
+// RequestsSummary aggregates every request matching the filter, ignoring
+// BeforeID and Limit.
+func (s *Store) RequestsSummary(f RequestFilter) (RequestsSummary, error) {
+	where, args := requestWhere(f, false)
+	var sum RequestsSummary
+	err := s.db.QueryRow(`
+SELECT COUNT(*), COALESCE(SUM(cost_nano_usd), 0),
+       COALESCE(SUM(total_tokens), 0),
+       COALESCE(SUM(CASE WHEN status >= 400 THEN 1 ELSE 0 END), 0)
+FROM requests`+where, args...).Scan(
+		&sum.Requests, &sum.CostNanoUSD, &sum.TotalTokens, &sum.Errors,
+	)
+	if err != nil {
+		return RequestsSummary{}, fmt.Errorf("requests summary: %w", err)
+	}
+	return sum, nil
 }
 
 // Request loads one record by id.

@@ -168,6 +168,7 @@ export interface RequestParams extends RangeParams {
   model?: string;
   pathClass?: string;
   status?: number;
+  statusClass?: "2xx" | "4xx" | "5xx";
   usageStatus?: string;
   priced?: boolean;
   stream?: boolean;
@@ -208,6 +209,7 @@ export const api = {
         model: params.model,
         pathClass: params.pathClass,
         status: params.status,
+        statusClass: params.statusClass,
         usageStatus: params.usageStatus,
         priced: params.priced,
         stream: params.stream,

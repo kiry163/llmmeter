@@ -9,7 +9,6 @@ import {
   validateClearPassword,
   validateRetention,
   validateSettings,
-  validateTimeout,
 } from "./settings";
 
 it("masks secrets", () => {
@@ -18,15 +17,7 @@ it("masks secrets", () => {
   expect(maskValue("abc")).toBe("••••");
 });
 
-it("validates timeout and retention ranges", () => {
-  expect(validateTimeout("30")).toBeUndefined();
-  expect(validateTimeout("1")).toBeUndefined();
-  expect(validateTimeout("3600")).toBeUndefined();
-  expect(validateTimeout("0")).toBeTruthy();
-  expect(validateTimeout("3601")).toBeTruthy();
-  expect(validateTimeout("3.5")).toBeTruthy();
-  expect(validateTimeout("")).toBeTruthy();
-
+it("validates retention ranges", () => {
   expect(validateRetention("7")).toBeUndefined();
   expect(validateRetention("3650")).toBeUndefined();
   expect(validateRetention("6")).toBeTruthy();
@@ -36,7 +27,6 @@ it("validates timeout and retention ranges", () => {
 
 it("validates the settings form", () => {
   const base = {
-    timeoutS: "30",
     retentionDays: "90",
     currentPassword: "",
     newPassword: "",
@@ -44,13 +34,11 @@ it("validates the settings form", () => {
     passwordSet: false,
   };
   expect(validateSettings(base)).toEqual({});
-  expect(validateSettings({ ...base, timeoutS: "0" }).timeoutS).toBeTruthy();
   expect(validateSettings({ ...base, retentionDays: "3651" }).retentionDays).toBeTruthy();
 });
 
 it("requires the current password when one is set", () => {
   const base = {
-    timeoutS: "30",
     retentionDays: "90",
     currentPassword: "",
     newPassword: "newpass12",
@@ -69,7 +57,6 @@ it("requires the current password to clear it", () => {
 
 it("rejects short and mismatched passwords", () => {
   const base = {
-    timeoutS: "30",
     retentionDays: "90",
     currentPassword: "",
     newPassword: "",
@@ -91,7 +78,6 @@ it("redacts settings for display only", () => {
   const settings: Settings = {
     upstream: {
       baseUrl: "https://api.example.com/v1",
-      timeoutS: 30,
       apiKey: { set: true, last4: "1234" },
     },
     timezone: "Asia/Shanghai",

@@ -34,12 +34,9 @@ const (
 const (
 	defaultTimezone      = "Asia/Shanghai"
 	defaultRetentionDays = 90
-	defaultTimeout       = 300 * time.Second
 
 	minRetentionDays = 7
 	maxRetentionDays = 3650
-	minTimeout       = time.Second
-	maxTimeout       = 3600 * time.Second
 	minPasswordLen   = 8
 )
 
@@ -55,7 +52,6 @@ var (
 type Upstream struct {
 	BaseURL string
 	APIKey  string
-	Timeout time.Duration
 }
 
 // Snapshot is an immutable view of the settings and price table.
@@ -83,7 +79,6 @@ type SetupInput struct {
 type Patch struct {
 	BaseURL       *string
 	APIKey        *string
-	Timeout       *time.Duration
 	Timezone      *string
 	RetentionDays *int
 }
@@ -136,9 +131,8 @@ func (r *Repo) Snapshot() *Snapshot {
 }
 
 type upstreamJSON struct {
-	BaseURL  string `json:"baseUrl"`
-	APIKey   string `json:"apiKey"`
-	TimeoutS int    `json:"timeoutS"`
+	BaseURL string `json:"baseUrl"`
+	APIKey  string `json:"apiKey"`
 }
 
 // Refresh rebuilds the snapshot from the database and swaps it in. A failed
@@ -146,7 +140,7 @@ type upstreamJSON struct {
 func (r *Repo) Refresh() error {
 	ctx := context.Background()
 
-	up := Upstream{Timeout: defaultTimeout}
+	up := Upstream{}
 	tz := defaultTimezone
 	retention := defaultRetentionDays
 	gatewayKey := ""
@@ -172,9 +166,6 @@ func (r *Repo) Refresh() error {
 			}
 			up.BaseURL = u.BaseURL
 			up.APIKey = u.APIKey
-			if u.TimeoutS > 0 {
-				up.Timeout = time.Duration(u.TimeoutS) * time.Second
-			}
 		case keyTimezone:
 			tz = value
 		case keyRetentionDays:
@@ -241,13 +232,6 @@ func (r *Repo) Setup(ctx context.Context, in SetupInput) (string, error) {
 	if in.Upstream.APIKey == "" {
 		fields["apiKey"] = "required"
 	}
-	timeout := in.Upstream.Timeout
-	if timeout == 0 {
-		timeout = defaultTimeout
-	}
-	if timeout < minTimeout || timeout > maxTimeout {
-		fields["timeoutS"] = fmt.Sprintf("must be between %d and %d", int(minTimeout/time.Second), int(maxTimeout/time.Second))
-	}
 	tz := strings.TrimSpace(in.Timezone)
 	if tz == "" {
 		tz = defaultTimezone
@@ -276,9 +260,8 @@ func (r *Repo) Setup(ctx context.Context, in SetupInput) (string, error) {
 		return "", err
 	}
 	upJSON, err := json.Marshal(upstreamJSON{
-		BaseURL:  baseURL,
-		APIKey:   in.Upstream.APIKey,
-		TimeoutS: int(timeout / time.Second),
+		BaseURL: baseURL,
+		APIKey:  in.Upstream.APIKey,
 	})
 	if err != nil {
 		return "", fmt.Errorf("settings: encode upstream: %w", err)
@@ -350,7 +333,7 @@ func (r *Repo) ApplyPatch(ctx context.Context, p Patch, pw *PasswordChange) erro
 	fields := make(map[string]string)
 	updates := make(map[string]string)
 
-	up := Upstream{Timeout: defaultTimeout}
+	up := Upstream{}
 	if snap != nil {
 		up = snap.Upstream
 	}
@@ -369,14 +352,6 @@ func (r *Repo) ApplyPatch(ctx context.Context, p Patch, pw *PasswordChange) erro
 		// An empty API key means "leave unchanged".
 		up.APIKey = *p.APIKey
 		upstreamChanged = true
-	}
-	if p.Timeout != nil {
-		if *p.Timeout < minTimeout || *p.Timeout > maxTimeout {
-			fields["timeoutS"] = fmt.Sprintf("must be between %d and %d", int(minTimeout/time.Second), int(maxTimeout/time.Second))
-		} else {
-			up.Timeout = *p.Timeout
-			upstreamChanged = true
-		}
 	}
 	if p.Timezone != nil {
 		tz := strings.TrimSpace(*p.Timezone)
@@ -411,9 +386,8 @@ func (r *Repo) ApplyPatch(ctx context.Context, p Patch, pw *PasswordChange) erro
 
 	if upstreamChanged {
 		b, err := json.Marshal(upstreamJSON{
-			BaseURL:  up.BaseURL,
-			APIKey:   up.APIKey,
-			TimeoutS: int(up.Timeout / time.Second),
+			BaseURL: up.BaseURL,
+			APIKey:  up.APIKey,
 		})
 		if err != nil {
 			return fmt.Errorf("settings: encode upstream: %w", err)

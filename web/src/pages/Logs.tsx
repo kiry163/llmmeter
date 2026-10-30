@@ -1,190 +1,290 @@
 import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
-import { useMemo, useState, type ReactElement } from "react";
+import { useMemo, useState, type KeyboardEvent, type ReactElement } from "react";
 import { useSearchParams } from "react-router-dom";
 import { api } from "../api/client";
+import type { RequestParams } from "../api/client";
 import type { RequestRecord } from "../api/types";
-import { DataTable } from "../components/DataTable";
-import type { Column } from "../components/DataTable";
-import { EmptyState } from "../components/EmptyState";
-import { ErrorBanner } from "../components/ErrorBanner";
-import { Filters } from "../components/Filters";
-import { PageHeader } from "../components/PageHeader";
+import { useChartTheme } from "../components/charts";
+import { PageHeader, RangeSeg } from "../components/PageHeader";
 import { RequestDrawer } from "../components/RequestDrawer";
-import { Skeleton } from "../components/Skeleton";
-import { Badge, Button, Card } from "../components/ui";
+import { Spinner } from "../components/ui";
 import { useTimezone } from "../hooks/useTimezone";
 import {
   formatCost,
   formatDuration,
+  formatOptionalDuration,
   formatRate,
   formatTime,
   formatTokens,
 } from "../lib/format";
 import {
-  REQUESTS_PAGE_LIMIT,
-  buildRequestsQuery,
-  filtersToApiParams,
-  parseRequestsFilters,
-  serializeRequestsFilters,
+  PATH_CLASS_FILTERS,
+  USAGE_STATUS_FILTERS,
+  type PathClassFilter,
+  type UsageStatusFilter,
 } from "../lib/query";
-import type { RequestsFilters } from "../lib/query";
 import { presetRange } from "../lib/range";
 import { tokensPerSecond } from "../lib/speed";
-import { TOO_LARGE_HINT, usageLabel, usageTone } from "../lib/usage";
+import { RANGE_OPTIONS, modelColor, statusTone, type UiRange } from "../lib/ui";
+import { TOO_LARGE_HINT, usageLabel } from "../lib/usage";
 
-const SKELETON_ROWS = [0, 1, 2, 3, 4, 5];
+const PAGE_SIZE = 12;
 
-function statusTone(status: number): "success" | "warning" | "danger" {
-  if (status >= 500) return "danger";
-  if (status >= 400) return "warning";
-  return "success";
+const STATUS_CLASSES = ["2xx", "4xx", "5xx"] as const;
+type StatusClass = (typeof STATUS_CLASSES)[number];
+
+type StreamFilter = "all" | "true" | "false";
+type PricingFilter = "all" | "priced" | "unpriced";
+
+interface LogsFilters {
+  range: UiRange;
+  model: string;
+  pathClass: PathClassFilter | "";
+  statusClass: StatusClass | "";
+  usageStatus: UsageStatusFilter | "";
+  stream: StreamFilter;
+  pricing: PricingFilter;
 }
 
-/** UsageBadge explains the too_large outcome on hover. */
+const DEFAULT_FILTERS: LogsFilters = {
+  range: "today",
+  model: "",
+  pathClass: "",
+  statusClass: "",
+  usageStatus: "",
+  stream: "all",
+  pricing: "all",
+};
+
+const USAGE_CLASS: Record<string, "ok" | "warn" | "err" | "muted"> = {
+  ok: "ok",
+  no_usage: "muted",
+  parse_failed: "warn",
+  too_large: "warn",
+  not_applicable: "muted",
+  error: "err",
+};
+
+function parseLogsFilters(params: URLSearchParams): LogsFilters {
+  const rawRange = params.get("range");
+  const range: UiRange = RANGE_OPTIONS.some((option) => option.value === rawRange)
+    ? (rawRange as UiRange)
+    : DEFAULT_FILTERS.range;
+
+  const rawPath = params.get("path") ?? "";
+  const rawStatus = params.get("status") ?? "";
+  const rawUsage = params.get("usage") ?? "";
+  const rawStream = params.get("stream") ?? "";
+  const rawPricing = params.get("pricing") ?? "";
+
+  return {
+    range,
+    model: (params.get("model") ?? "").trim(),
+    pathClass: PATH_CLASS_FILTERS.includes(rawPath as PathClassFilter)
+      ? (rawPath as PathClassFilter)
+      : "",
+    statusClass: STATUS_CLASSES.includes(rawStatus as StatusClass)
+      ? (rawStatus as StatusClass)
+      : "",
+    usageStatus: USAGE_STATUS_FILTERS.includes(rawUsage as UsageStatusFilter)
+      ? (rawUsage as UsageStatusFilter)
+      : "",
+    stream: rawStream === "true" || rawStream === "false" ? rawStream : "all",
+    pricing: rawPricing === "priced" || rawPricing === "unpriced" ? rawPricing : "all",
+  };
+}
+
+function serializeLogsFilters(filters: LogsFilters): URLSearchParams {
+  const params = new URLSearchParams();
+  if (filters.range !== DEFAULT_FILTERS.range) params.set("range", filters.range);
+  if (filters.model) params.set("model", filters.model);
+  if (filters.pathClass) params.set("path", filters.pathClass);
+  if (filters.statusClass) params.set("status", filters.statusClass);
+  if (filters.usageStatus) params.set("usage", filters.usageStatus);
+  if (filters.stream !== "all") params.set("stream", filters.stream);
+  if (filters.pricing !== "all") params.set("pricing", filters.pricing);
+  return params;
+}
+
+function timeLabel(iso: string, timeZone: string | undefined): string {
+  // The prototype shows MM-DD HH:mm:ss; formatTime starts with the year.
+  return formatTime(iso, timeZone).slice(5);
+}
+
 function UsageBadge({ status }: { status: string }): ReactElement {
-  const hint = status === "too_large" ? TOO_LARGE_HINT : undefined;
   return (
-    <span title={hint} className="inline-flex">
-      <Badge tone={usageTone(status)}>{usageLabel(status)}</Badge>
+    <span
+      className={`usage ${USAGE_CLASS[status] ?? "muted"}`}
+      title={status === "too_large" ? TOO_LARGE_HINT : undefined}
+    >
+      {usageLabel(status)}
     </span>
   );
 }
 
-function ModelCell({ record }: { record: RequestRecord }): ReactElement {
+function StatusBadges({ record }: { record: RequestRecord }): ReactElement {
+  return (
+    <>
+      <span className={`status ${statusTone(record.status)}`}>{record.status}</span>
+      <UsageBadge status={record.usageStatus} />
+    </>
+  );
+}
+
+function ModelLabel({ record }: { record: RequestRecord }): ReactElement {
+  const theme = useChartTheme();
   const upstreamHint =
     record.upstreamModel && record.upstreamModel !== record.model
       ? `上游模型：${record.upstreamModel}`
       : undefined;
   return (
-    <span className="inline-flex flex-wrap items-center gap-2" title={upstreamHint}>
-      <span className="font-medium">{record.model || "—"}</span>
-      <Badge tone={record.stream ? "info" : "neutral"}>
+    <div className="log-model" title={upstreamHint}>
+      {record.model && (
+        <span
+          className="dot"
+          style={{
+            display: "inline-block",
+            flex: "0 0 auto",
+            width: 5,
+            height: 5,
+            borderRadius: "50%",
+            background: modelColor(record.model, theme.palette),
+          }}
+        />
+      )}
+      <span>{record.model || "—"}</span>
+      <span className={`stream-badge${record.stream ? " on" : ""}`}>
         {record.stream ? "流式" : "非流式"}
-      </Badge>
-    </span>
+      </span>
+    </div>
   );
 }
 
-function TokenCell({ record }: { record: RequestRecord }): ReactElement {
+function CostValue({ record }: { record: RequestRecord }): ReactElement {
+  return record.priced ? (
+    <span>{formatCost(record.costNanoUsd)}</span>
+  ) : (
+    <span className="unpriced">未定价</span>
+  );
+}
+
+function TokenValue({ record }: { record: RequestRecord }): ReactElement {
   return (
-    <span className="block whitespace-nowrap">
-      <span className="block tabular-nums">
-        输入 {formatTokens(record.promptTokens)} / 输出 {formatTokens(record.completionTokens)}
-      </span>
-      <span className="block text-xs text-muted">
-        缓存↓ {formatTokens(record.cacheReadTokens)}
-      </span>
-    </span>
+    <div className="log-token">
+      <b>
+        {formatTokens(record.promptTokens)} / {formatTokens(record.completionTokens)}
+      </b>
+      <small>缓存 ↓ {formatTokens(record.cacheReadTokens)}</small>
+    </div>
   );
 }
 
-function LatencyCell({ record }: { record: RequestRecord }): ReactElement {
+function LatencyValue({ record }: { record: RequestRecord }): ReactElement {
   return (
-    <span className="block whitespace-nowrap">
-      <span className="block tabular-nums">
-        首字 {record.ttftMs === null ? "—" : formatDuration(record.ttftMs)}
-      </span>
-      <span className="block text-xs tabular-nums text-muted">
-        总 {formatDuration(record.latencyMs)}
-      </span>
-    </span>
+    <div className="log-lat">
+      <span>首字 {formatOptionalDuration(record.ttftMs)}</span>
+      <small>总 {formatDuration(record.latencyMs)}</small>
+    </div>
   );
 }
 
-function SpeedCell({ record }: { record: RequestRecord }): ReactElement {
-  const rate = tokensPerSecond(
+function speedOf(record: RequestRecord): number | null {
+  return tokensPerSecond(
     record.completionTokens,
     record.latencyMs,
     record.ttftMs,
     record.stream,
   );
-  return <span className="tabular-nums">{formatRate(rate)}</span>;
 }
 
-function CostCell({ record }: { record: RequestRecord }): ReactElement {
-  return record.priced ? (
-    <span className="tabular-nums">{formatCost(record.costNanoUsd)}</span>
-  ) : (
-    <span className="text-muted">未定价</span>
-  );
+function rowKeyHandler(onOpen: () => void) {
+  return (event: KeyboardEvent<HTMLElement>) => {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      onOpen();
+    }
+  };
 }
 
-function StatusCell({ record }: { record: RequestRecord }): ReactElement {
-  return (
-    <span className="inline-flex flex-wrap items-center gap-1.5">
-      <Badge tone={statusTone(record.status)}>{record.status}</Badge>
-      <UsageBadge status={record.usageStatus} />
-    </span>
-  );
-}
-
-function timeLabel(record: RequestRecord, timeZone: string | undefined, today: string): string {
-  const full = formatTime(record.startedAt, timeZone);
-  return record.localDay === today ? full.slice(11) : full;
-}
-
-/** LogCard is the narrow-screen rendering of one log row. */
-function LogCard({
+function LogRow({
   record,
   timeZone,
-  today,
+  selected,
   onOpen,
 }: {
   record: RequestRecord;
   timeZone: string | undefined;
-  today: string;
+  selected: boolean;
   onOpen: (id: number) => void;
 }): ReactElement {
   return (
-    <article
+    <tr
+      className={selected ? "selected" : undefined}
+      tabIndex={0}
+      onClick={() => onOpen(record.id)}
+      onKeyDown={rowKeyHandler(() => onOpen(record.id))}
+    >
+      <td>{timeLabel(record.startedAt, timeZone)}</td>
+      <td>
+        <ModelLabel record={record} />
+      </td>
+      <td>
+        <TokenValue record={record} />
+      </td>
+      <td className="num">
+        <CostValue record={record} />
+      </td>
+      <td>
+        <LatencyValue record={record} />
+      </td>
+      <td className="num">{formatRate(speedOf(record))}</td>
+      <td>
+        <StatusBadges record={record} />
+      </td>
+    </tr>
+  );
+}
+
+function LogCard({
+  record,
+  timeZone,
+  onOpen,
+}: {
+  record: RequestRecord;
+  timeZone: string | undefined;
+  onOpen: (id: number) => void;
+}): ReactElement {
+  const speed = speedOf(record);
+  return (
+    <div
+      className="log-card-row"
       role="button"
       tabIndex={0}
       aria-label={`请求 #${record.id}`}
       onClick={() => onOpen(record.id)}
-      onKeyDown={(event) => {
-        if (event.key === "Enter" || event.key === " ") {
-          event.preventDefault();
-          onOpen(record.id);
-        }
-      }}
-      className="cursor-pointer rounded-lg border border-line bg-surface-raised p-3 text-sm hover:bg-line/20 focus:bg-line/20 focus:outline-none"
+      onKeyDown={rowKeyHandler(() => onOpen(record.id))}
     >
-      <div className="flex flex-wrap items-start justify-between gap-2">
-        <ModelCell record={record} />
-        <StatusCell record={record} />
+      <div className="log-card-top">
+        <ModelLabel record={record} />
+        <CostValue record={record} />
       </div>
-      <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted">
-        <span className="tabular-nums">{timeLabel(record, timeZone, today)}</span>
-        <Badge tone="info">{record.pathClass}</Badge>
-        <span>#{record.id}</span>
+      <div className="log-card-meta">
+        <span>{timeLabel(record.startedAt, timeZone)}</span>
+        <span>
+          <b>{formatTokens(record.promptTokens)}</b> /{" "}
+          <b>{formatTokens(record.completionTokens)}</b> tok
+        </span>
+        <span>缓存 ↓ {formatTokens(record.cacheReadTokens)}</span>
+        <span>
+          首字 {formatOptionalDuration(record.ttftMs)} · 总{" "}
+          {formatDuration(record.latencyMs)}
+        </span>
+        {speed !== null && <span>{formatRate(speed)}</span>}
+        <span>
+          <StatusBadges record={record} />
+        </span>
       </div>
-      <dl className="mt-2 grid grid-cols-2 gap-x-3 gap-y-2 text-xs">
-        <div>
-          <dt className="text-muted">Token</dt>
-          <dd>
-            <TokenCell record={record} />
-          </dd>
-        </div>
-        <div>
-          <dt className="text-muted">费用</dt>
-          <dd>
-            <CostCell record={record} />
-          </dd>
-        </div>
-        <div>
-          <dt className="text-muted">耗时</dt>
-          <dd>
-            <LatencyCell record={record} />
-          </dd>
-        </div>
-        <div>
-          <dt className="text-muted">速度</dt>
-          <dd>
-            <SpeedCell record={record} />
-          </dd>
-        </div>
-      </dl>
-    </article>
+    </div>
   );
 }
 
@@ -194,197 +294,305 @@ export function Logs(): ReactElement {
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const timeZone = useTimezone();
 
-  const filters = useMemo(
-    () => parseRequestsFilters(searchParams, timeZone),
-    [searchParams, timeZone],
-  );
-  const apiParams = useMemo(() => filtersToApiParams(filters), [filters]);
-  const queryKey = buildRequestsQuery({ ...apiParams, stream: filters.stream });
-  const today = presetRange("today", new Date(), timeZone).to;
+  const filters = useMemo(() => parseLogsFilters(searchParams), [searchParams]);
 
-  const models = useQuery({ queryKey: ["models"], queryFn: api.getModels });
+  const apiParams = useMemo<RequestParams>(() => {
+    const bounds = presetRange(filters.range, new Date(), timeZone);
+    return {
+      from: bounds.from,
+      to: bounds.to,
+      model: filters.model || undefined,
+      pathClass: filters.pathClass || undefined,
+      statusClass: filters.statusClass || undefined,
+      usageStatus: filters.usageStatus || undefined,
+      stream: filters.stream === "all" ? undefined : filters.stream === "true",
+      priced:
+        filters.pricing === "all" ? undefined : filters.pricing === "priced",
+    };
+  }, [filters, timeZone]);
 
   const list = useInfiniteQuery({
-    queryKey: ["requests", queryKey],
+    queryKey: ["requests", apiParams],
     queryFn: ({ pageParam }) =>
-      api.getRequests({ ...apiParams, beforeId: pageParam, limit: REQUESTS_PAGE_LIMIT }),
+      api.getRequests({ ...apiParams, beforeId: pageParam, limit: PAGE_SIZE }),
     initialPageParam: undefined as number | undefined,
     getNextPageParam: (lastPage, _allPages, lastPageParam) => {
       const next = lastPage.nextBeforeId;
-      if (lastPage.requests.length === 0 || next <= 0) return undefined;
-      // Guard against a backend that echoes the cursor on an exhausted page.
+      if (lastPage.requests.length === 0 || lastPage.requests.length < PAGE_SIZE || next <= 0) {
+        return undefined;
+      }
+      // Guards a backend that echoes the cursor on an exhausted page.
       if (lastPageParam !== undefined && next >= lastPageParam) return undefined;
       return next;
     },
+  });
+
+  const configuredModels = useQuery({
+    queryKey: ["models"],
+    queryFn: api.getModels,
+  });
+  const catalog = useQuery({
+    queryKey: ["model-catalog"],
+    queryFn: () => api.getModelCatalog(false),
   });
 
   const rows = useMemo(
     () => list.data?.pages.flatMap((page) => page.requests) ?? [],
     [list.data],
   );
+  const summary = list.data?.pages[0]?.summary;
 
   const modelOptions = useMemo(() => {
     const names = new Set<string>();
-    for (const model of models.data?.models ?? []) names.add(model.name);
-    for (const record of rows) if (record.model) names.add(record.model);
+    for (const model of configuredModels.data?.models ?? []) names.add(model.name);
+    for (const observed of catalog.data?.observed ?? []) names.add(observed.model);
     if (filters.model) names.add(filters.model);
-    return [...names].sort((left, right) => left.localeCompare(right));
-  }, [models.data, rows, filters.model]);
+    return [...names].filter((name) => name !== "").sort((a, b) => a.localeCompare(b));
+  }, [configuredModels.data, catalog.data, filters.model]);
 
   const hasActiveFilters =
     filters.model !== "" ||
     filters.pathClass !== "" ||
-    filters.status !== "" ||
+    filters.statusClass !== "" ||
     filters.usageStatus !== "" ||
     filters.stream !== "all" ||
-    filters.priced !== "all";
+    filters.pricing !== "all";
 
-  const columns = useMemo<Column<RequestRecord>[]>(
-    () => [
-      {
-        key: "time",
-        header: "时间",
-        className: "whitespace-nowrap tabular-nums",
-        render: (record) => timeLabel(record, timeZone, today),
-      },
-      {
-        key: "model",
-        header: "模型",
-        render: (record) => <ModelCell record={record} />,
-      },
-      {
-        key: "tokens",
-        header: "Token",
-        render: (record) => <TokenCell record={record} />,
-      },
-      {
-        key: "cost",
-        header: "费用",
-        className: "text-right tabular-nums",
-        render: (record) => <CostCell record={record} />,
-      },
-      {
-        key: "latency",
-        header: "耗时",
-        render: (record) => <LatencyCell record={record} />,
-      },
-      {
-        key: "speed",
-        header: "速度",
-        className: "text-right tabular-nums",
-        render: (record) => <SpeedCell record={record} />,
-      },
-      {
-        key: "status",
-        header: "状态",
-        render: (record) => <StatusCell record={record} />,
-      },
-    ],
-    [timeZone, today],
-  );
-
-  const updateFilters = (next: RequestsFilters) => {
-    // A new filter set is a new cursor: dropping the search string resets
-    // before_id pagination (the list query key changes with it).
-    setSearchParams(serializeRequestsFilters(next), { replace: true });
+  const updateFilter = (patch: Partial<LogsFilters>) => {
+    const next = { ...filters, ...patch };
+    setSearchParams(serializeLogsFilters(next), { replace: true });
   };
 
+  const resetFilters = () => {
+    setSearchParams(new URLSearchParams(), { replace: true });
+  };
+
+  const showEmpty =
+    list.isSuccess && rows.length === 0 && !list.isFetchingNextPage;
+
   return (
-    <div className="space-y-4">
+    <div className="view active">
       <PageHeader
+        eyebrow="logs"
         title="日志"
-        description={`${filters.from} 至 ${filters.to} · 点击行查看明细`}
+        subtitle="请求明细、筛选与排障"
         actions={
-          rows.length > 0 ? (
-            <span className="text-xs text-muted">已加载 {formatTokens(rows.length)} 条</span>
-          ) : undefined
+          <RangeSeg
+            value={filters.range}
+            options={RANGE_OPTIONS}
+            onChange={(range) => updateFilter({ range })}
+            ariaLabel="日志时间范围"
+          />
         }
       />
 
-      <div className="rounded-lg border border-line bg-surface-raised p-3">
-        <Filters
-          filters={filters}
-          models={modelOptions}
-          onChange={updateFilters}
-          onReset={() => setSearchParams(new URLSearchParams(), { replace: true })}
-        />
+      <section className="card log-filters" aria-label="筛选">
+        <label className="filter">
+          <span>模型</span>
+          <select
+            value={filters.model}
+            onChange={(event) => updateFilter({ model: event.target.value })}
+          >
+            <option value="">全部</option>
+            {modelOptions.map((name) => (
+              <option key={name} value={name}>
+                {name}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        <label className="filter">
+          <span>路径类</span>
+          <select
+            value={filters.pathClass}
+            onChange={(event) =>
+              updateFilter({ pathClass: event.target.value as LogsFilters["pathClass"] })
+            }
+          >
+            <option value="">全部</option>
+            {PATH_CLASS_FILTERS.map((pathClass) => (
+              <option key={pathClass} value={pathClass}>
+                {pathClass}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        <label className="filter">
+          <span>状态</span>
+          <select
+            value={filters.statusClass}
+            onChange={(event) =>
+              updateFilter({ statusClass: event.target.value as LogsFilters["statusClass"] })
+            }
+          >
+            <option value="">全部</option>
+            {STATUS_CLASSES.map((statusClass) => (
+              <option key={statusClass} value={statusClass}>
+                {statusClass}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        <label className="filter">
+          <span>用量</span>
+          <select
+            value={filters.usageStatus}
+            onChange={(event) =>
+              updateFilter({ usageStatus: event.target.value as LogsFilters["usageStatus"] })
+            }
+          >
+            <option value="">全部</option>
+            {USAGE_STATUS_FILTERS.map((status) => (
+              <option key={status} value={status}>
+                {usageLabel(status)}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        <label className="filter">
+          <span>流式</span>
+          <select
+            value={filters.stream}
+            onChange={(event) =>
+              updateFilter({ stream: event.target.value as StreamFilter })
+            }
+          >
+            <option value="all">全部</option>
+            <option value="true">流式</option>
+            <option value="false">非流式</option>
+          </select>
+        </label>
+
+        <label className="filter">
+          <span>定价</span>
+          <select
+            value={filters.pricing}
+            onChange={(event) =>
+              updateFilter({ pricing: event.target.value as PricingFilter })
+            }
+          >
+            <option value="all">全部</option>
+            <option value="priced">已定价</option>
+            <option value="unpriced">未定价</option>
+          </select>
+        </label>
+
+        <button type="button" className="ghost-btn" onClick={resetFilters}>
+          重置
+        </button>
+      </section>
+
+      <div className="log-summary" aria-label="筛选结果摘要">
+        <span className="summary-item">
+          <span>请求</span>
+          <b>{summary ? formatTokens(summary.requests) : "—"}</b>
+        </span>
+        <span className="summary-item">
+          <span>花费</span>
+          <b>{summary ? formatCost(summary.costNanoUsd) : "—"}</b>
+        </span>
+        <span className="summary-item">
+          <span>Tokens</span>
+          <b>{summary ? formatTokens(summary.totalTokens) : "—"}</b>
+        </span>
+        <span className="summary-item">
+          <span>错误</span>
+          <b>{summary ? formatTokens(summary.errors) : "—"}</b>
+        </span>
       </div>
 
-      <Card>
+      <section className="card log-card">
         {list.isError && (
-          <ErrorBanner error={list.error} onRetry={() => void list.refetch()} />
-        )}
-
-        {list.isPending && (
-          <div className="space-y-2" role="status" aria-label="加载日志">
-            {SKELETON_ROWS.map((index) => (
-              <Skeleton key={index} className="h-12 w-full" />
-            ))}
+          <div className="error-banner">
+            <span>
+              {list.error instanceof Error ? list.error.message : "日志加载失败"}
+            </span>
+            <button
+              type="button"
+              className="ghost-btn"
+              onClick={() => void list.refetch()}
+            >
+              重试
+            </button>
           </div>
         )}
 
-        {list.data && rows.length === 0 && (
-          <EmptyState
-            title={hasActiveFilters ? "没有匹配的请求" : "暂无请求记录"}
-            description={
-              hasActiveFilters
-                ? "当前筛选条件下没有日志，试试放宽或重置筛选。"
-                : "所选时间段内还没有经过网关的请求。"
-            }
-            action={
-              hasActiveFilters ? (
-                <Button
-                  variant="secondary"
-                  onClick={() => setSearchParams(new URLSearchParams(), { replace: true })}
-                >
-                  重置筛选
-                </Button>
-              ) : undefined
-            }
-          />
+        {list.isPending && (
+          <div className="log-empty">
+            <Spinner label="加载日志…" />
+          </div>
+        )}
+
+        {showEmpty && (
+          <div className="log-empty">
+            {hasActiveFilters ? "没有匹配的请求" : "暂无请求记录"}
+          </div>
         )}
 
         {rows.length > 0 && (
           <>
-            <div className="hidden min-[769px]:block">
-              <DataTable
-                columns={columns}
-                rows={rows}
-                rowKey={(record) => String(record.id)}
-                onRowClick={(record) => setSelectedId(record.id)}
-                scrollClassName="max-h-[calc(100vh-22rem)] overflow-y-auto"
-              />
+            <div className="log-table-wrap">
+              <table className="log-table">
+                <thead>
+                  <tr>
+                    <th>时间</th>
+                    <th>模型</th>
+                    <th>Token</th>
+                    <th className="num">费用</th>
+                    <th>耗时</th>
+                    <th className="num">速度</th>
+                    <th>状态</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rows.map((record) => (
+                    <LogRow
+                      key={record.id}
+                      record={record}
+                      timeZone={timeZone}
+                      selected={selectedId === record.id}
+                      onOpen={setSelectedId}
+                    />
+                  ))}
+                </tbody>
+              </table>
             </div>
 
-            <ul className="space-y-2 min-[769px]:hidden">
+            <div className="log-cards">
               {rows.map((record) => (
-                <li key={record.id}>
-                  <LogCard
-                    record={record}
-                    timeZone={timeZone}
-                    today={today}
-                    onOpen={setSelectedId}
-                  />
-                </li>
+                <LogCard
+                  key={record.id}
+                  record={record}
+                  timeZone={timeZone}
+                  onOpen={setSelectedId}
+                />
               ))}
-            </ul>
+            </div>
 
-            <div className="mt-3 flex flex-wrap items-center justify-end gap-3">
-              {list.hasNextPage ? (
-                <Button
-                  variant="secondary"
+            <div className="log-more">
+              {list.hasNextPage && (
+                <button
+                  type="button"
+                  className="ghost-btn"
                   disabled={list.isFetchingNextPage}
                   onClick={() => void list.fetchNextPage()}
                 >
                   {list.isFetchingNextPage ? "加载中…" : "加载更多"}
-                </Button>
-              ) : (
-                <span className="text-xs text-muted">已到末尾</span>
+                </button>
               )}
+              <span>
+                {summary
+                  ? `已显示 ${formatTokens(rows.length)} / ${formatTokens(summary.requests)}`
+                  : ""}
+              </span>
             </div>
           </>
         )}
-      </Card>
+      </section>
 
       <RequestDrawer requestId={selectedId} onClose={() => setSelectedId(null)} />
     </div>

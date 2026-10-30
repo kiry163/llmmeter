@@ -57,7 +57,6 @@ export function maskValue(secret: string): string {
 export interface RedactedSettings {
   upstream: {
     baseUrl: string;
-    timeoutS: number;
     apiKey: string;
   };
   timezone: string;
@@ -80,7 +79,6 @@ export function redactSettings(settings: Settings): RedactedSettings {
   return {
     upstream: {
       baseUrl: settings.upstream.baseUrl,
-      timeoutS: settings.upstream.timeoutS,
       apiKey: apiKey.set ? `••••${apiKey.last4}` : "未设置",
     },
     timezone: settings.timezone,
@@ -94,15 +92,6 @@ export function redactSettings(settings: Settings): RedactedSettings {
     dbSizeBytes: settings.dbSizeBytes,
     version: settings.version,
   };
-}
-
-/** validateTimeout checks the upstream timeout in seconds. */
-export function validateTimeout(raw: string): string | undefined {
-  const value = Number(raw);
-  if (raw.trim() === "" || !Number.isInteger(value) || value < 1 || value > 3600) {
-    return "超时需在 1–3600 秒之间";
-  }
-  return undefined;
 }
 
 /** validateRetention checks the detail retention window in days. */
@@ -141,7 +130,6 @@ export function validateClearPassword(currentPassword: string): string | undefin
 
 /** SettingsDraft is the editable state of the settings form. */
 export interface SettingsDraft {
-  timeoutS: string;
   retentionDays: string;
   currentPassword: string;
   newPassword: string;
@@ -156,9 +144,6 @@ export interface SettingsDraft {
  */
 export function validateSettings(draft: SettingsDraft): FormErrors {
   const errors: FormErrors = {};
-
-  const timeout = validateTimeout(draft.timeoutS);
-  if (timeout) errors.timeoutS = timeout;
 
   const retention = validateRetention(draft.retentionDays);
   if (retention) errors.retentionDays = retention;

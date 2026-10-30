@@ -36,7 +36,6 @@ func newAPIServerWithUpstream(t *testing.T, upstreamURL string) *httptest.Server
 		Upstream: settings.Upstream{
 			BaseURL: upstreamURL,
 			APIKey:  "sk-up",
-			Timeout: 30 * time.Second,
 		},
 		Timezone: "UTC",
 	}); err != nil {

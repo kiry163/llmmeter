@@ -64,7 +64,7 @@ func newCatalog(repo *settings.Repo, st *store.Store, now func() time.Time) *cat
 		repo:   repo,
 		store:  st,
 		now:    now,
-		client: &http.Client{Timeout: upstreamProbeTimeout},
+		client: &http.Client{},
 	}
 }
 

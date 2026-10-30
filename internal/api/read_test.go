@@ -60,7 +60,6 @@ func newAPIServerStore(t *testing.T, seeded bool, listen string) (*httptest.Serv
 			Upstream: settings.Upstream{
 				BaseURL: "https://api.example.com",
 				APIKey:  "sk-secret-1234",
-				Timeout: 30 * time.Second,
 			},
 			Timezone: "UTC",
 		}); err != nil {
@@ -255,13 +254,22 @@ func TestBootstrapShape(t *testing.T) {
 		AuthRequired bool   `json:"authRequired"`
 		Listen       string `json:"listen"`
 		Timezone     string `json:"timezone"`
+		EarliestDay  string `json:"earliestDay"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 		t.Fatal(err)
 	}
 	if body.Version != "test" || body.NeedsSetup || body.AuthRequired ||
-		body.Listen != "127.0.0.1:8100" || body.Timezone != "UTC" {
+		body.Listen != "127.0.0.1:8100" || body.Timezone != "UTC" ||
+		body.EarliestDay != "2026-10-29" {
 		t.Fatalf("bootstrap = %+v", body)
+	}
+
+	// Without traffic the earliest day is empty rather than omitted.
+	emptySrv := newAPIServer(t, false)
+	rec = doGET(t, emptySrv, "/api/bootstrap")
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"earliestDay":""`) {
+		t.Fatalf("empty bootstrap = %d %s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -300,16 +308,17 @@ func TestSeriesAndBreakdown(t *testing.T) {
 	}
 	var series struct {
 		Points []struct {
-			Day      string `json:"day"`
-			Requests int64  `json:"requests"`
-			Cost     int64  `json:"costNanoUsd"`
+			Day       string `json:"day"`
+			Requests  int64  `json:"requests"`
+			CacheRead int64  `json:"cacheReadTokens"`
+			Cost      int64  `json:"costNanoUsd"`
 		} `json:"points"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &series); err != nil {
 		t.Fatal(err)
 	}
 	if len(series.Points) != 1 || series.Points[0].Requests != 2 ||
-		series.Points[0].Cost != 1000 {
+		series.Points[0].Cost != 1000 || series.Points[0].CacheRead != 10 {
 		t.Fatalf("series = %+v", series.Points)
 	}
 
@@ -388,6 +397,81 @@ func TestRequestsDetailAndCursor(t *testing.T) {
 	rec = doGET(t, srv, "/api/requests?from=2026-10-29&to=2026-10-29&stream=maybe")
 	if rec.Code != 400 || !strings.Contains(rec.Body.String(), `"code":"validation"`) {
 		t.Fatalf("stream=maybe = %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestRequestsStatusClassAndSummary(t *testing.T) {
+	srv := newAPIServer(t, true)
+
+	type page struct {
+		Requests []struct {
+			Status int `json:"status"`
+		} `json:"requests"`
+		Summary struct {
+			Requests    int64 `json:"requests"`
+			CostNanoUSD int64 `json:"costNanoUsd"`
+			TotalTokens int64 `json:"totalTokens"`
+			Errors      int64 `json:"errors"`
+		} `json:"summary"`
+	}
+	get := func(t *testing.T, query string) page {
+		t.Helper()
+		rec := doGET(t, srv, "/api/requests?from=2026-10-29&to=2026-10-29"+query)
+		if rec.Code != 200 {
+			t.Fatalf("requests %s = %d %s", query, rec.Code, rec.Body.String())
+		}
+		var p page
+		if err := json.Unmarshal(rec.Body.Bytes(), &p); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+
+	cases := []struct {
+		name  string
+		query string
+		rows  int
+	}{
+		{"2xx", "&statusClass=2xx", 2},
+		{"4xx", "&statusClass=4xx", 0},
+		{"5xx", "&statusClass=5xx", 0},
+		{"no filter", "", 2},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := get(t, tc.query)
+			if len(p.Requests) != tc.rows {
+				t.Fatalf("rows = %+v", p.Requests)
+			}
+			if p.Summary.Requests != int64(tc.rows) {
+				t.Fatalf("summary = %+v", p.Summary)
+			}
+		})
+	}
+
+	for _, bad := range []string{"3xx", "abc", "200"} {
+		rec := doGET(t, srv, "/api/requests?from=2026-10-29&to=2026-10-29&statusClass="+bad)
+		if rec.Code != 400 || !strings.Contains(rec.Body.String(), `"code":"validation"`) {
+			t.Fatalf("statusClass=%s = %d %s", bad, rec.Code, rec.Body.String())
+		}
+	}
+
+	// The summary covers the whole filtered set even when the page is cut by
+	// the cursor and limit.
+	p := get(t, "&limit=1&before_id=999")
+	if len(p.Requests) != 1 {
+		t.Fatalf("paged rows = %+v", p.Requests)
+	}
+	if p.Summary.Requests != 2 || p.Summary.CostNanoUSD != 1000 ||
+		p.Summary.TotalTokens != 160 || p.Summary.Errors != 0 {
+		t.Fatalf("summary = %+v", p.Summary)
+	}
+	// Exact status and class compose.
+	if p := get(t, "&statusClass=2xx&status=200"); len(p.Requests) != 2 {
+		t.Fatalf("2xx + 200 rows = %+v", p.Requests)
+	}
+	if p := get(t, "&statusClass=4xx&status=200"); len(p.Requests) != 0 {
+		t.Fatalf("4xx + 200 rows = %+v", p.Requests)
 	}
 }
 
@@ -477,7 +561,7 @@ func TestUnauthenticatedRequestsRejected(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := repo.Setup(context.Background(), settings.SetupInput{
-		Upstream: settings.Upstream{BaseURL: "https://api.example.com", APIKey: "sk-up", Timeout: 30 * time.Second},
+		Upstream: settings.Upstream{BaseURL: "https://api.example.com", APIKey: "sk-up"},
 		Timezone: "UTC", AdminPassword: "hunter22",
 	}); err != nil {
 		t.Fatal(err)

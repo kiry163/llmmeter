@@ -13,6 +13,19 @@ export function formatBytes(bytes: number): string {
   return `${value.toFixed(1)} ${byteUnits[unit]}`;
 }
 
+/** formatBytesDecimal renders decimal units (KB/MB/GB) for dashboard labels. */
+export function formatBytesDecimal(bytes: number, digits = 1): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB", "TB"] as const;
+  let value = bytes;
+  let unit = 0;
+  while (value >= 1000 && unit < units.length - 1) {
+    value /= 1000;
+    unit += 1;
+  }
+  return unit === 0 ? `${Math.round(value)} B` : `${value.toFixed(digits)} ${units[unit]}`;
+}
+
 /**
  * formatCost converts nano USD to USD. Amounts of at least one cent keep four
  * decimals; smaller amounts keep up to nine decimals without trailing zeros.

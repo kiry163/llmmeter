@@ -1,76 +1,35 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { useState, type FormEvent, type ReactNode } from "react";
+import { useState, type FormEvent } from "react";
 import { useNavigate } from "react-router-dom";
 import { ApiError, api } from "../api/client";
-import type { Bootstrap, Me } from "../api/types";
-import { Button, Card, ErrorText, Input, Select, useToast } from "../components/ui";
+import { AuthLayout } from "../components/AuthLayout";
+import { Button, Input, Select, useToast } from "../components/ui";
+import { useDocumentTitle } from "../hooks/useDocumentTitle";
 import {
   browserTimezone,
   timezoneOptions,
-  validateTimeout,
   type FormErrors,
 } from "../lib/settings";
 
-function Field({
-  label,
-  hint,
-  error,
-  children,
-}: {
-  label: string;
-  hint?: string;
-  error?: string;
-  children: ReactNode;
-}) {
-  return (
-    <label className="block">
-      <span className="mb-1 flex items-baseline justify-between gap-2 text-xs text-muted">
-        <span>{label}</span>
-        {hint && <span className="text-[11px]">{hint}</span>}
-      </span>
-      {children}
-      {error && <span className="mt-1 block text-xs text-danger">{error}</span>}
-    </label>
-  );
-}
+const FIELD_LABELS: Record<string, string> = {
+  baseUrl: "上游 Base URL",
+  apiKey: "上游 API Key",
+  timezone: "时区",
+  adminPassword: "管理密码",
+};
 
+/** Setup is the two-step first-run wizard that creates the gateway key. */
 export function Setup() {
+  useDocumentTitle("首次配置");
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const toast = useToast();
 
   const [baseUrl, setBaseUrl] = useState("https://api.deepseek.com");
   const [apiKey, setApiKey] = useState("");
-  const [timeoutS, setTimeoutS] = useState("30");
   const [timezone, setTimezone] = useState(browserTimezone);
   const [password, setPassword] = useState("");
-  const [confirmPassword, setConfirmPassword] = useState("");
   const [errors, setErrors] = useState<FormErrors>({});
-  const [testState, setTestState] = useState<{
-    tone: "success" | "warning";
-    text: string;
-  } | null>(null);
-
-  const test = useMutation({
-    mutationFn: () =>
-      api.testUpstream({ baseUrl: baseUrl.trim(), apiKey: apiKey.trim() }),
-    onSuccess: (result) => {
-      setTestState(
-        result.ok
-          ? { tone: "success", text: "上游连接正常" }
-          : {
-              tone: "warning",
-              text: `连接失败：${result.message ?? `HTTP ${result.status}`}`,
-            },
-      );
-    },
-    onError: (error) => {
-      setTestState({
-        tone: "warning",
-        text: `连接失败：${error instanceof Error ? error.message : String(error)}`,
-      });
-    },
-  });
 
   const setup = useMutation({
     mutationFn: () =>
@@ -78,170 +37,172 @@ export function Setup() {
         upstream: {
           baseUrl: baseUrl.trim(),
           apiKey: apiKey.trim(),
-          timeoutS: Number(timeoutS),
         },
         timezone,
         adminPassword: password,
       }),
-    onError: async (error) => {
+    onError: (error) => {
       // Another tab may have completed setup; refresh the guard so it routes
       // to the login or overview page instead of resubmitting.
       if (error instanceof ApiError && error.status === 409) {
-        await queryClient.invalidateQueries({ queryKey: ["bootstrap"] });
+        void queryClient.invalidateQueries({ queryKey: ["bootstrap"] });
       }
     },
   });
 
+  function clearError(field: string) {
+    setErrors((current) => {
+      if (!(field in current)) return current;
+      const next = { ...current };
+      delete next[field];
+      return next;
+    });
+    if (setup.isError && !setup.isPending) setup.reset();
+  }
+
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const nextErrors: FormErrors = {};
-    if (baseUrl.trim() === "") nextErrors.baseUrl = "请填写上游 Base URL";
-    if (apiKey.trim() === "") nextErrors.apiKey = "请填写上游 API Key";
-    const timeoutError = validateTimeout(timeoutS);
-    if (timeoutError) nextErrors.timeoutS = timeoutError;
-    if (timezone.trim() === "") nextErrors.timezone = "请选择时区";
-    if (password !== "" && password.length < 8) {
-      nextErrors.password = "密码至少需要 8 个字符";
-    } else if (password !== confirmPassword) {
-      nextErrors.confirmPassword = "两次输入的密码不一致";
+    const next: FormErrors = {};
+    if (!/^https?:\/\//i.test(baseUrl.trim())) {
+      next.baseUrl = "请输入 http(s):// 开头的 Base URL";
     }
-    setErrors(nextErrors);
-    if (Object.keys(nextErrors).length > 0) return;
+    if (apiKey.trim() === "") next.apiKey = "请填写上游 API Key";
+    if (password !== "" && password.length < 8) {
+      next.adminPassword = "管理密码至少需要 8 个字符";
+    }
+    setErrors(next);
+    if (Object.keys(next).length > 0) return;
     setup.mutate();
   }
 
-  function enterOverview() {
-    const authRequired = password !== "";
-    queryClient.setQueryData<Bootstrap>(["bootstrap"], (current) =>
-      current ? { ...current, needsSetup: false, authRequired } : current,
-    );
-    queryClient.setQueryData<Me>(["me"], { authRequired, authenticated: true });
+  async function enterOverview() {
+    // Refresh the guard before leaving so it does not bounce back to /setup
+    // with the stale needsSetup flag.
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: ["bootstrap"] }),
+      queryClient.invalidateQueries({ queryKey: ["me"] }),
+      queryClient.invalidateQueries({ queryKey: ["settings"] }),
+    ]);
     navigate("/", { replace: true });
-    void queryClient.invalidateQueries({ queryKey: ["bootstrap"] });
-    void queryClient.invalidateQueries({ queryKey: ["me"] });
   }
 
-  async function copyKey(key: string) {
+  async function copyKey() {
+    const key = setup.data?.gatewayKey;
+    if (!key) return;
     try {
       await navigator.clipboard.writeText(key);
-      toast("已复制 gateway key", "success");
+      toast("gateway key 已复制", "success");
     } catch {
       toast("复制失败，请手动选择并复制", "error");
     }
   }
 
-  const result = setup.data;
-  if (result) {
-    const gatewayBase = `${window.location.origin}/v1`;
-    return (
-      <div className="mx-auto max-w-xl p-6 text-ink">
-        <h1 className="mb-2 text-xl font-semibold">初始化完成</h1>
-        <p className="mb-4 text-sm text-muted">
-          请立即复制并妥善保存 gateway key，此明文仅显示一次。
-        </p>
+  const gatewayKey = setup.data?.gatewayKey;
+  const apiFields: Record<string, string> =
+    setup.error instanceof ApiError ? setup.error.fields : {};
+  const problems: string[] = [
+    ...Object.entries(errors).map(([field, message]) => `${FIELD_LABELS[field] ?? field}：${message}`),
+    ...(setup.isError
+      ? Object.keys(apiFields).length > 0
+        ? Object.entries(apiFields).map(
+            ([field, message]) => `${FIELD_LABELS[field] ?? field}：${message}`,
+          )
+        : [setup.error instanceof Error ? setup.error.message : "配置失败，请重试"]
+      : []),
+  ];
+  const hasProblems = problems.length > 0;
 
-        <Card title="Gateway Key">
-          <code className="block break-all rounded bg-line/30 px-3 py-2 text-sm">
-            {result.gatewayKey}
-          </code>
-          <div className="mt-3 flex flex-wrap gap-2">
-            <Button onClick={() => void copyKey(result.gatewayKey)}>复制</Button>
-            <Button variant="secondary" onClick={enterOverview}>
+  return (
+    <AuthLayout
+      eyebrow="first run"
+      heading={
+        <>
+          第一次打开，
+          <br />
+          先把网关接上。
+        </>
+      }
+      lead="填写上游服务与可选的访问密码，生成客户端使用的 gateway key。整个过程只写入本机 SQLite。"
+      stats={[
+        { value: "1", label: "个上游" },
+        { value: "0", label: "外部依赖" },
+        { value: "本机", label: "数据位置" },
+      ]}
+    >
+      <div className="auth-card setup-card">
+        <div className="setup-steps">
+          <span className={gatewayKey ? "" : "on"}>1 上游</span>
+          <span className={gatewayKey ? "on" : ""}>2 Gateway Key</span>
+        </div>
+
+        {gatewayKey ? (
+          <div>
+            <div className="page-eyebrow">ready</div>
+            <h2>网关已就绪</h2>
+            <p className="auth-sub">这是客户端使用的 gateway key，明文只显示这一次。</p>
+            <div className="key-box">
+              <code>{gatewayKey}</code>
+              <Button
+                variant="secondary"
+                onClick={() => void copyKey()}
+                aria-label="复制 gateway key"
+              >
+                复制
+              </Button>
+            </div>
+            <div className="setup-warning">
+              请立刻保存。之后只能在设置页轮换，无法再次查看。
+            </div>
+            <Button className="auth-submit" onClick={() => void enterOverview()}>
               进入总览
             </Button>
           </div>
-        </Card>
+        ) : (
+          <form onSubmit={submit} aria-describedby={hasProblems ? "setup-error" : undefined}>
+            <div className="page-eyebrow">first run</div>
+            <h2>首次配置</h2>
+            <p className="auth-sub">填写上游服务，生成客户端使用的 gateway key。</p>
 
-        <Card title="客户端接入" className="mt-4">
-          <p className="mb-2 text-sm text-muted">
-            将以下 <code className="text-ink">base_url</code> 与 gateway key 填入任意
-            OpenAI 兼容客户端。
-          </p>
-          <pre className="overflow-x-auto rounded bg-line/30 px-3 py-2 text-xs">
-            {`base_url = "${gatewayBase}"\napi_key  = "<上方生成的 gateway key>"`}
-          </pre>
-        </Card>
-      </div>
-    );
-  }
-
-  const fieldErrors = setup.error instanceof ApiError ? Object.entries(setup.error.fields) : [];
-
-  return (
-    <div className="mx-auto max-w-xl p-6 text-ink">
-      <h1 className="mb-2 text-xl font-semibold">引导设置</h1>
-      <p className="mb-4 text-sm text-muted">
-        配置上游地址、时区与管理密码，完成后会生成一次性 gateway key。
-      </p>
-
-      <form onSubmit={submit} className="space-y-4">
-        <Card
-          title="上游"
-          actions={
-            <Button
-              variant="secondary"
-              onClick={() => test.mutate()}
-              disabled={test.isPending}
-            >
-              {test.isPending ? "测试中…" : "测试连接"}
-            </Button>
-          }
-        >
-          <div className="space-y-3">
-            <Field
-              label="Base URL"
-              hint="不要带 /v1，客户端请求路径会原样拼接"
-              error={errors.baseUrl}
-            >
+            <label className="auth-field">
+              <span>上游 Base URL</span>
               <Input
                 value={baseUrl}
-                onChange={(event) => setBaseUrl(event.target.value)}
+                onChange={(event) => {
+                  setBaseUrl(event.target.value);
+                  clearError("baseUrl");
+                }}
                 placeholder="https://api.deepseek.com"
                 autoComplete="off"
                 required
+                aria-invalid={errors.baseUrl !== undefined || apiFields.baseUrl !== undefined}
               />
-            </Field>
-            <Field label="API Key" error={errors.apiKey}>
+            </label>
+
+            <label className="auth-field">
+              <span>上游 API Key</span>
               <Input
                 type="password"
                 value={apiKey}
-                onChange={(event) => setApiKey(event.target.value)}
-                autoComplete="off"
+                onChange={(event) => {
+                  setApiKey(event.target.value);
+                  clearError("apiKey");
+                }}
+                placeholder="sk-..."
+                autoComplete="new-password"
                 required
+                aria-invalid={errors.apiKey !== undefined || apiFields.apiKey !== undefined}
               />
-            </Field>
-            <Field label="超时（秒）" error={errors.timeoutS}>
-              <Input
-                type="number"
-                min={1}
-                max={3600}
-                value={timeoutS}
-                onChange={(event) => setTimeoutS(event.target.value)}
-              />
-            </Field>
-            {testState && (
-              <p
-                className={
-                  testState.tone === "success"
-                    ? "text-xs text-success"
-                    : "text-xs text-warning"
-                }
-                role="status"
-              >
-                {testState.text}
-              </p>
-            )}
-            <p className="text-xs text-muted">测试失败不影响提交，可稍后在设置页修改。</p>
-          </div>
-        </Card>
+            </label>
 
-        <Card title="时区与管理密码">
-          <div className="space-y-3">
-            <Field label="时区" hint="用于日期分桶与高峰价匹配" error={errors.timezone}>
+            <label className="auth-field">
+              <span>时区</span>
               <Select
-                className="w-full"
                 value={timezone}
-                onChange={(event) => setTimezone(event.target.value)}
+                onChange={(event) => {
+                  setTimezone(event.target.value);
+                  clearError("timezone");
+                }}
+                aria-invalid={errors.timezone !== undefined || apiFields.timezone !== undefined}
               >
                 {timezoneOptions(timezone).map((zone) => (
                   <option key={zone} value={zone}>
@@ -249,50 +210,38 @@ export function Setup() {
                   </option>
                 ))}
               </Select>
-            </Field>
-            <div className="grid gap-3 sm:grid-cols-2">
-              <Field label="管理密码" hint="可选，至少 8 位" error={errors.password}>
-                <Input
-                  type="password"
-                  value={password}
-                  onChange={(event) => setPassword(event.target.value)}
-                  autoComplete="new-password"
-                />
-              </Field>
-              <Field label="确认密码" error={errors.confirmPassword}>
-                <Input
-                  type="password"
-                  value={confirmPassword}
-                  onChange={(event) => setConfirmPassword(event.target.value)}
-                  autoComplete="new-password"
-                />
-              </Field>
-            </div>
-            <p className="text-xs text-muted">
-              留空则仅允许本机访问；设置后登录管理界面需要密码。
-            </p>
-          </div>
-        </Card>
+            </label>
 
-        {setup.isError && (
-          <div className="space-y-1">
-            <ErrorText error={setup.error} />
-            {fieldErrors.length > 0 && (
-              <ul className="space-y-0.5 text-xs text-danger">
-                {fieldErrors.map(([field, message]) => (
-                  <li key={field}>
-                    {field}：{message}
-                  </li>
+            <label className="auth-field">
+              <span>管理密码（可选）</span>
+              <Input
+                type="password"
+                value={password}
+                onChange={(event) => {
+                  setPassword(event.target.value);
+                  clearError("adminPassword");
+                }}
+                placeholder="留空则仅本机访问"
+                autoComplete="new-password"
+                aria-invalid={errors.adminPassword !== undefined || apiFields.adminPassword !== undefined}
+              />
+            </label>
+
+            {hasProblems && (
+              <div className="auth-error" id="setup-error" role="alert">
+                {problems.map((problem) => (
+                  <div key={problem}>{problem}</div>
                 ))}
-              </ul>
+              </div>
             )}
-          </div>
-        )}
 
-        <Button type="submit" disabled={setup.isPending}>
-          {setup.isPending ? "提交中…" : "完成设置"}
-        </Button>
-      </form>
-    </div>
+            <Button type="submit" className="auth-submit" disabled={setup.isPending}>
+              {setup.isPending ? "生成中…" : "生成 Gateway Key"}
+            </Button>
+            <div className="auth-meta">不要在上游 Base URL 后加 /v1</div>
+          </form>
+        )}
+      </div>
+    </AuthLayout>
   );
 }

@@ -30,7 +30,6 @@ func newTestRepo(t *testing.T) *settings.Repo {
 		Upstream: settings.Upstream{
 			BaseURL: "https://api.example.com",
 			APIKey:  "sk-up",
-			Timeout: 30 * time.Second,
 		},
 		Timezone: "UTC",
 	}); err != nil {
@@ -54,7 +53,7 @@ func TestSetupAndSnapshot(t *testing.T) {
 	}
 
 	key, err := repo.Setup(context.Background(), settings.SetupInput{
-		Upstream:      settings.Upstream{BaseURL: "https://api.example.com", APIKey: "sk-up", Timeout: 30 * time.Second},
+		Upstream:      settings.Upstream{BaseURL: "https://api.example.com", APIKey: "sk-up"},
 		Timezone:      "Asia/Shanghai",
 		AdminPassword: "hunter22",
 	})

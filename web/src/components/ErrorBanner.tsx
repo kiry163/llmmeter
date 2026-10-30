@@ -10,9 +10,7 @@ export interface ErrorBannerProps {
 /** ErrorBanner shows a section-level failure without blanking the page. */
 export function ErrorBanner({ error, onRetry, className = "" }: ErrorBannerProps): ReactElement {
   return (
-    <div
-      className={`flex flex-wrap items-center justify-between gap-3 rounded-md border border-danger/40 bg-danger/10 px-3 py-2 ${className}`}
-    >
+    <div className={`error-banner ${className}`.trim()} role="alert">
       <ErrorText error={error} />
       {onRetry && (
         <Button variant="secondary" onClick={onRetry}>

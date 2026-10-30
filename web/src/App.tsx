@@ -53,8 +53,8 @@ const queryClient = new QueryClient({
 
 function FullPage({ children }: { children: ReactNode }) {
   return (
-    <div className="flex min-h-screen items-center justify-center bg-surface p-6 text-ink">
-      {children}
+    <div className="full-page">
+      <div className="full-card">{children}</div>
     </div>
   );
 }
@@ -62,10 +62,12 @@ function FullPage({ children }: { children: ReactNode }) {
 function LoadFailure({ error, onRetry }: { error: unknown; onRetry: () => void }) {
   return (
     <FullPage>
-      <div className="w-full max-w-sm space-y-3">
-        <h1 className="text-lg font-semibold">无法连接服务</h1>
+      <div className="auth-card">
+        <div className="auth-sub">无法连接服务</div>
         <ErrorText error={error} />
-        <Button onClick={onRetry}>重试</Button>
+        <div className="form-actions">
+          <Button onClick={onRetry}>重试</Button>
+        </div>
       </div>
     </FullPage>
   );
@@ -126,9 +128,9 @@ function LocalOnlyGate() {
 
   return (
     <FullPage>
-      <div className="w-full max-w-sm space-y-2">
-        <h1 className="text-lg font-semibold">仅限本机访问</h1>
-        <p className="text-sm text-muted">
+      <div className="auth-card">
+        <div className="auth-sub">仅限本机访问</div>
+        <p className="auth-sub">
           当前未设置管理密码，llmmeter 只允许从运行服务的机器访问。请在服务器本机打开此页面。
         </p>
       </div>

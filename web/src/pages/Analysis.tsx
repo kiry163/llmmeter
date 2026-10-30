@@ -1,10 +1,9 @@
-import { keepPreviousData, useQuery } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import type { EChartsCoreOption } from "echarts/core";
-import { useCallback, useMemo, useState, type ReactElement, type ReactNode } from "react";
+import { useCallback, useMemo, useState, type ReactElement } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { api } from "../api/client";
 import type {
-  AnalysisCache,
   AnalysisHealth,
   AnalysisRow,
   AnalysisTopRequest,
@@ -12,23 +11,19 @@ import type {
   Interval,
   TrendModel,
 } from "../api/types";
-import { DataTable } from "../components/DataTable";
-import type { Column } from "../components/DataTable";
 import { ErrorBanner } from "../components/ErrorBanner";
-import { PageHeader } from "../components/PageHeader";
-import { RangeBar } from "../components/RangeBar";
+import { PageHeader, RangeSeg } from "../components/PageHeader";
 import { RequestDrawer } from "../components/RequestDrawer";
-import { Skeleton } from "../components/Skeleton";
 import {
-  CHART_GRID,
-  CHART_MUTED,
   CHART_PALETTE,
   CHART_TOOLTIP,
   LineChart,
+  chartTooltip,
+  useChartTheme,
 } from "../components/charts";
-import type { ChartEventParams } from "../components/charts";
-import { Badge, Card } from "../components/ui";
+import type { ChartTheme } from "../components/charts";
 import { useTimezone } from "../hooks/useTimezone";
+import { UNKNOWN_KEY } from "../lib/analysis";
 import {
   formatBytes,
   formatCost,
@@ -37,76 +32,47 @@ import {
   formatTime,
   formatTokens,
 } from "../lib/format";
-import {
-  UNKNOWN_KEY,
-  chartClickModel,
-  filterModelRows,
-  parseModelFilter,
-  trendHasModel,
-} from "../lib/analysis";
-import { autoInterval, parseRangeSelection, rangeDays } from "../lib/range";
-import type { RangeSelection } from "../lib/range";
+import { RANGE_OPTIONS, compactNumber, modelColor, rangeBounds } from "../lib/ui";
+import type { UiRange } from "../lib/ui";
 
-type MetricKey = "cost" | "tokens" | "traffic" | "requests";
+type MetricKey = "cost" | "tokens" | "requests" | "bytes";
 
 type TopTab = "cost" | "tokens" | "latency";
 
-type RankKey = "requests" | "errors" | "tokens" | "cacheRead" | "traffic" | "cost";
-
-/** RankSort is a ranking order; metric records which trend metric it belongs to. */
-interface RankSort {
-  metric: MetricKey;
-  key: RankKey;
-  direction: "asc" | "desc";
-}
-
-const METRICS: readonly MetricKey[] = ["cost", "tokens", "traffic", "requests"];
+const METRIC_OPTIONS: readonly { value: MetricKey; label: string }[] = [
+  { value: "cost", label: "花费" },
+  { value: "tokens", label: "Tokens" },
+  { value: "requests", label: "请求" },
+  { value: "bytes", label: "流量" },
+];
 
 const METRIC_LABELS: Record<MetricKey, string> = {
   cost: "花费",
   tokens: "Tokens",
-  traffic: "流量",
   requests: "请求",
+  bytes: "流量",
 };
 
-const TOP_TABS: readonly TopTab[] = ["cost", "tokens", "latency"];
+const TOP_OPTIONS: readonly { value: TopTab; label: string }[] = [
+  { value: "cost", label: "花费" },
+  { value: "tokens", label: "Tokens" },
+  { value: "latency", label: "耗时" },
+];
 
-const TOP_LABELS: Record<TopTab, string> = {
-  cost: "花费",
-  tokens: "Tokens",
-  latency: "耗时",
-};
-
-const INTERVAL_LABELS: Record<Interval, string> = {
-  minute: "按分钟",
-  hour: "按小时",
-  day: "按天",
-};
-
-const RANK_LABELS: Record<RankKey, string> = {
-  requests: "请求",
-  errors: "错误",
-  tokens: "Tokens",
-  cacheRead: "缓存读",
-  traffic: "流量",
-  cost: "花费",
-};
-
-const DEFAULT_METRIC: MetricKey = "cost";
-
-const DEFAULT_TOP_TAB: TopTab = "cost";
+const EMPTY_HIDDEN: ReadonlySet<string> = new Set<string>();
 
 /** metricValue reads one model's contribution for the active trend metric. */
-function metricValue(model: TrendModel, metric: MetricKey): number {
+function metricValue(model: TrendModel | undefined, metric: MetricKey): number {
+  if (!model) return 0;
   switch (metric) {
     case "cost":
       return model.costNanoUsd;
     case "tokens":
       return model.promptTokens + model.completionTokens;
-    case "traffic":
-      return model.upBytes + model.downBytes;
     case "requests":
       return model.requests;
+    case "bytes":
+      return model.upBytes + model.downBytes;
   }
 }
 
@@ -114,37 +80,102 @@ function metricValue(model: TrendModel, metric: MetricKey): number {
 const METRIC_FORMATTERS: Record<MetricKey, (value: number) => string> = {
   cost: formatCost,
   tokens: formatTokens,
-  traffic: formatBytes,
   requests: formatTokens,
+  bytes: formatBytes,
 };
 
-const METRIC_UNITS: Record<MetricKey, string> = {
-  cost: "USD",
-  tokens: "tokens",
-  traffic: "字节",
-  requests: "次",
-};
+function parseRange(params: URLSearchParams): UiRange {
+  const raw = params.get("range") ?? "";
+  return RANGE_OPTIONS.some((option) => option.value === raw) ? (raw as UiRange) : "today";
+}
 
 function parseMetric(params: URLSearchParams): MetricKey {
   const raw = params.get("metric") ?? "";
-  return METRICS.includes(raw as MetricKey) ? (raw as MetricKey) : DEFAULT_METRIC;
+  return METRIC_OPTIONS.some((option) => option.value === raw)
+    ? (raw as MetricKey)
+    : "cost";
 }
 
 function parseTopTab(params: URLSearchParams): TopTab {
   const raw = params.get("top") ?? "";
-  return TOP_TABS.includes(raw as TopTab) ? (raw as TopTab) : DEFAULT_TOP_TAB;
+  return TOP_OPTIONS.some((option) => option.value === raw) ? (raw as TopTab) : "cost";
 }
 
 /** bucketLabel renders a trend bucket at the interval's precision. */
 function bucketLabel(bucket: AnalysisTrendBucket, interval: Interval): string {
-  if (interval === "day") return bucket.day;
-  const day = bucket.day.slice(5);
+  if (interval === "day") return bucket.day.slice(5);
+  // Hour buckets carry the hour index in minuteOfDay (the SQL divides by 60).
   if (interval === "hour") {
-    return `${day} ${String(bucket.minuteOfDay).padStart(2, "0")}:00`;
+    return `${String(bucket.minuteOfDay).padStart(2, "0")}:00`;
   }
   const hour = String(Math.floor(bucket.minuteOfDay / 60)).padStart(2, "0");
   const minute = String(bucket.minuteOfDay % 60).padStart(2, "0");
-  return `${day} ${hour}:${minute}`;
+  return `${hour}:${minute}`;
+}
+
+/** eachDay lists the inclusive YYYY-MM-DD dates between from and to. */
+function eachDay(from: string, to: string): string[] {
+  const start = Date.parse(`${from}T00:00:00Z`);
+  const end = Date.parse(`${to}T00:00:00Z`);
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return [];
+  const days: string[] = [];
+  for (let time = start; time <= end; time += 86_400_000) {
+    days.push(new Date(time).toISOString().slice(0, 10));
+  }
+  return days;
+}
+
+/**
+ * fillBuckets restores the empty buckets the API omits: 24 hours for today,
+ * one bucket per calendar day for the longer ranges.
+ */
+function fillBuckets(
+  trend: AnalysisTrendBucket[],
+  range: UiRange,
+  bounds: { from: string; to: string },
+): AnalysisTrendBucket[] {
+  if (range === "today") {
+    const byHour = new Map<number, Record<string, TrendModel>>();
+    for (const bucket of trend) {
+      if (bucket.day !== bounds.to) continue;
+      byHour.set(bucket.minuteOfDay, bucket.byModel);
+    }
+    return Array.from({ length: 24 }, (_, hour) => ({
+      day: bounds.to,
+      minuteOfDay: hour,
+      byModel: byHour.get(hour) ?? {},
+    }));
+  }
+  const byDay = new Map<string, Record<string, TrendModel>>(
+    trend.map((bucket) => [bucket.day, bucket.byModel] as const),
+  );
+  return eachDay(bounds.from, bounds.to).map((day) => ({
+    day,
+    minuteOfDay: 0,
+    byModel: byDay.get(day) ?? {},
+  }));
+}
+
+/** trendModelNames lists the models present in the range, largest first. */
+function trendModelNames(buckets: AnalysisTrendBucket[], metric: MetricKey): string[] {
+  const totals = new Map<string, number>();
+  for (const bucket of buckets) {
+    for (const [model, stats] of Object.entries(bucket.byModel)) {
+      totals.set(model, (totals.get(model) ?? 0) + metricValue(stats, metric));
+    }
+  }
+  return [...totals.keys()].sort(
+    (left, right) => (totals.get(right) ?? 0) - (totals.get(left) ?? 0),
+  );
+}
+
+export interface TrendOptionStyle {
+  /** hidden names are left out of the series so the custom legend can toggle them. */
+  hidden?: ReadonlySet<string>;
+  colorFor?: (model: string) => string;
+  theme?: ChartTheme;
+  /** showLegend is false when the page renders its own legend controls. */
+  showLegend?: boolean;
 }
 
 export function buildTrendOption(
@@ -152,635 +183,534 @@ export function buildTrendOption(
   interval: Interval,
   metric: MetricKey,
   modelFilter: string,
+  style: TrendOptionStyle = {},
 ): EChartsCoreOption {
   const formatter = METRIC_FORMATTERS[metric];
-  const totals = new Map<string, number>();
-  for (const bucket of buckets) {
-    for (const [model, stats] of Object.entries(bucket.byModel)) {
-      totals.set(model, (totals.get(model) ?? 0) + metricValue(stats, metric));
-    }
-  }
+  const allModels = trendModelNames(buckets, metric);
+  const hidden = style.hidden ?? EMPTY_HIDDEN;
   const models = modelFilter
-    ? trendHasModel(buckets, modelFilter)
+    ? allModels.includes(modelFilter)
       ? [modelFilter]
       : []
-    : [...totals.keys()].sort(
-        (left, right) => (totals.get(right) ?? 0) - (totals.get(left) ?? 0),
-      );
+    : allModels.filter((model) => !hidden.has(model));
+  const palette = style.theme?.palette ?? CHART_PALETTE;
+  const colorFor = style.colorFor ?? ((model: string) => modelColor(model, palette));
 
   return {
     animationDuration: 250,
-    color: CHART_PALETTE,
-    grid: { left: 8, right: 16, top: models.length > 0 ? 44 : 16, bottom: 8, containLabel: true },
-    tooltip: { trigger: "axis", axisPointer: { type: "line" }, ...CHART_TOOLTIP },
+    grid: {
+      left: 6,
+      right: 14,
+      top: (style.showLegend ?? true) && models.length > 0 ? 44 : 16,
+      bottom: 4,
+      containLabel: true,
+    },
+    tooltip: style.theme ? chartTooltip(style.theme) : CHART_TOOLTIP,
     legend: {
-      show: models.length > 0,
+      show: (style.showLegend ?? true) && models.length > 0,
       type: "scroll",
       top: 0,
       icon: "roundRect",
       itemWidth: 10,
       itemHeight: 6,
-      textStyle: { color: CHART_MUTED },
-      pageTextStyle: { color: CHART_MUTED },
+      textStyle: { color: style.theme?.muted ?? "#8d99ad" },
+      pageTextStyle: { color: style.theme?.muted ?? "#8d99ad" },
       // ECharts only packs legend click payloads (componentType/value) when
       // triggerEvent is on; without it the legend click handler never fires.
       triggerEvent: true,
+      data: models.map((model) => model || UNKNOWN_KEY),
     },
     xAxis: {
       type: "category",
       boundaryGap: false,
       data: buckets.map((bucket) => bucketLabel(bucket, interval)),
-      axisLabel: { color: CHART_MUTED, hideOverlap: true },
-      axisLine: { lineStyle: { color: CHART_GRID } },
+      axisLabel: { color: style.theme?.muted ?? "#8d99ad", hideOverlap: true },
+      axisLine: { lineStyle: { color: style.theme?.grid ?? "rgba(148,163,184,.15)" } },
       axisTick: { show: false },
     },
     yAxis: {
       type: "value",
-      name: METRIC_UNITS[metric],
-      nameTextStyle: { color: CHART_MUTED },
-      axisLabel: { color: CHART_MUTED, formatter },
-      splitLine: { lineStyle: { color: CHART_GRID } },
+      min: 0,
+      axisLabel: {
+        color: style.theme?.muted ?? "#8d99ad",
+        formatter: (value: number) => formatter(value),
+      },
+      splitLine: { lineStyle: { color: style.theme?.grid ?? "rgba(148,163,184,.15)" } },
       axisLine: { show: false },
     },
-    series: models.map((model) => ({
-      type: "line",
-      name: model || UNKNOWN_KEY,
-      stack: "total",
-      data: buckets.map((bucket) => {
-        const stats = bucket.byModel[model];
-        return stats ? metricValue(stats, metric) : 0;
-      }),
-      showSymbol: false,
-      lineStyle: { width: 1 },
-      areaStyle: { opacity: 0.45 },
-      emphasis: { focus: "series" },
-      tooltip: { valueFormatter: (value: number) => formatter(Number(value)) },
-    })),
+    series: models.map((model) => {
+      const color = colorFor(model);
+      return {
+        type: "line",
+        name: model || UNKNOWN_KEY,
+        stack: "total",
+        smooth: true,
+        data: buckets.map((bucket) => metricValue(bucket.byModel[model], metric)),
+        showSymbol: false,
+        lineStyle: { width: 1, color },
+        itemStyle: { color },
+        areaStyle: { opacity: 0.18, color },
+        emphasis: { focus: "series" },
+        tooltip: { valueFormatter: (value: number) => formatter(Number(value)) },
+      };
+    }),
   };
 }
 
-/** rankValue reads the sortable numeric field of a ranking row. */
-function rankValue(row: AnalysisRow, key: RankKey): number {
-  switch (key) {
-    case "requests":
-      return row.requests;
-    case "errors":
-      return row.errors;
-    case "tokens":
-      return row.promptTokens + row.completionTokens;
-    case "cacheRead":
-      return row.cacheReadTokens;
-    case "traffic":
-      return row.upBytes + row.downBytes;
-    case "cost":
-      return row.costNanoUsd;
-  }
-}
-
-function effectiveSort(sort: RankSort | null, metric: MetricKey): RankSort {
-  if (sort && sort.metric === metric) return sort;
-  return { metric, key: metric, direction: "desc" };
-}
-
-/** logsHref builds a log URL carrying an explicit range and any filters. */
-function logsHref(
-  selection: { from: string; to: string },
-  filters: Record<string, string>,
-): string {
-  const params = new URLSearchParams();
-  params.set("range", "custom");
-  params.set("from", selection.from);
-  params.set("to", selection.to);
-  for (const [key, value] of Object.entries(filters)) {
-    if (value) params.set(key, value);
-  }
+function logsHref(range: UiRange, filters: { model?: string; path?: string }): string {
+  const params = new URLSearchParams({ range });
+  if (filters.model) params.set("model", filters.model);
+  if (filters.path) params.set("path", filters.path);
   return `/logs?${params.toString()}`;
 }
 
-function SortHeader({
-  label,
-  rankKey,
-  sort,
-  onSort,
-}: {
-  label: string;
-  rankKey: RankKey;
-  sort: RankSort;
-  onSort: (key: RankKey) => void;
-}): ReactElement {
-  const active = sort.key === rankKey;
-  return (
-    <button
-      type="button"
-      onClick={() => onSort(rankKey)}
-      aria-label={`按${label}排序`}
-      aria-pressed={active}
-      className={`inline-flex items-center gap-1 whitespace-nowrap ${
-        active ? "text-ink" : "text-muted hover:text-ink"
-      }`}
-    >
-      {label}
-      <span aria-hidden="true">{active ? (sort.direction === "desc" ? "↓" : "↑") : "↕"}</span>
-    </button>
-  );
-}
-
-/** Metric renders one compact label/value/hint block, as a button when clickable. */
-function Metric({
-  label,
-  value,
-  hint,
-  onClick,
-}: {
-  label: string;
-  value: ReactNode;
-  hint?: ReactNode;
-  onClick?: () => void;
-}): ReactElement {
-  const body = (
-    <>
-      <div className="text-xs text-muted">{label}</div>
-      <div className="mt-1 min-h-7 text-xl font-semibold leading-tight tabular-nums">{value}</div>
-      {hint && <div className="mt-1 text-xs text-muted">{hint}</div>}
-    </>
-  );
-  const base = "rounded-lg border border-line bg-surface-raised p-3";
-  if (onClick) {
-    return (
-      <button
-        type="button"
-        onClick={onClick}
-        className={`${base} text-left transition-colors hover:border-accent`}
-      >
-        {body}
-      </button>
-    );
+function topValue(row: AnalysisTopRequest, tab: TopTab): string {
+  switch (tab) {
+    case "cost":
+      return formatCost(row.costNanoUsd);
+    case "tokens":
+      return formatTokens(row.totalTokens);
+    case "latency":
+      return formatDuration(row.latencyMs);
   }
-  return <div className={base}>{body}</div>;
 }
 
-function HealthSection({
+function HealthGrid({
   health,
   partial,
-  onOpenLogs,
 }: {
   health: AnalysisHealth;
   partial: boolean;
-  onOpenLogs: (filters: Record<string, string>) => void;
 }): ReactElement {
-  const slowHint = `> ${formatDuration(health.slow.thresholdMs)}`;
+  const items: { label: string; value: string; sub: string }[] = [
+    { label: "请求", value: formatTokens(health.requests), sub: "当前区间" },
+    {
+      label: "错误率",
+      value: formatPercent(health.errorRate),
+      sub: `${formatTokens(health.errors)} 个错误`,
+    },
+    { label: "未计量", value: formatTokens(health.unmetered), sub: "usage 异常" },
+    { label: "未解析", value: formatTokens(health.tooLarge), sub: "响应过大" },
+    {
+      label: "慢请求",
+      value: formatTokens(health.slow.countOver),
+      sub: `> ${formatDuration(health.slow.thresholdMs)}`,
+    },
+    {
+      label: "P95",
+      value: health.slow.p95Ms === null ? "—" : formatDuration(health.slow.p95Ms),
+      sub: health.slow.p95Ms === null ? "超出明细保留期" : "延迟",
+    },
+  ];
+
   return (
-    <Card title="异常与慢请求">
-      <div className="grid grid-cols-2 gap-2 lg:grid-cols-4">
-        <Metric label="请求" value={formatTokens(health.requests)} />
-        <Metric
-          label="错误"
-          value={formatTokens(health.errors)}
-          hint={`错误率 ${formatPercent(health.errorRate)} · 点击查看日志`}
-          onClick={() => onOpenLogs({})}
-        />
-        <Metric
-          label="未计量"
-          value={formatTokens(health.unmetered)}
-          hint={partial ? "用量未解析 · 仅保留期内" : "用量未解析"}
-        />
-        <Metric
-          label="未解析（响应过大）"
-          value={formatTokens(health.tooLarge)}
-          hint={partial ? "仅保留期内 · 点击查看日志" : "点击查看日志"}
-          onClick={() => onOpenLogs({ usageStatus: "too_large" })}
-        />
-        <Metric
-          label="客户端断开"
-          value={formatTokens(health.clientDisconnected)}
-          hint={partial ? "请求未完成即断开 · 仅保留期内" : "请求未完成即断开"}
-        />
-        <Metric
-          label="慢请求"
-          value={formatTokens(health.slow.countOver)}
-          hint={
-            partial ? `总耗时 ${slowHint} · 仅保留期内` : `总耗时 ${slowHint}`
-          }
-        />
-        <Metric
-          label="P95 总耗时"
-          value={health.slow.p95Ms === null ? "—" : formatDuration(health.slow.p95Ms)}
-          hint={
-            health.slow.p95Ms === null
-              ? "超出明细保留期，无法估算"
-              : "总耗时分布"
-          }
-        />
-      </div>
-    </Card>
+    <div className="health-grid" style={partial ? { opacity: 0.72 } : undefined}>
+      {items.map((item) => (
+        <div className="health-item" key={item.label}>
+          <div className="health-label">{item.label}</div>
+          <div className="health-value">{item.value}</div>
+          <div className="health-sub">{item.sub}</div>
+        </div>
+      ))}
+    </div>
   );
 }
 
-function CacheSection({ cache }: { cache: AnalysisCache }): ReactElement {
+function RankList({
+  rows,
+  colorFor,
+  emptyLabel,
+  onOpen,
+}: {
+  rows: AnalysisRow[];
+  colorFor: (key: string) => string;
+  emptyLabel: string;
+  onOpen: (key: string) => void;
+}): ReactElement {
+  if (rows.length === 0) return <div className="log-empty">{emptyLabel}</div>;
+  const max = Math.max(...rows.map((row) => row.costNanoUsd), 1);
   return (
-    <Card title="缓存">
-      <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
-        <Metric label="命中率" value={formatPercent(cache.hitRate)} hint="cacheRead / prompt" />
-        <Metric label="缓存读 tokens" value={formatTokens(cache.cacheReadTokens)} />
-        <Metric
-          label="估算节省"
-          value={cache.available ? formatCost(cache.savedNanoUsd ?? 0) : "—"}
-          hint={
-            cache.available ? "按价格快照估算" : "超出明细保留期，无法估算"
-          }
-        />
-      </div>
-    </Card>
+    <div className="rank-list">
+      {rows.map((row) => {
+        const color = colorFor(row.key);
+        return (
+          <div
+            className="rank rank-row"
+            key={row.key || UNKNOWN_KEY}
+            role="button"
+            tabIndex={0}
+            onClick={() => onOpen(row.key)}
+            onKeyDown={(event) => {
+              if (event.key !== "Enter" && event.key !== " ") return;
+              event.preventDefault();
+              onOpen(row.key);
+            }}
+          >
+            <div className="rank-top">
+              <span className="rank-name">
+                <i className="sw" style={{ background: color }} />
+                <span>{row.key || UNKNOWN_KEY}</span>
+              </span>
+              <span className="rank-val">{formatCost(row.costNanoUsd)}</span>
+            </div>
+            <div className="rank-bar">
+              <i
+                style={{
+                  width: `${Math.max(2, (row.costNanoUsd / max) * 100)}%`,
+                  background: color,
+                }}
+              />
+            </div>
+            <div className="rank-requests">
+              {formatTokens(row.requests)} 请求 ·{" "}
+              {compactNumber(row.promptTokens + row.completionTokens)} tok
+            </div>
+          </div>
+        );
+      })}
+    </div>
   );
 }
 
-/** Analysis combines the model trend, rankings, top requests and health. */
+/** Analysis combines the model trend, top requests, health, cache and rankings. */
 export function Analysis(): ReactElement {
   const [searchParams, setSearchParams] = useSearchParams();
   const navigate = useNavigate();
   const timeZone = useTimezone();
-  const selection = useMemo(
-    () => parseRangeSelection(searchParams, timeZone),
-    [searchParams, timeZone],
-  );
+  const theme = useChartTheme();
+
+  const range = parseRange(searchParams);
   const metric = parseMetric(searchParams);
   const topTab = parseTopTab(searchParams);
-  const modelFilter = parseModelFilter(searchParams);
-  const interval = autoInterval(rangeDays(selection));
+  const bounds = useMemo(() => rangeBounds(range, timeZone), [range, timeZone]);
+  const interval: Interval = range === "today" ? "hour" : "day";
+
+  const [hidden, setHidden] = useState<ReadonlySet<string>>(() => new Set<string>());
   const [selectedId, setSelectedId] = useState<number | null>(null);
-  const [modelSort, setModelSort] = useState<RankSort | null>(null);
-  const [pathSort, setPathSort] = useState<RankSort | null>(null);
 
   const analysis = useQuery({
-    queryKey: ["analysis", selection.from, selection.to, interval],
+    queryKey: ["analysis", bounds.from, bounds.to, interval],
     queryFn: () =>
-      api.getAnalysis({ from: selection.from, to: selection.to, interval }),
-    placeholderData: keepPreviousData,
+      api.getAnalysis({ from: bounds.from, to: bounds.to, interval }),
   });
 
   const data = analysis.data;
   const partial = data?.range.partial ?? false;
 
-  const trendOption = useMemo(
-    () => buildTrendOption(data?.trend ?? [], interval, metric, modelFilter),
-    [data?.trend, interval, metric, modelFilter],
+  const buckets = useMemo(
+    () => fillBuckets(data?.trend ?? [], range, bounds),
+    [data?.trend, range, bounds],
   );
-
-  const openLogs = useCallback(
-    (filters: Record<string, string>) => {
-      navigate(logsHref(selection, filters));
-    },
-    [navigate, selection],
+  const modelNames = useMemo(() => trendModelNames(buckets, metric), [buckets, metric]);
+  const visibleModels = useMemo(
+    () => modelNames.filter((model) => !hidden.has(model)),
+    [modelNames, hidden],
   );
-
-  const trendEvents = useMemo(
-    () => ({
-      click: (params: ChartEventParams) => {
-        const model = chartClickModel(params);
-        openLogs(model ? { model } : {});
-      },
-    }),
-    [openLogs],
+  const colorFor = useCallback(
+    (model: string) => modelColor(model, theme.palette),
+    [theme.palette],
   );
-
-  const updateRange = (next: RangeSelection) => {
-    setSearchParams(
-      (current) => {
-        const params = new URLSearchParams(current);
-        params.set("range", next.preset);
-        if (next.preset === "custom") {
-          params.set("from", next.from);
-          params.set("to", next.to);
-        } else {
-          params.delete("from");
-          params.delete("to");
-        }
-        return params;
-      },
-      { replace: true },
-    );
-  };
-
-  const updateParam = (key: string, value: string | null) => {
-    setSearchParams(
-      (current) => {
-        const params = new URLSearchParams(current);
-        if (value === null) params.delete(key);
-        else params.set(key, value);
-        return params;
-      },
-      { replace: true },
-    );
-  };
-
-  const effectiveModelSort = effectiveSort(modelSort, metric);
-  const effectivePathSort = effectiveSort(pathSort, metric);
-
-  const modelRows = useMemo(() => {
-    const rows = filterModelRows(data?.models ?? [], modelFilter);
-    rows.sort((left, right) => {
-      const diff = rankValue(left, effectiveModelSort.key) - rankValue(right, effectiveModelSort.key);
-      return effectiveModelSort.direction === "desc" ? -diff : diff;
-    });
-    return rows;
-  }, [data?.models, effectiveModelSort, modelFilter]);
-
-  const pathRows = useMemo(() => {
-    const rows = [...(data?.paths ?? [])];
-    rows.sort((left, right) => {
-      const diff = rankValue(left, effectivePathSort.key) - rankValue(right, effectivePathSort.key);
-      return effectivePathSort.direction === "desc" ? -diff : diff;
-    });
-    return rows;
-  }, [data?.paths, effectivePathSort]);
-
-  const toggleSort = (
-    current: RankSort | null,
-    key: RankKey,
-  ): RankSort => {
-    const base = effectiveSort(current, metric);
-    if (base.key === key) {
-      return { metric, key, direction: base.direction === "desc" ? "asc" : "desc" };
-    }
-    return { metric, key, direction: "desc" };
-  };
-
-  const rankingColumns = (
-    name: string,
-    sort: RankSort,
-    onSort: (key: RankKey) => void,
-  ): Column<AnalysisRow>[] => [
-    {
-      key: "name",
-      header: name,
-      render: (row) => (
-        <span className="inline-flex flex-wrap items-center gap-2">
-          <span className="font-medium">{row.key || UNKNOWN_KEY}</span>
-          {row.unpriced > 0 && <Badge tone="warning">未定价 {formatTokens(row.unpriced)}</Badge>}
-        </span>
+  const chartHasData = useMemo(
+    () =>
+      visibleModels.some((model) =>
+        buckets.some((bucket) => metricValue(bucket.byModel[model], metric) > 0),
       ),
-    },
-    {
-      key: "requests",
-      header: <SortHeader label="请求" rankKey="requests" sort={sort} onSort={onSort} />,
-      className: "text-right tabular-nums",
-      render: (row) => formatTokens(row.requests),
-    },
-    {
-      key: "errors",
-      header: <SortHeader label="错误" rankKey="errors" sort={sort} onSort={onSort} />,
-      className: "text-right tabular-nums",
-      render: (row) => formatTokens(row.errors),
-    },
-    {
-      key: "tokens",
-      header: <SortHeader label="Tokens" rankKey="tokens" sort={sort} onSort={onSort} />,
-      className: "text-right tabular-nums",
-      render: (row) => formatTokens(row.promptTokens + row.completionTokens),
-    },
-    {
-      key: "cacheRead",
-      header: <SortHeader label="缓存读" rankKey="cacheRead" sort={sort} onSort={onSort} />,
-      className: "text-right tabular-nums",
-      render: (row) => formatTokens(row.cacheReadTokens),
-    },
-    {
-      key: "traffic",
-      header: <SortHeader label="流量" rankKey="traffic" sort={sort} onSort={onSort} />,
-      className: "text-right tabular-nums",
-      render: (row) => formatBytes(row.upBytes + row.downBytes),
-    },
-    {
-      key: "cost",
-      header: <SortHeader label="花费" rankKey="cost" sort={sort} onSort={onSort} />,
-      className: "text-right tabular-nums",
-      render: (row) => formatCost(row.costNanoUsd),
-    },
-  ];
+    [buckets, visibleModels, metric],
+  );
+  const chartOption = useMemo(
+    () =>
+      buildTrendOption(buckets, interval, metric, "", {
+        hidden,
+        colorFor,
+        theme,
+        showLegend: false,
+      }),
+    [buckets, interval, metric, hidden, colorFor, theme],
+  );
 
-  const topColumns: Column<AnalysisTopRequest>[] = [
-    {
-      key: "time",
-      header: "时间",
-      className: "whitespace-nowrap text-xs text-muted",
-      render: (row) => formatTime(row.startedAt, timeZone),
+  const updateParam = useCallback(
+    (key: string, value: string) => {
+      setSearchParams(
+        (current) => {
+          const params = new URLSearchParams(current);
+          params.set(key, value);
+          return params;
+        },
+        { replace: true },
+      );
     },
-    { key: "model", header: "模型", render: (row) => row.model || UNKNOWN_KEY },
-    {
-      key: "stream",
-      header: "流式",
-      render: (row) => (
-        <Badge tone={row.stream ? "info" : "neutral"}>
-          {row.stream ? "流式" : "非流式"}
-        </Badge>
-      ),
-    },
-    {
-      key: "tokens",
-      header: "Tokens",
-      className: "text-right tabular-nums",
-      render: (row) => formatTokens(row.totalTokens),
-    },
-    {
-      key: "cost",
-      header: "费用",
-      className: "text-right tabular-nums",
-      render: (row) => formatCost(row.costNanoUsd),
-    },
-    {
-      key: "latency",
-      header: "总耗时",
-      className: "text-right tabular-nums",
-      render: (row) => formatDuration(row.latencyMs),
-    },
-  ];
+    [setSearchParams],
+  );
+
+  const toggleModel = (model: string) => {
+    setHidden((current) => {
+      const next = new Set(current);
+      if (next.has(model)) next.delete(model);
+      else next.add(model);
+      return next;
+    });
+  };
+
+  const modelRank = useMemo(
+    () =>
+      [...(data?.models ?? [])]
+        .sort((left, right) => right.costNanoUsd - left.costNanoUsd)
+        .slice(0, 5),
+    [data?.models],
+  );
+  const pathRank = useMemo(
+    () =>
+      [...(data?.paths ?? [])]
+        .sort((left, right) => right.costNanoUsd - left.costNanoUsd)
+        .slice(0, 5),
+    [data?.paths],
+  );
 
   const topRows = data?.topRequests[topTab] ?? [];
+  const rangeLabel = RANGE_OPTIONS.find((option) => option.value === range)?.label ?? "";
+  const topEmptyLabel = partial
+    ? "超出明细保留期，无法显示 Top 榜单"
+    : "当前区间没有请求";
+  const rankEmptyLabel = partial ? "超出明细保留期，无法统计" : "当前区间没有请求";
 
   return (
-    <div className="space-y-6">
-      <PageHeader title="分析" description="按模型拆分的趋势、Top 榜单、异常与缓存" />
+    <>
+      <PageHeader
+        eyebrow="analysis"
+        title="分析"
+        subtitle="趋势、榜单与异常定位"
+        actions={
+          <RangeSeg
+            value={range}
+            options={RANGE_OPTIONS}
+            onChange={(value) => updateParam("range", value)}
+            ariaLabel="分析时间范围"
+          />
+        }
+      />
 
-      <section className="space-y-3" aria-labelledby="analysis-range-heading">
-        <div className="flex flex-col gap-2 xl:flex-row xl:flex-wrap xl:items-center xl:justify-between">
-          <div className="flex flex-wrap items-center gap-2">
-            <h2 id="analysis-range-heading" className="text-sm font-semibold">
-              区间
-            </h2>
-            <span className="text-xs text-muted">
-              {selection.from} 至 {selection.to} · {INTERVAL_LABELS[interval]}
-            </span>
-            {partial && <Badge tone="warning">仅保留期内</Badge>}
-            {modelFilter && (
-              <span className="inline-flex items-center gap-1 rounded-full bg-accent/15 px-2 py-0.5 text-xs font-medium text-accent">
-                模型：{modelFilter}
-                <button
-                  type="button"
-                  onClick={() => updateParam("model", null)}
-                  aria-label={`移除模型筛选 ${modelFilter}`}
-                  className="rounded-full px-1 leading-none hover:bg-accent/20"
-                >
-                  ×
-                </button>
-              </span>
-            )}
-            {analysis.isFetching && (
-              <span className="text-xs text-muted" role="status">
-                更新中…
-              </span>
-            )}
+      {analysis.isError && (
+        <ErrorBanner error={analysis.error} onRetry={() => void analysis.refetch()} />
+      )}
+
+      {!data && analysis.isPending && (
+        <div className="analysis-grid" aria-hidden="true">
+          <div className="card analysis-trend">
+            <div className="skeleton" style={{ height: 330, margin: 14 }} />
           </div>
-          <RangeBar value={selection} onChange={updateRange} timeZone={timeZone} />
-        </div>
-
-        {analysis.isError && (
-          <ErrorBanner error={analysis.error} onRetry={() => void analysis.refetch()} />
-        )}
-      </section>
-
-      {analysis.isPending && !data && (
-        <div className="space-y-4">
-          <Skeleton className="h-[360px] w-full" />
-          <Skeleton className="h-48 w-full" />
-          <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
-            <Skeleton className="h-48 w-full" />
-            <Skeleton className="h-48 w-full" />
+          <div className="card top-card">
+            <div className="skeleton" style={{ height: 330, margin: 14 }} />
+          </div>
+          <div className="card health-card">
+            <div className="skeleton" style={{ height: 190, margin: 14 }} />
+          </div>
+          <div className="card cache-card">
+            <div className="skeleton" style={{ height: 190, margin: 14 }} />
+          </div>
+          <div className="card rank-card">
+            <div className="skeleton" style={{ height: 230, margin: 14 }} />
+          </div>
+          <div className="card rank-card">
+            <div className="skeleton" style={{ height: 230, margin: 14 }} />
           </div>
         </div>
       )}
 
       {data && (
-        <>
-          <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
-            <Card
-              title="用量趋势"
-              actions={
-                <div className="flex flex-wrap gap-1" role="group" aria-label="趋势指标">
-                  {METRICS.map((key) => (
-                    <button
-                      key={key}
-                      type="button"
-                      aria-pressed={metric === key}
-                      onClick={() => updateParam("metric", key)}
-                      className={`rounded-md px-2 py-1 text-xs font-medium transition-colors ${
-                        metric === key ? "bg-accent/15 text-accent" : "text-muted hover:text-ink"
-                      }`}
-                    >
-                      {METRIC_LABELS[key]}
-                    </button>
-                  ))}
+        <div className="analysis-grid">
+          <article className="card analysis-trend">
+            <div className="card-head chart-head">
+              <div>
+                <div className="card-title">按模型趋势</div>
+                <div className="card-sub">
+                  {rangeLabel} · 按模型 · {METRIC_LABELS[metric]}
+                  {analysis.isFetching ? " · 更新中…" : ""}
                 </div>
-              }
-            >
-              <div className="mb-2 text-xs text-muted">
-                按模型堆叠 · 点击图例或曲线跳转日志
               </div>
-              <LineChart
-                option={trendOption}
-                ariaLabel={`按模型拆分的${METRIC_LABELS[metric]}趋势图`}
-                height={320}
-                empty={
-                  data.trend.length === 0 ||
-                  (modelFilter !== "" && !trendHasModel(data.trend, modelFilter))
-                }
-                emptyLabel={
-                  modelFilter ? `该区间无模型 ${modelFilter} 的数据` : "该区间暂无数据"
-                }
-                onEvents={trendEvents}
-              />
-            </Card>
-
-            <Card
-              title="Top 榜单"
-              actions={
-                <div className="flex flex-wrap gap-1" role="group" aria-label="Top 榜单类型">
-                  {TOP_TABS.map((tab) => (
+              <div className="chart-tools">
+                <div className="chart-mode" role="group" aria-label="指标">
+                  {METRIC_OPTIONS.map((option) => (
                     <button
-                      key={tab}
+                      key={option.value}
                       type="button"
-                      aria-pressed={topTab === tab}
-                      disabled={partial}
-                      onClick={() => updateParam("top", tab)}
-                      className={`rounded-md px-2 py-1 text-xs font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
-                        topTab === tab ? "bg-accent/15 text-accent" : "text-muted hover:text-ink"
-                      }`}
+                      className={option.value === metric ? "on" : ""}
+                      aria-pressed={option.value === metric}
+                      onClick={() => updateParam("metric", option.value)}
                     >
-                      {TOP_LABELS[tab]}
+                      {option.label}
                     </button>
                   ))}
                 </div>
-              }
-            >
-              {partial ? (
-                <p className="rounded-md border border-dashed border-line px-4 py-6 text-center text-sm text-muted">
-                  超出明细保留期，无法显示 Top 榜单
-                </p>
+                <div className="legend" role="group" aria-label="模型图例">
+                  {modelNames.map((model) => {
+                    const off = hidden.has(model);
+                    return (
+                      <button
+                        key={model || UNKNOWN_KEY}
+                        type="button"
+                        className={off ? "off" : ""}
+                        aria-pressed={!off}
+                        onClick={() => toggleModel(model)}
+                      >
+                        <i className="sw" style={{ background: colorFor(model) }} />
+                        {model || UNKNOWN_KEY}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+            <div className="chart-wrap analysis-chart">
+              <LineChart
+                option={chartOption}
+                ariaLabel={`按模型拆分的${METRIC_LABELS[metric]}趋势图`}
+                height={264}
+                empty={modelNames.length === 0 || visibleModels.length === 0 || !chartHasData}
+                emptyLabel={
+                  modelNames.length === 0
+                    ? "当前区间没有请求"
+                    : visibleModels.length === 0
+                      ? "没有可见模型 · 点击图例恢复"
+                      : metric === "cost"
+                        ? "当前区间没有已计价花费"
+                        : "当前区间暂无数据"
+                }
+              />
+            </div>
+          </article>
+
+          <article className="card top-card">
+            <div className="card-head">
+              <div>
+                <div className="card-title">Top 榜单</div>
+                <div className="card-sub">点击查看请求详情</div>
+              </div>
+              <RangeSeg
+                value={topTab}
+                options={TOP_OPTIONS}
+                onChange={(value) => updateParam("top", value)}
+                ariaLabel="榜单"
+                small
+              />
+            </div>
+            <div className="top-list">
+              {topRows.length === 0 ? (
+                <div className="log-empty">{topEmptyLabel}</div>
               ) : (
-                <DataTable
-                  columns={topColumns}
-                  rows={topRows}
-                  rowKey={(row) => String(row.id)}
-                  onRowClick={(row) => setSelectedId(row.id)}
-                  empty={<span className="text-sm text-muted">该区间暂无数据</span>}
-                />
+                topRows.slice(0, 8).map((row, index) => (
+                  <div
+                    className="top-row"
+                    key={row.id}
+                    role="button"
+                    tabIndex={0}
+                    onClick={() => setSelectedId(row.id)}
+                    onKeyDown={(event) => {
+                      if (event.key !== "Enter" && event.key !== " ") return;
+                      event.preventDefault();
+                      setSelectedId(row.id);
+                    }}
+                  >
+                    <span className="top-rank">{String(index + 1).padStart(2, "0")}</span>
+                    <div className="top-main">
+                      <div className="top-model">
+                        <i className="sw" style={{ background: colorFor(row.model) }} />
+                        <span>{row.model || UNKNOWN_KEY}</span>
+                      </div>
+                      <div className="top-sub">
+                        {formatTime(row.startedAt, timeZone)} · {row.pathClass}
+                      </div>
+                    </div>
+                    <span className="top-value">{topValue(row, topTab)}</span>
+                  </div>
+                ))
               )}
-            </Card>
+            </div>
+          </article>
 
-            <HealthSection
-              health={data.health}
-              partial={partial}
-              onOpenLogs={openLogs}
-            />
-            <CacheSection cache={data.cache} />
-          </div>
+          <article className="card health-card">
+            <div className="card-head">
+              <div>
+                <div className="card-title">健康与异常</div>
+                <div className="card-sub">
+                  当前区间{partial ? " · 仅保留期内" : ""}
+                </div>
+              </div>
+              {partial && <span className="status neutral">部分数据</span>}
+            </div>
+            <HealthGrid health={data.health} partial={partial} />
+          </article>
 
-          <Card
-            title="模型排名"
-            actions={
-              <span className="text-xs text-muted">
-                按{RANK_LABELS[effectiveModelSort.key]}排序 · 点击表头切换
-              </span>
-            }
-          >
-            <DataTable
-              columns={rankingColumns("模型", effectiveModelSort, (key) =>
-                setModelSort((current) => toggleSort(current, key)),
-              )}
-              rows={modelRows}
-              rowKey={(row) => row.key || UNKNOWN_KEY}
-              onRowClick={(row) => openLogs(row.key ? { model: row.key } : {})}
-              empty={
-                <span className="text-sm text-muted">
-                  {modelFilter
-                    ? `该区间无模型 ${modelFilter} 的记录`
-                    : "该区间暂无数据"}
+          <article className="card cache-card">
+            <div className="card-head">
+              <div>
+                <div className="card-title">缓存</div>
+                <div className="card-sub">
+                  {data.cache.available ? "估算节省" : "估算节省 · 不可用"}
+                </div>
+              </div>
+            </div>
+            <div className="cache-body">
+              <div className="cache-main">
+                <span className="cache-rate">{formatPercent(data.cache.hitRate)}</span>
+                <span className="cache-meta">命中率</span>
+              </div>
+              <div className="cache-meta">
+                <span>
+                  缓存读 <b>{compactNumber(data.cache.cacheReadTokens)}</b>
                 </span>
-              }
-            />
-          </Card>
+                <span>
+                  输入 <b>{compactNumber(data.cache.promptTokens)}</b>
+                </span>
+                <span>
+                  估算节省{" "}
+                  <b>
+                    {data.cache.available
+                      ? formatCost(data.cache.savedNanoUsd ?? 0)
+                      : "—"}
+                  </b>
+                </span>
+              </div>
+              <p className="cache-note">
+                {data.cache.available
+                  ? "按记录内的历史费率快照估算；未定价请求不计入。"
+                  : "缓存节省超出明细保留期，无法估算。"}
+              </p>
+            </div>
+          </article>
 
-          <Card
-            title="路径排名"
-            actions={
-              <span className="text-xs text-muted">
-                按{RANK_LABELS[effectivePathSort.key]}排序 · 点击表头切换
-              </span>
-            }
-          >
-            <DataTable
-              columns={rankingColumns("路径", effectivePathSort, (key) =>
-                setPathSort((current) => toggleSort(current, key)),
-              )}
-              rows={pathRows}
-              rowKey={(row) => row.key || UNKNOWN_KEY}
-              onRowClick={(row) => openLogs(row.key ? { pathClass: row.key } : {})}
-              empty={<span className="text-sm text-muted">该区间暂无数据</span>}
+          <article className="card rank-card">
+            <div className="card-head">
+              <div>
+                <div className="card-title">模型排行</div>
+                <div className="card-sub">按花费 · 点击筛选日志</div>
+              </div>
+            </div>
+            <RankList
+              rows={modelRank}
+              colorFor={colorFor}
+              emptyLabel={rankEmptyLabel}
+              onOpen={(model) => navigate(logsHref(range, { model }))}
             />
-          </Card>
-        </>
+          </article>
+
+          <article className="card rank-card">
+            <div className="card-head">
+              <div>
+                <div className="card-title">路径排行</div>
+                <div className="card-sub">按花费 · 点击筛选日志</div>
+              </div>
+            </div>
+            <RankList
+              rows={pathRank}
+              colorFor={() => "var(--accent)"}
+              emptyLabel={rankEmptyLabel}
+              onOpen={(path) => navigate(logsHref(range, { path }))}
+            />
+          </article>
+        </div>
       )}
 
       <RequestDrawer requestId={selectedId} onClose={() => setSelectedId(null)} />
-    </div>
+    </>
   );
 }

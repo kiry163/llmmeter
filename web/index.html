@@ -1,11 +1,25 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="dark">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark light" />
     <title>llmmeter</title>
+    <script>
+      (() => {
+        try {
+          const saved = localStorage.getItem("llmmeter.theme");
+          const dark = matchMedia("(prefers-color-scheme: dark)").matches;
+          const theme = saved || (dark ? "dark" : "light");
+          document.documentElement.dataset.theme = theme === "light" ? "light" : "dark";
+        } catch {
+          document.documentElement.dataset.theme = "dark";
+        }
+      })();
+    </script>
   </head>
   <body>
+    <div class="bg-fx" aria-hidden="true"></div>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>

@@ -52,7 +52,7 @@ func TestEndToEndAccountingAndAPI(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := repo.Setup(context.Background(), settings.SetupInput{
-		Upstream: settings.Upstream{BaseURL: upstream.URL, APIKey: "sk-up", Timeout: 10 * time.Second},
+		Upstream: settings.Upstream{BaseURL: upstream.URL, APIKey: "sk-up"},
 		Timezone: "UTC",
 	}); err != nil {
 		t.Fatal(err)

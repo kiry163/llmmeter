@@ -40,7 +40,6 @@ func newTestRepoWithOpts(t *testing.T, pw string) *settings.Repo {
 		Upstream: settings.Upstream{
 			BaseURL: "https://api.example.com",
 			APIKey:  "sk-up",
-			Timeout: 30 * time.Second,
 		},
 		Timezone:      "UTC",
 		AdminPassword: pw,

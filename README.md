@@ -24,19 +24,19 @@ make build          # npm ci + 前端构建 + go build -o llmmeter
 
 | 路由 | 页面 |
 | --- | --- |
-| `/` | 总览：顶部实时条（进行中、QPS、上传/下载 B/s、P95、错误与 60s sparkline）不随日期范围切换；其下是区间统计（花费、Tokens、请求、流量 KPI、环比、用量趋势、Top 5 模型）。范围选择写入 URL。 |
-| `/logs` | 日志：按范围、模型、路径类、状态码、用量状态、流式、定价筛选；表格显示流式徽标、输入/输出/缓存读、费用、首字/总耗时与 tokens/s；点击行打开请求抽屉。 |
-| `/analysis` | 分析：按模型堆叠的趋势、Top 三组榜单（花费 / Tokens / 耗时）、异常与慢请求、缓存命中与估算节省；点击模型或路径跳到带筛选的日志。 |
-| `/settings` | 设置 / 网关与访问：上游、鉴权、时区、保留天数、管理密码、gateway key 与运行信息。 |
+| `/` | 总览：今日花费 / Tokens / 流量三张指标卡（累计、环比、sparkline），实时条（进行中、P95、错误率、缓存命中），用量与花费趋势（输入 / 缓存读 / 输出 + 花费线，范围写入 URL），模型排行、按小时花费与最近 8 条请求。 |
+| `/logs` | 日志：按范围、模型、路径类、状态类（2xx/4xx/5xx）、用量状态、流式、定价筛选；筛选汇总（请求 / 花费 / Tokens / 错误）覆盖全部匹配行；表格显示流式徽标、输入/输出/缓存读、费用、首字/总耗时与 tokens/s；点击行打开请求抽屉，游标分页每次 12 条。 |
+| `/analysis` | 分析：按模型堆叠的趋势（花费 / Tokens / 请求 / 流量）、Top 三组榜单（花费 / Tokens / 耗时）、异常与慢请求、缓存命中与估算节省；点击模型或路径跳到带筛选的日志。 |
+| `/settings` | 设置 / 上游与访问：上游、鉴权、时区、保留天数、管理密码、gateway key 与运行信息。 |
 | `/settings/pricing` | 设置 / 价格：模型目录、费率与峰谷窗口。 |
-| `/settings/data` | 设置 / 数据：数据库路径与体积、版本、保留天数、有效监听与服务端时区。 |
+| `/settings/data` | 设置 / 数据：数据库路径与体积（含 WAL）、版本、保留天数、有效监听、服务端时区与写入队列。 |
 | `/setup`、`/login` | 首次配置与登录。 |
 
-旧路由 `/requests` 重定向到 `/logs`，`/pricing` 重定向到 `/settings/pricing`（保留查询参数）。窄屏下侧栏变为顶部横向导航，日志改为卡片列表，页面不横向溢出。
+旧路由 `/requests` 重定向到 `/logs`，`/pricing` 重定向到 `/settings/pricing`（保留查询参数）。主题默认跟随系统，可在侧栏或登录页切换并记忆；窄屏下侧栏变为顶部横向导航，日志/价格表改为卡片列表，页面不横向溢出。
 
 ## 首次配置
 
-1. 本机打开 `/setup`，填写上游 `baseUrl`（如 `https://api.deepseek.com`）、上游 API key、超时、时区，可选设置管理密码。
+1. 本机打开 `/setup`，填写上游 `baseUrl`（如 `https://api.deepseek.com`）、上游 API key、时区，可选设置管理密码。
    **不要带 `/v1`**：客户端请求路径会原样拼在其后，填 `https://api.deepseek.com/v1` 会变成 `/v1/v1/chat/completions`。
 2. 提交后生成 gateway key（`sk-local-…`）。**明文只显示这一次**，请立刻保存；之后可在设置页轮换。
 3. Setup 只接受来自本机的请求；要开放给其他机器，先在本机设置管理密码，再用非回环地址启动（见“认证与远程访问”）。
@@ -101,7 +101,7 @@ wire_api = "chat"
 - 请求体字节 = 实际发往上游的字节数，流式 chat 缺少 `stream_options` 时注入的 `include_usage` 也计入。
 - 响应体字节 = 网关从上游读到的字节数。请求上游时禁用了透明解压（`DisableCompression`），因此是上游实际发出的线上字节，而不是解压后的长度。
 - 请求/响应头字节按 HTTP/1.1 文本格式估算（请求行/状态行 + 每个 header 的 `name: value` + 结尾空行）。HTTP/2 会压缩头部，所以这部分只是近似值。
-- 客户端中途断开后，网关仍会继续读取上游响应最多 **3 秒 / 2 MiB**，以便补全 usage 与字节记账；该条记录标记为 `clientDisconnected`，字节数仍按上游实际收发计入。
+- 客户端中途断开后，网关**不会主动取消**上游请求，会继续读取直到上游结束，以便补全 usage 与字节记账；该条记录标记为 `clientDisconnected`，字节数仍按上游实际收发计入。
 - token usage 只解析 `/v1/chat/completions` 与 `/v1/responses`。拿不到 usage 时如实标记 `no_usage`、`parse_failed`、`too_large` 或 `error`，绝不估算。
 
 ## tokens/s 与缓存节省
@@ -123,20 +123,22 @@ wire_api = "chat"
 
 - 面板 API 默认只信任回环请求；`-listen` 为非回环地址时，若尚未设置管理密码，启动会直接失败（避免把无鉴权的面板暴露到网络）。
 - 要远程访问：先以 `127.0.0.1:8100` 启动并在面板设置管理密码，再改为 `-listen 0.0.0.0:8100` 重启。
-- 管理会话使用 HttpOnly、SameSite=Strict 的签名 Cookie；修改密码会使旧会话立即失效。
+- 管理会话使用 HttpOnly、SameSite=Strict 的签名 Cookie，有效期 12 小时；修改密码会使旧会话立即失效。
 - 所有非 GET 的 `/api` 写操作要求 `X-Requested-With: llmmeter` 或同 Host 的 `Origin`（CSRF 防护）。
 - 网关请求始终要求 `Authorization: Bearer <gateway key>`；轮换后旧 key 立即失效。
 - 二进制不内置 TLS。对外暴露时建议放在 Caddy/Nginx 后面终止 TLS，并让 llmmeter 继续监听 `127.0.0.1`。反代需关闭 SSE 缓冲（如 `proxy_buffering off`）以保证实时面板正常。
 
 ## 面板 API
 
-面板与网关共用同一监听；下列是 UI v3 新增或扩展的只读/管理接口（均遵循上面的回环与 CSRF 规则）：
+面板与网关共用同一监听；下列是面板新增或扩展的只读/管理接口（均遵循上面的回环与 CSRF 规则）：
 
 | 方法与路径 | 说明 |
 | --- | --- |
+| `GET /api/bootstrap` | 返回 `{version, needsSetup, authRequired, listen, timezone, earliestDay}`；`earliestDay` 为永久聚合中最早有流量的本地日期，用于总览“全部”范围，无流量时为空。 |
+| `GET /api/series?…&interval=minute\|hour\|day` | 返回非空桶；每个点含 `promptTokens`、`completionTokens`、`cacheReadTokens`、`costNanoUsd`、上下行字节。前端负责补齐空桶。 |
 | `GET /api/model-catalog` | 返回 `{fetchedAt, upstream, observed, upstreamError}`：上游可见模型、日志已观测模型与上次拉取时间。`?refresh=1` 跳过缓存强制刷新。上游失败时 HTTP 仍为 200，`upstream` 为空、`fetchedAt` 为 null，`upstreamError` 为脱敏原因（不含 API key）。 |
 | `GET /api/analysis?from=YYYY-MM-DD&to=YYYY-MM-DD&interval=auto` | 一次返回 `range`（含 `interval`、`partial`）、`trend`、`models`、`paths`、`topRequests`、`health`、`cache`。`interval` 可为 `auto`、`minute`、`hour`、`day`；显式间隔超出上限返回 400。 |
-| `GET /api/requests?…&stream=true\|false` | 在原有筛选上增加流式筛选；非法值返回 400 `validation`。 |
+| `GET /api/requests?…` | 支持 `model`、`pathClass`、`statusClass=2xx\|4xx\|5xx`、`usageStatus`、`stream`、`priced`、`before_id`、`limit`；响应含 `summary:{requests,costNanoUsd,totalTokens,errors}`，汇总覆盖筛选后的全部行并忽略游标/分页。 |
 | `POST /api/models/import` | 请求 `{names:[...]}`，把缺失模型创建为 0 费率并返回 `{created, skipped}`；单批最多 100 个名字，重复名与已存在模型跳过。 |
 
 ## 保留、备份与恢复
@@ -150,5 +152,6 @@ wire_api = "chat"
 - 同时只支持一个上游；在设置页修改 base URL/key 会立即对后续请求生效，修改监听地址需重启。
 - 不重试、不回退、不多上游负载均衡。
 - 纯透传，不做协议转换（不把 responses 请求翻译成 chat，反之亦然），只在流式 chat 缺少 `stream_options` 时注入 `include_usage`。
+- 网关不设置上游请求超时，也不会在客户端断开后主动取消已开始的上游请求；请求会一直读到上游结束，使用方需自行处理上游长时间无响应的情况。
 - 不估算 token 或成本；上游不返回 usage 的请求只记录字节与状态。
 - 无多用户与细粒度权限，只有单个管理密码；不内置 TLS，需要自行用反向代理终止 HTTPS。

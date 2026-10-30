@@ -15,11 +15,9 @@ export function EmptyState({
   className = "",
 }: EmptyStateProps): ReactElement {
   return (
-    <div
-      className={`flex flex-col items-center gap-2 rounded-lg border border-dashed border-line px-6 py-10 text-center ${className}`}
-    >
-      <p className="text-sm font-medium text-ink">{title}</p>
-      {description && <p className="max-w-sm text-xs text-muted">{description}</p>}
+    <div className={`empty-state ${className}`.trim()}>
+      <p className="empty-title">{title}</p>
+      {description && <p className="empty-copy">{description}</p>}
       {action}
     </div>
   );

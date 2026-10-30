@@ -95,6 +95,9 @@ func TestOverviewAndSeries(t *testing.T) {
 	if pts[0].UpBytes != 30 || pts[0].DownBytes != 60 || pts[0].CostNanoUSD != 1000 {
 		t.Fatalf("day sums = %+v", pts[0])
 	}
+	if pts[0].CacheReadTokens != 10 {
+		t.Fatalf("day cache read = %+v", pts[0])
+	}
 }
 
 func TestSeriesIntervals(t *testing.T) {
@@ -228,6 +231,130 @@ func TestRequestsFiltersAndLimit(t *testing.T) {
 	})
 	if err != nil || len(byClass) != 0 {
 		t.Fatalf("byClass = %+v err=%v", byClass, err)
+	}
+}
+
+func TestRequestsStatusClass(t *testing.T) {
+	st := seedStore(t)
+	base := time.Date(2026, 10, 29, 5, 0, 0, 0, time.UTC)
+	for i, status := range []int{404, 500} {
+		at := base.Add(time.Duration(i) * time.Second)
+		st.EnqueueRecord(store.Record{
+			StartedAt: at, CompletedAt: at.Add(time.Millisecond),
+			LocalDay: "2026-10-29", MinuteOfDay: 780,
+			Status: status, UsageStatus: usage.StatusOK,
+		})
+	}
+	if err := st.Flush(); err != nil {
+		t.Fatal(err)
+	}
+
+	cases := []struct {
+		name  string
+		class string
+		want  int
+	}{
+		{"2xx", "2xx", 2},
+		{"4xx", "4xx", 1},
+		{"5xx", "5xx", 1},
+		{"no filter", "", 4},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rows, err := st.Requests(store.RequestFilter{
+				From: "2026-10-29", To: "2026-10-29", StatusClass: tc.class,
+			})
+			if err != nil || len(rows) != tc.want {
+				t.Fatalf("rows = %+v err=%v", rows, err)
+			}
+		})
+	}
+
+	// An exact status composes with a class instead of overriding it.
+	notFound := 404
+	rows, err := st.Requests(store.RequestFilter{
+		From: "2026-10-29", To: "2026-10-29", StatusClass: "4xx", Status: &notFound,
+	})
+	if err != nil || len(rows) != 1 || rows[0].Status != 404 {
+		t.Fatalf("4xx + 404 = %+v err=%v", rows, err)
+	}
+	rows, err = st.Requests(store.RequestFilter{
+		From: "2026-10-29", To: "2026-10-29", StatusClass: "2xx", Status: &notFound,
+	})
+	if err != nil || len(rows) != 0 {
+		t.Fatalf("2xx + 404 = %+v err=%v", rows, err)
+	}
+}
+
+func TestRequestsSummary(t *testing.T) {
+	st := seedStore(t)
+	base := time.Date(2026, 10, 29, 6, 0, 0, 0, time.UTC)
+	st.EnqueueRecord(store.Record{
+		StartedAt: base, CompletedAt: base.Add(time.Millisecond),
+		LocalDay: "2026-10-29", MinuteOfDay: 780,
+		Status: 500, UsageStatus: usage.StatusOK,
+		Usage: usage.Usage{TotalTokens: 10}, CostNanoUSD: 50, Priced: true,
+	})
+	if err := st.Flush(); err != nil {
+		t.Fatal(err)
+	}
+
+	all, err := st.RequestsSummary(store.RequestFilter{From: "2026-10-29", To: "2026-10-29"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if all.Requests != 3 || all.CostNanoUSD != 1050 || all.TotalTokens != 170 || all.Errors != 1 {
+		t.Fatalf("summary = %+v", all)
+	}
+
+	// Cursor and page size never narrow the summary.
+	page, err := st.Requests(store.RequestFilter{From: "2026-10-29", To: "2026-10-29", Limit: 1})
+	if err != nil || len(page) != 1 {
+		t.Fatalf("page = %+v err=%v", page, err)
+	}
+	cursor, err := st.RequestsSummary(store.RequestFilter{
+		From: "2026-10-29", To: "2026-10-29", Limit: 1, BeforeID: page[0].ID,
+	})
+	if err != nil || cursor != all {
+		t.Fatalf("cursor summary = %+v err=%v", cursor, err)
+	}
+
+	// Filter fields apply, including the shared status class clause.
+	priced := false
+	unpriced, err := st.RequestsSummary(store.RequestFilter{
+		From: "2026-10-29", To: "2026-10-29", Priced: &priced,
+	})
+	if err != nil || unpriced.Requests != 1 || unpriced.CostNanoUSD != 0 || unpriced.TotalTokens != 20 {
+		t.Fatalf("unpriced summary = %+v err=%v", unpriced, err)
+	}
+	class, err := st.RequestsSummary(store.RequestFilter{
+		From: "2026-10-29", To: "2026-10-29", StatusClass: "2xx",
+	})
+	if err != nil || class.Requests != 2 || class.Errors != 0 {
+		t.Fatalf("2xx summary = %+v err=%v", class, err)
+	}
+
+	empty, err := st.RequestsSummary(store.RequestFilter{From: "2026-01-01", To: "2026-01-02"})
+	if err != nil || empty.Requests != 0 || empty.CostNanoUSD != 0 || empty.Errors != 0 {
+		t.Fatalf("empty summary = %+v err=%v", empty, err)
+	}
+}
+
+func TestEarliestDay(t *testing.T) {
+	st := seedStore(t)
+	day, err := st.EarliestDay()
+	if err != nil || day != "2026-10-29" {
+		t.Fatalf("earliest = %q err=%v", day, err)
+	}
+
+	empty, err := store.Open(filepath.Join(t.TempDir(), "empty.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { empty.Close() })
+	day, err = empty.EarliestDay()
+	if err != nil || day != "" {
+		t.Fatalf("empty earliest = %q err=%v", day, err)
 	}
 }
 

@@ -1,26 +1,59 @@
-import type { ReactElement, ReactNode } from "react";
+import type { ReactNode } from "react";
 
-export interface PageHeaderProps {
+export function PageHeader({
+  eyebrow,
+  title,
+  subtitle,
+  actions,
+}: {
+  eyebrow: string;
   title: string;
-  description?: string;
+  subtitle?: string;
   actions?: ReactNode;
-  className?: string;
+}) {
+  return (
+    <div className="page-head">
+      <div>
+        <div className="page-eyebrow">{eyebrow}</div>
+        <h1 className="page-title">{title}</h1>
+        {subtitle && <div className="page-sub">{subtitle}</div>}
+      </div>
+      {actions}
+    </div>
+  );
 }
 
-/** PageHeader is the title row shared by every page. */
-export function PageHeader({
-  title,
-  description,
-  actions,
-  className = "",
-}: PageHeaderProps): ReactElement {
+export interface RangeOption<T extends string> {
+  value: T;
+  label: string;
+}
+
+export function RangeSeg<T extends string>({
+  value,
+  options,
+  onChange,
+  ariaLabel,
+  small = false,
+}: {
+  value: T;
+  options: readonly RangeOption<T>[];
+  onChange: (value: T) => void;
+  ariaLabel: string;
+  small?: boolean;
+}) {
   return (
-    <header className={`flex flex-wrap items-start justify-between gap-3 ${className}`}>
-      <div className="min-w-0">
-        <h1 className="text-xl font-semibold tracking-tight">{title}</h1>
-        {description && <p className="mt-0.5 text-sm text-muted">{description}</p>}
-      </div>
-      {actions && <div className="flex flex-wrap items-center gap-2">{actions}</div>}
-    </header>
+    <div className={`seg${small ? " seg-sm" : ""}`} role="group" aria-label={ariaLabel}>
+      {options.map((option) => (
+        <button
+          key={option.value}
+          type="button"
+          className={option.value === value ? "on" : ""}
+          aria-pressed={option.value === value}
+          onClick={() => onChange(option.value)}
+        >
+          {option.label}
+        </button>
+      ))}
+    </div>
   );
 }
