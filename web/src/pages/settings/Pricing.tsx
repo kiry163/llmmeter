@@ -4,6 +4,7 @@ import { ApiError, api } from "../../api/client";
 import type {
   CatalogObserved,
   CatalogModel,
+  ImportedModel,
   Model,
   ModelCatalog,
   ModelInput,
@@ -367,6 +368,27 @@ function WindowEditor({
   );
 }
 
+/** IMPORT_BATCH_SIZE is the API's per-request import cap. */
+const IMPORT_BATCH_SIZE = 100;
+
+/**
+ * importInBatches creates every name through /models/import, splitting the
+ * list because the API rejects batches above its cap.
+ */
+async function importInBatches(names: string[]): Promise<{
+  created: ImportedModel[];
+  skipped: string[];
+}> {
+  const created: ImportedModel[] = [];
+  const skipped: string[] = [];
+  for (let start = 0; start < names.length; start += IMPORT_BATCH_SIZE) {
+    const result = await api.importModels(names.slice(start, start + IMPORT_BATCH_SIZE));
+    created.push(...result.created);
+    skipped.push(...result.skipped);
+  }
+  return { created, skipped };
+}
+
 /**
  * Pricing is the settings pricing subpage: it merges the configured, upstream
  * and observed model catalogs, imports unconfigured models with zero rates and
@@ -406,7 +428,7 @@ export function Pricing() {
   });
 
   const importModels = useMutation({
-    mutationFn: (names: string[]) => api.importModels(names),
+    mutationFn: importInBatches,
     onSuccess: (result) => {
       void queryClient.invalidateQueries({ queryKey: ["models"] });
       void queryClient.invalidateQueries({ queryKey: ["model-catalog"] });
@@ -467,10 +489,10 @@ export function Pricing() {
     return () => window.clearInterval(timer);
   }, []);
 
-  function openCreate(name = "") {
+  function openCreate() {
     save.reset();
     setEditingId(null);
-    setForm({ ...EMPTY_FORM, name });
+    setForm(EMPTY_FORM);
     setErrors({});
     setEditorOpen(true);
   }
