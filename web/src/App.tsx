@@ -31,8 +31,11 @@ import { Analysis } from "./pages/Analysis";
 import { Logs } from "./pages/Logs";
 import { Login } from "./pages/Login";
 import { Overview } from "./pages/Overview";
-import { Settings } from "./pages/Settings";
+import { Pricing } from "./pages/Pricing";
 import { Setup } from "./pages/Setup";
+import { Data } from "./pages/settings/Data";
+import { Gateway } from "./pages/settings/Gateway";
+import { SettingsLayout } from "./pages/settings/SettingsLayout";
 
 const queryClient = new QueryClient({
   queryCache: new QueryCache({ onError: notifyUnauthorized }),
@@ -210,8 +213,12 @@ export function App() {
                 <Route path="logs" element={<Logs />} />
                 <Route path="analysis" element={<Analysis />} />
                 <Route path="requests" element={<RedirectKeepSearch to="/logs" />} />
-                <Route path="pricing" element={<RedirectKeepSearch to="/settings" />} />
-                <Route path="settings" element={<Settings />} />
+                <Route path="pricing" element={<RedirectKeepSearch to="/settings/pricing" />} />
+                <Route path="settings" element={<SettingsLayout />}>
+                  <Route index element={<Gateway />} />
+                  <Route path="pricing" element={<Pricing />} />
+                  <Route path="data" element={<Data />} />
+                </Route>
               </Route>
             </Route>
             <Route path="*" element={<Navigate to="/" replace />} />

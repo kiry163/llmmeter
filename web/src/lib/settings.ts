@@ -130,6 +130,15 @@ export function listenIsLoopback(listen: string): boolean {
   return host.toLowerCase() === "localhost" || host === "127.0.0.1" || host === "::1";
 }
 
+/**
+ * validateClearPassword requires the current password before clearing it.
+ * The server still verifies the value; this only blocks an empty submit.
+ */
+export function validateClearPassword(currentPassword: string): string | undefined {
+  if (currentPassword.trim() === "") return "清除密码需要当前密码";
+  return undefined;
+}
+
 /** SettingsDraft is the editable state of the settings form. */
 export interface SettingsDraft {
   timeoutS: string;
