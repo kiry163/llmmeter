@@ -322,16 +322,13 @@ func analysisInterval(w http.ResponseWriter, raw string, days int) (store.Interv
 	}
 }
 
-// autoInterval chooses the finest interval for an inclusive day span.
+// autoInterval chooses the interval for an inclusive day span: minute up to
+// two days, hour up to a week, day beyond that.
 func autoInterval(days int) store.Interval {
 	switch {
 	case days <= 2:
 		return store.IntervalMinute
-	case days <= 3:
-		return store.IntervalHour
 	case days <= 7:
-		return store.IntervalDay
-	case days <= 8:
 		return store.IntervalHour
 	default:
 		return store.IntervalDay

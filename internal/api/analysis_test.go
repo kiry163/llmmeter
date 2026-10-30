@@ -143,7 +143,7 @@ func TestAnalysisIntervalValidation(t *testing.T) {
 	}
 }
 
-func TestAnalysisAutoInterval(t *testing.T) {
+func TestAnalysisAutoIntervalBoundaries(t *testing.T) {
 	srv := newAnalysisServer(t)
 	cases := []struct {
 		name, from, to, want string
@@ -151,8 +151,8 @@ func TestAnalysisAutoInterval(t *testing.T) {
 		{"single day", "2026-10-29", "2026-10-29", "minute"},
 		{"two days", "2026-10-28", "2026-10-29", "minute"},
 		{"three days", "2026-10-27", "2026-10-29", "hour"},
-		{"seven days", "2026-10-23", "2026-10-29", "day"},
-		{"eight days", "2026-10-22", "2026-10-29", "hour"},
+		{"seven days", "2026-10-23", "2026-10-29", "hour"},
+		{"eight days", "2026-10-22", "2026-10-29", "day"},
 		{"nine days", "2026-10-21", "2026-10-29", "day"},
 	}
 	for _, tc := range cases {
