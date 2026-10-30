@@ -411,3 +411,50 @@ func TestUpstreamProbeFallsBackToVersionedModels(t *testing.T) {
 		t.Fatalf("versioned base paths = %v", paths)
 	}
 }
+
+func TestImportModelsEndpoint(t *testing.T) {
+	srv := newAPIServer(t, true)
+	rec := doPOST(t, srv, "/api/models/import", `{"names":["m1","m1"]}`)
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"created":[`) {
+		t.Fatalf("import = %d %s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Created []struct {
+			ID   int64  `json:"id"`
+			Name string `json:"name"`
+		} `json:"created"`
+		Skipped []string `json:"skipped"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Created) != 1 || body.Created[0].ID == 0 || body.Created[0].Name != "m1" {
+		t.Fatalf("created = %+v", body.Created)
+	}
+	if len(body.Skipped) != 0 {
+		t.Fatalf("skipped = %v", body.Skipped)
+	}
+	if strings.Contains(rec.Body.String(), "inputPerMTok") {
+		t.Fatalf("import leaked rate snapshot: %s", rec.Body.String())
+	}
+
+	rec = doPOST(t, srv, "/api/models/import", `{"names":["m1","m2"]}`)
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"skipped":["m1"]`) {
+		t.Fatalf("reimport = %d %s", rec.Code, rec.Body.String())
+	}
+
+	// The created rows appear in the model listing with zero rates.
+	rec = doGET(t, srv, "/api/models")
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"name":"m2"`) {
+		t.Fatalf("list = %d %s", rec.Code, rec.Body.String())
+	}
+
+	rec = doPOST(t, srv, "/api/models/import", `{"names":[]}`)
+	if rec.Code != 400 || !strings.Contains(rec.Body.String(), `"names"`) {
+		t.Fatalf("empty = %d %s", rec.Code, rec.Body.String())
+	}
+	rec = doPOST(t, srv, "/api/models/import", `{"names":["a","b","c","d","e","f","g","h","i","j","k","l","m","n","o","p","q","r","s","t","u","v","w","x","y","z","a2","b2","c2","d2","e2","f2","g2","h2","i2","j2","k2","l2","m2","n2","o2","p2","q2","r2","s2","t2","u2","v2","w2","x2","y2","z2","a3","b3","c3","d3","e3","f3","g3","h3","i3","j3","k3","l3","m3","n3","o3","p3","q3","r3","s3","t3","u3","v3","w3","x3","y3","z3","a4","b4","c4","d4","e4","f4","g4","h4","i4","j4","k4","l4","m4","n4","o4","p4","q4","r4","s4","t4","u4","v4","w4","x4","y4","z4"]}`)
+	if rec.Code != 400 {
+		t.Fatalf("over limit = %d %s", rec.Code, rec.Body.String())
+	}
+}

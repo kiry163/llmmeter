@@ -334,6 +334,43 @@ func (s *Server) deleteModel(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+type modelImportRequest struct {
+	Names []string `json:"names"`
+}
+
+// importedModelJSON is the minimal shape returned for each created model.
+type importedModelJSON struct {
+	ID   int64  `json:"id"`
+	Name string `json:"name"`
+}
+
+type modelImportResponse struct {
+	Created []importedModelJSON `json:"created"`
+	Skipped []string            `json:"skipped"`
+}
+
+// importModels creates the missing models of a batch with zero rates. Existing
+// names are reported as skipped rather than modified.
+func (s *Server) importModels(w http.ResponseWriter, r *http.Request) {
+	var in modelImportRequest
+	if !decodeJSON(w, r, &in) {
+		return
+	}
+	created, skipped, err := s.repo.ImportModels(r.Context(), in.Names)
+	if err != nil {
+		writeRepoError(w, err)
+		return
+	}
+	out := modelImportResponse{
+		Created: make([]importedModelJSON, 0, len(created)),
+		Skipped: skipped,
+	}
+	for _, m := range created {
+		out.Created = append(out.Created, importedModelJSON{ID: m.ID, Name: m.Name})
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
 type windowInput struct {
 	Label             string   `json:"label"`
 	DaysMask          int      `json:"daysMask"`

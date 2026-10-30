@@ -86,6 +86,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/upstream/test", s.upstreamTestRoute(s.upstreamTest))
 	mux.Handle("GET /api/models", require(s.listModels))
 	mux.Handle("POST /api/models", require(s.createModel))
+	mux.Handle("POST /api/models/import", require(s.importModels))
 	mux.Handle("PATCH /api/models/{id}", require(s.updateModel))
 	mux.Handle("DELETE /api/models/{id}", require(s.deleteModel))
 	mux.Handle("PUT /api/models/{id}/windows", require(s.replaceWindows))
