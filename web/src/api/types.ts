@@ -283,6 +283,124 @@ export interface LiveSnapshot {
   inflightRequests: InflightInfo[];
 }
 
+export interface CatalogModel {
+  id: string;
+  ownedBy?: string;
+}
+
+export interface CatalogObserved {
+  model: string;
+  requests: number;
+  lastSeen: string;
+}
+
+/** ModelCatalog combines the upstream listing with locally observed models. */
+export interface ModelCatalog {
+  fetchedAt: string | null;
+  upstream: CatalogModel[];
+  observed: CatalogObserved[];
+  upstreamError: string;
+}
+
+export interface ImportedModel {
+  id: number;
+  name: string;
+}
+
+/** ImportModelsResult reports the models created and the names skipped. */
+export interface ImportModelsResult {
+  created: ImportedModel[];
+  skipped: string[];
+}
+
+export interface TrendModel {
+  requests: number;
+  promptTokens: number;
+  completionTokens: number;
+  costNanoUsd: number;
+  upBytes: number;
+  downBytes: number;
+}
+
+export interface AnalysisRow {
+  key: string;
+  requests: number;
+  errors: number;
+  upBytes: number;
+  downBytes: number;
+  promptTokens: number;
+  completionTokens: number;
+  cacheReadTokens: number;
+  costNanoUsd: number;
+  unpriced: number;
+}
+
+export interface AnalysisTrendBucket {
+  day: string;
+  minuteOfDay: number;
+  byModel: Record<string, TrendModel>;
+}
+
+export interface AnalysisTopRequest {
+  id: number;
+  startedAt: string;
+  model: string;
+  pathClass: string;
+  stream: boolean;
+  promptTokens: number;
+  completionTokens: number;
+  cacheReadTokens: number;
+  totalTokens: number;
+  costNanoUsd: number;
+  latencyMs: number;
+  ttftMs: number | null;
+  status: number;
+  usageStatus: string;
+}
+
+export interface AnalysisSlow {
+  thresholdMs: number;
+  p95Ms: number | null;
+  countOver: number;
+}
+
+export interface AnalysisHealth {
+  requests: number;
+  errors: number;
+  errorRate: number;
+  unmetered: number;
+  tooLarge: number;
+  clientDisconnected: number;
+  slow: AnalysisSlow;
+}
+
+export interface AnalysisCache {
+  promptTokens: number;
+  cacheReadTokens: number;
+  hitRate: number;
+  savedNanoUsd: number | null;
+  available: boolean;
+}
+
+export interface AnalysisBody {
+  range: {
+    from: string;
+    to: string;
+    interval: Interval;
+    partial: boolean;
+  };
+  trend: AnalysisTrendBucket[];
+  models: AnalysisRow[];
+  paths: AnalysisRow[];
+  topRequests: {
+    cost: AnalysisTopRequest[];
+    tokens: AnalysisTopRequest[];
+    latency: AnalysisTopRequest[];
+  };
+  health: AnalysisHealth;
+  cache: AnalysisCache;
+}
+
 export type ApiErrorCode =
   | "validation"
   | "unauthorized"

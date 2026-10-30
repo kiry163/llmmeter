@@ -14,7 +14,15 @@ import (
 	"github.com/kiry163/llmmeter/internal/pricing"
 )
 
-const maxWindows = 32
+const (
+	maxWindows = 32
+
+	// maxImportNames bounds one batch model import request.
+	maxImportNames = 100
+
+	// maxModelNameLength bounds an imported model name.
+	maxModelNameLength = 200
+)
 
 // ModelInput is a new price model. Rates are USD per million tokens.
 type ModelInput struct {
@@ -186,6 +194,85 @@ func (r *Repo) CreateModel(ctx context.Context, in ModelInput) (pricing.Model, e
 		ID: id, Name: name, Input: in.Input, Output: in.Output,
 		CacheRead: in.CacheRead, CacheWrite: in.CacheWrite, Reasoning: in.Reasoning,
 	}, nil
+}
+
+// ImportModels creates every name that does not exist yet with zero rates and
+// no reasoning override. Names are trimmed, blanks dropped, and duplicates
+// collapsed onto the first spelling; created rows keep the input order. Names
+// that already exist are reported in skipped (input order) instead of being
+// modified.
+func (r *Repo) ImportModels(ctx context.Context, names []string) (created []pricing.Model, skipped []string, err error) {
+	fields := make(map[string]string)
+	if len(names) > maxImportNames {
+		fields["names"] = fmt.Sprintf("at most %d names are allowed", maxImportNames)
+	}
+	unique := make([]string, 0, len(names))
+	seen := make(map[string]struct{}, len(names))
+	for _, raw := range names {
+		name := strings.TrimSpace(raw)
+		if name == "" {
+			continue
+		}
+		if len(name) > maxModelNameLength {
+			fields["names"] = fmt.Sprintf("names must be at most %d characters", maxModelNameLength)
+			break
+		}
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		unique = append(unique, name)
+	}
+	if len(fields) == 0 && len(unique) == 0 {
+		fields["names"] = "at least one name is required"
+	}
+	if len(fields) > 0 {
+		return nil, nil, &ValidationError{Fields: fields}
+	}
+
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer tx.Rollback()
+
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	created = make([]pricing.Model, 0, len(unique))
+	skipped = make([]string, 0)
+	for _, name := range unique {
+		// ON CONFLICT DO NOTHING resolves a name that another writer (or an
+		// earlier import) already inserted; the statement is atomic, so no
+		// read-then-write race can surface as an error.
+		res, err := tx.ExecContext(ctx,
+			`INSERT INTO models (name, input_per_mtok, output_per_mtok, cache_read_per_mtok,
+			                     cache_write_per_mtok, reasoning_per_mtok, created_at, updated_at)
+			 VALUES (?, 0, 0, 0, 0, NULL, ?, ?)
+			 ON CONFLICT(name) DO NOTHING`,
+			name, now, now)
+		if err != nil {
+			return nil, nil, fmt.Errorf("settings: import model: %w", err)
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return nil, nil, err
+		}
+		if n == 0 {
+			skipped = append(skipped, name)
+			continue
+		}
+		id, err := res.LastInsertId()
+		if err != nil {
+			return nil, nil, err
+		}
+		created = append(created, pricing.Model{ID: id, Name: name})
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, nil, err
+	}
+	if err := r.Refresh(); err != nil {
+		return nil, nil, err
+	}
+	return created, skipped, nil
 }
 
 // UpdateModel applies the non-nil fields of p. A set outer Reasoning pointer

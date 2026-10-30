@@ -425,6 +425,14 @@ func (s *Server) requests(w http.ResponseWriter, r *http.Request) {
 		}
 		f.Priced = &b
 	}
+	if v := q.Get("stream"); v != "" {
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			writeAPIError(w, http.StatusBadRequest, codeValidation, "stream must be a boolean")
+			return
+		}
+		f.Stream = &b
+	}
 	if v := q.Get("before_id"); v != "" {
 		n, err := strconv.ParseInt(v, 10, 64)
 		if err != nil || n < 0 {

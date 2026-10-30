@@ -27,12 +27,15 @@ import {
   notifyUnauthorized,
   safeNext,
 } from "./lib/auth";
+import { Analysis } from "./pages/Analysis";
+import { Logs } from "./pages/Logs";
 import { Login } from "./pages/Login";
 import { Overview } from "./pages/Overview";
-import { Pricing } from "./pages/Pricing";
-import { Requests } from "./pages/Requests";
-import { Settings } from "./pages/Settings";
 import { Setup } from "./pages/Setup";
+import { Data } from "./pages/settings/Data";
+import { Gateway } from "./pages/settings/Gateway";
+import { Pricing } from "./pages/settings/Pricing";
+import { SettingsLayout } from "./pages/settings/SettingsLayout";
 
 const queryClient = new QueryClient({
   queryCache: new QueryCache({ onError: notifyUnauthorized }),
@@ -186,6 +189,15 @@ function UnauthorizedRedirect() {
   return null;
 }
 
+/**
+ * RedirectKeepSearch moves an old route to its replacement without dropping
+ * the query string (range and filter state survive the migration).
+ */
+function RedirectKeepSearch({ to }: { to: string }) {
+  const { search, hash } = useLocation();
+  return <Navigate to={{ pathname: to, search, hash }} replace />;
+}
+
 export function App() {
   return (
     <QueryClientProvider client={queryClient}>
@@ -198,9 +210,15 @@ export function App() {
               <Route path="login" element={<Login />} />
               <Route element={<Layout />}>
                 <Route index element={<Overview />} />
-                <Route path="requests" element={<Requests />} />
-                <Route path="pricing" element={<Pricing />} />
-                <Route path="settings" element={<Settings />} />
+                <Route path="logs" element={<Logs />} />
+                <Route path="analysis" element={<Analysis />} />
+                <Route path="requests" element={<RedirectKeepSearch to="/logs" />} />
+                <Route path="pricing" element={<RedirectKeepSearch to="/settings/pricing" />} />
+                <Route path="settings" element={<SettingsLayout />}>
+                  <Route index element={<Gateway />} />
+                  <Route path="pricing" element={<Pricing />} />
+                  <Route path="data" element={<Data />} />
+                </Route>
               </Route>
             </Route>
             <Route path="*" element={<Navigate to="/" replace />} />

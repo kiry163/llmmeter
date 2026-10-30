@@ -9,6 +9,15 @@ export interface DateRange {
   to: string;
 }
 
+/** RangeSelection pairs a shortcut with its resolved inclusive date bounds. */
+export interface RangeSelection extends DateRange {
+  preset: RangePreset;
+}
+
+/** DEFAULT_RANGE_PRESET is used when a URL carries no valid range. */
+export const DEFAULT_RANGE_PRESET: RangePreset = "7d";
+
+
 /** RANGE_PRESETS lists the shortcuts in display order. */
 export const RANGE_PRESETS: readonly RangePreset[] = ["today", "24h", "7d", "30d", "custom"];
 
@@ -123,4 +132,26 @@ export function rangeDays(range: DateRange): number {
   const to = parseDay(range.to);
   if (from === null || to === null || to < from) return 1;
   return Math.round((to - from) / 86_400_000) + 1;
+}
+
+/**
+ * parseRangeSelection reads the range shortcut and custom bounds from the URL.
+ * Unknown or incomplete values fall back to the default shortcut so a
+ * hand-edited URL never triggers a bad request.
+ */
+export function parseRangeSelection(
+  params: URLSearchParams,
+  timeZone?: string,
+): RangeSelection {
+  const raw = params.get("range");
+  const preset = isRangePreset(raw) ? raw : DEFAULT_RANGE_PRESET;
+  if (preset === "custom") {
+    const from = params.get("from");
+    const to = params.get("to");
+    if (isDateString(from) && isDateString(to) && from <= to) {
+      return { preset, from, to };
+    }
+    return { preset, ...presetRange("7d", new Date(), timeZone) };
+  }
+  return { preset, ...presetRange(preset, new Date(), timeZone) };
 }

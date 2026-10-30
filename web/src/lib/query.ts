@@ -1,5 +1,5 @@
 import type { RequestParams } from "../api/client";
-import { isDateString, isRangePreset, presetRange } from "./range";
+import { DEFAULT_RANGE_PRESET, isDateString, isRangePreset, presetRange } from "./range";
 import type { RangePreset } from "./range";
 
 /** REQUESTS_PAGE_LIMIT is the page size used by the explorer. */
@@ -22,16 +22,6 @@ export const USAGE_STATUS_FILTERS = [
 
 export type UsageStatusFilter = (typeof USAGE_STATUS_FILTERS)[number];
 
-/** USAGE_STATUS_LABELS maps each usage outcome to its Chinese label. */
-export const USAGE_STATUS_LABELS: Record<UsageStatusFilter, string> = {
-  ok: "正常",
-  no_usage: "无用量",
-  parse_failed: "解析失败",
-  too_large: "体量过大",
-  not_applicable: "不适用",
-  error: "错误",
-};
-
 /** PricedFilter narrows the list to priced or unpriced requests. */
 export type PricedFilter = "all" | "priced" | "unpriced";
 
@@ -42,7 +32,17 @@ export const PRICED_FILTER_LABELS: Record<PricedFilter, string> = {
   unpriced: "未定价",
 };
 
-const DEFAULT_RANGE_PRESET: RangePreset = "7d";
+/** STREAM_FILTERS lists the streaming scopes the explorer can request. */
+export const STREAM_FILTERS = ["all", "stream", "nonstream"] as const;
+
+export type StreamFilter = (typeof STREAM_FILTERS)[number];
+
+/** STREAM_FILTER_LABELS maps each streaming scope to its Chinese label. */
+export const STREAM_FILTER_LABELS: Record<StreamFilter, string> = {
+  all: "全部",
+  stream: "流式",
+  nonstream: "非流式",
+};
 
 /** RequestsFilters is the filter set persisted in the URL. */
 export interface RequestsFilters {
@@ -53,6 +53,7 @@ export interface RequestsFilters {
   pathClass: PathClassFilter | "";
   status: string;
   usageStatus: UsageStatusFilter | "";
+  stream: StreamFilter;
   priced: PricedFilter;
 }
 
@@ -91,6 +92,7 @@ export function parseRequestsFilters(
   const rawPathClass = params.get("pathClass") ?? "";
   const rawStatus = params.get("status") ?? "";
   const rawUsageStatus = params.get("usageStatus") ?? "";
+  const rawStream = params.get("stream") ?? "";
   const rawPriced = params.get("priced");
 
   return {
@@ -105,6 +107,9 @@ export function parseRequestsFilters(
     usageStatus: USAGE_STATUS_FILTERS.includes(rawUsageStatus as UsageStatusFilter)
       ? (rawUsageStatus as UsageStatusFilter)
       : "",
+    stream: STREAM_FILTERS.includes(rawStream as StreamFilter)
+      ? (rawStream as StreamFilter)
+      : "all",
     priced: rawPriced === "priced" || rawPriced === "unpriced" ? rawPriced : "all",
   };
 }
@@ -121,6 +126,7 @@ export function serializeRequestsFilters(filters: RequestsFilters): URLSearchPar
   if (filters.pathClass) params.set("pathClass", filters.pathClass);
   if (filters.status) params.set("status", filters.status);
   if (filters.usageStatus) params.set("usageStatus", filters.usageStatus);
+  if (filters.stream !== "all") params.set("stream", filters.stream);
   if (filters.priced !== "all") params.set("priced", filters.priced);
   return params;
 }
@@ -133,6 +139,7 @@ export interface RequestsQueryOptions {
   pathClass?: string;
   status?: number;
   usageStatus?: string;
+  stream?: StreamFilter;
   priced?: boolean;
   beforeId?: number;
   limit?: number;
@@ -161,6 +168,8 @@ export function buildRequestsQuery(options: RequestsQueryOptions = {}): string {
   append(search, "pathClass", options.pathClass);
   append(search, "status", options.status);
   append(search, "usageStatus", options.usageStatus);
+  if (options.stream === "stream") append(search, "stream", true);
+  else if (options.stream === "nonstream") append(search, "stream", false);
   append(search, "priced", options.priced);
   append(search, "before_id", options.beforeId);
   append(search, "limit", options.limit ?? REQUESTS_PAGE_LIMIT);
@@ -176,6 +185,7 @@ export function filtersToApiParams(filters: RequestsFilters): RequestParams {
     pathClass: filters.pathClass || undefined,
     status: filters.status ? Number(filters.status) : undefined,
     usageStatus: filters.usageStatus || undefined,
+    stream: filters.stream === "all" ? undefined : filters.stream === "stream",
     priced: filters.priced === "all" ? undefined : filters.priced === "priced",
   };
 }

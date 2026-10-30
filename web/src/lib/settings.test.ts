@@ -6,6 +6,7 @@ import {
   maskValue,
   redactSettings,
   timezoneOptions,
+  validateClearPassword,
   validateRetention,
   validateSettings,
   validateTimeout,
@@ -58,6 +59,12 @@ it("requires the current password when one is set", () => {
   };
   expect(validateSettings(base).currentPassword).toBeTruthy();
   expect(validateSettings({ ...base, currentPassword: "hunter22" })).toEqual({});
+});
+
+it("requires the current password to clear it", () => {
+  expect(validateClearPassword("")).toBeTruthy();
+  expect(validateClearPassword("   ")).toBeTruthy();
+  expect(validateClearPassword("hunter22")).toBeUndefined();
 });
 
 it("rejects short and mismatched passwords", () => {

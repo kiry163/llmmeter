@@ -1,9 +1,9 @@
 # llmmeter
 
-本机运行的 OpenAI 兼容透传网关：除下文说明的流式 usage 注入外，所有请求原样转发到唯一的上游，逐条记录 token、花费与上下行字节，并提供一个实时统计面板。为 omp、codex、OpenAI SDK 这类客户端设计，上游通常是 DeepSeek 等 OpenAI 兼容服务。
+本机运行的 OpenAI 兼容透传网关：除下文说明的流式 usage 注入外，所有请求原样转发到唯一的上游，逐条记录 token、花费与上下行字节，并提供一个可查看统计、日志、分析与编辑配置的管理面板。为 omp、codex、OpenAI SDK 这类客户端设计，上游通常是 DeepSeek 等 OpenAI 兼容服务。
 
 - 单二进制内嵌前端与 SQLite，运行时不依赖 Node 或外部数据库。
-- 上游、价格、时区、保留与访问控制都在面板里配置并即时生效，没有 YAML 或配置文件。
+- 上游、价格、时区、保留与访问控制都在面板里配置并即时生效。首次配置也通过 `/setup` 写入 SQLite；没有 YAML 或配置文件，SQLite 是唯一事实来源，重启后以数据库为准。
 - 纯透传：除给缺少 `stream_options` 的流式 chat 请求注入 `include_usage` 外不改写任何请求，不做协议转换，不估算 token。
 
 ## 构建与运行
@@ -17,6 +17,22 @@ make build          # npm ci + 前端构建 + go build -o llmmeter
 - `-db` 默认 `llmmeter.db`，`-listen` 默认 `127.0.0.1:8100`。
 - 首次构建前端需要 Node.js 与 npm；`make web` 只构建前端，`make test` 跑 Go 与前端测试。
 - 打开 <http://127.0.0.1:8100/>；未配置时会跳到 `/setup`。
+
+## 界面与路由
+
+单页应用的路由与用途：
+
+| 路由 | 页面 |
+| --- | --- |
+| `/` | 总览：顶部实时条（进行中、QPS、上传/下载 B/s、P95、错误与 60s sparkline）不随日期范围切换；其下是区间统计（花费、Tokens、请求、流量 KPI、环比、用量趋势、Top 5 模型）。范围选择写入 URL。 |
+| `/logs` | 日志：按范围、模型、路径类、状态码、用量状态、流式、定价筛选；表格显示流式徽标、输入/输出/缓存读、费用、首字/总耗时与 tokens/s；点击行打开请求抽屉。 |
+| `/analysis` | 分析：按模型堆叠的趋势、Top 三组榜单（花费 / Tokens / 耗时）、异常与慢请求、缓存命中与估算节省；点击模型或路径跳到带筛选的日志。 |
+| `/settings` | 设置 / 网关与访问：上游、鉴权、时区、保留天数、管理密码、gateway key 与运行信息。 |
+| `/settings/pricing` | 设置 / 价格：模型目录、费率与峰谷窗口。 |
+| `/settings/data` | 设置 / 数据：数据库路径与体积、版本、保留天数、有效监听与服务端时区。 |
+| `/setup`、`/login` | 首次配置与登录。 |
+
+旧路由 `/requests` 重定向到 `/logs`，`/pricing` 重定向到 `/settings/pricing`（保留查询参数）。窄屏下侧栏变为顶部横向导航，日志改为卡片列表，页面不横向溢出。
 
 ## 首次配置
 
@@ -56,15 +72,18 @@ wire_api = "chat"
 
 ## 价格与峰谷窗口
 
-在“价格”页按**客户端请求体里的 `model` 字段**建模型（与上游返回的 `model` 无关；仅当请求体没有 `model` 时才回退到上游响应中的模型名）。费率单位是 **USD / 百万 token**：
+价格在 `/settings/pricing` 配置。顶部可「刷新上游模型」：目录合并三类来源——已配置、上游 `GET /models` 可见（base URL 未以 `/v1` 结尾时回退 `GET /v1/models`）、日志已观测。上游失败只显示脱敏原因（不含 API key），不阻塞手工添加；失败时目录接口仍返回已观测模型，`upstream` 为空。
 
-- `input`、`output`、`cacheRead`、`cacheWrite`、`reasoning`；`reasoning` 留空时按 `output` 计价。
+按**客户端请求体里的 `model` 字段**建模型（与上游返回的 `model` 无关；仅当请求体没有 `model` 时才回退到上游响应中的模型名）。费率单位是 **USD / 百万 token**：
+
+- `input`、`output`、`cacheRead`、`cacheWrite`、`reasoning`；`reasoning` 留空时按 `output` 计价，`cacheWrite` 留空按 0。
 - 可叠加时间窗：选择星期、起止时刻（按设置中的时区解释），并覆盖任意若干费率。
   - `end < start` 表示跨午夜，星期按窗口开始那天判断。
   - 多个窗口同时命中时，按**列表顺序**取第一个（即提交数组的顺序/sort_order，可在价格页用上移、下移调整），与创建时间无关。
   - 窗口内未写的费率回落到 base 价。
 - 计价使用**请求完成时刻**所在窗口；命中窗口的费率快照会写入该条记录，之后改价不影响历史。
-- 没有配置价格的模型：token 照常记录，成本为 0，请求标记为 `unpriced`。
+- 完全未配置价格的模型：token 照常记录，成本为 0，请求标记为 `unpriced`。
+- 「一键补录」把目录中未配置的模型批量创建为 0 费率条目（每批最多 100 个名字）。五项费率全为 0 的条目在列表标「0 价（待填）」；这类模型的请求成本为 $0，但计为已定价（`priced`），不再是 `unpriced`。
 
 成本公式（负数分量按 0 计）：
 
@@ -85,6 +104,21 @@ wire_api = "chat"
 - 客户端中途断开后，网关仍会继续读取上游响应最多 **3 秒 / 2 MiB**，以便补全 usage 与字节记账；该条记录标记为 `clientDisconnected`，字节数仍按上游实际收发计入。
 - token usage 只解析 `/v1/chat/completions` 与 `/v1/responses`。拿不到 usage 时如实标记 `no_usage`、`parse_failed`、`too_large` 或 `error`，绝不估算。
 
+## tokens/s 与缓存节省
+
+- 日志与请求抽屉里的 `tokens/s` 只对流式请求显示：
+
+  ```
+  completionTokens / max((latencyMs − ttftMs) / 1000, 0.001)
+  ```
+
+  要求 `ttftMs` 存在、`latencyMs > ttftMs`、`completionTokens > 0`；否则显示 `—`。非流式请求不估算生成速度。
+- 用量状态文案：`ok` 正常、`no_usage` 无用量、`parse_failed` 解析失败、`too_large` 未解析（响应过大）、`not_applicable` 不适用、`error` 错误。
+- `too_large` 表示请求体、响应体或 SSE 单行超过解析上限；字节与转发正常，tokens 与成本未解析。日志徽标悬停和请求抽屉内都会显示这条说明。
+- 分析页的缓存命中率 = `cacheReadTokens / promptTokens`（区间内总量）。
+- 估算节省按请求明细逐条累加 `cacheReadTokens × (inputPerMTok − cacheReadPerMTok)`，只统计已定价、缓存读 > 0 的明细，单价差 ≤ 0 的行不计。它依赖明细保留期，只是估算值。
+- 缓存节省、Top 榜单，以及健康区块里的未计量、未解析（too_large）、客户端断开、慢请求计数与 P95 都来自请求明细；区间起点早于明细保留期时（响应 `range.partial=true`），分析页将这些值置灰并标「仅保留期内」（缓存节省显示「超出明细保留期，无法估算」）。健康区块的请求数、错误数与错误率，以及趋势、模型/路径排名来自永久聚合，不受明细清理影响。
+
 ## 认证与远程访问
 
 - 面板 API 默认只信任回环请求；`-listen` 为非回环地址时，若尚未设置管理密码，启动会直接失败（避免把无鉴权的面板暴露到网络）。
@@ -94,10 +128,21 @@ wire_api = "chat"
 - 网关请求始终要求 `Authorization: Bearer <gateway key>`；轮换后旧 key 立即失效。
 - 二进制不内置 TLS。对外暴露时建议放在 Caddy/Nginx 后面终止 TLS，并让 llmmeter 继续监听 `127.0.0.1`。反代需关闭 SSE 缓冲（如 `proxy_buffering off`）以保证实时面板正常。
 
+## 面板 API
+
+面板与网关共用同一监听；下列是 UI v3 新增或扩展的只读/管理接口（均遵循上面的回环与 CSRF 规则）：
+
+| 方法与路径 | 说明 |
+| --- | --- |
+| `GET /api/model-catalog` | 返回 `{fetchedAt, upstream, observed, upstreamError}`：上游可见模型、日志已观测模型与上次拉取时间。`?refresh=1` 跳过缓存强制刷新。上游失败时 HTTP 仍为 200，`upstream` 为空、`fetchedAt` 为 null，`upstreamError` 为脱敏原因（不含 API key）。 |
+| `GET /api/analysis?from=YYYY-MM-DD&to=YYYY-MM-DD&interval=auto` | 一次返回 `range`（含 `interval`、`partial`）、`trend`、`models`、`paths`、`topRequests`、`health`、`cache`。`interval` 可为 `auto`、`minute`、`hour`、`day`；显式间隔超出上限返回 400。 |
+| `GET /api/requests?…&stream=true\|false` | 在原有筛选上增加流式筛选；非法值返回 400 `validation`。 |
+| `POST /api/models/import` | 请求 `{names:[...]}`，把缺失模型创建为 0 费率并返回 `{created, skipped}`；单批最多 100 个名字，重复名与已存在模型跳过。 |
+
 ## 保留、备份与恢复
 
 - 请求明细默认保留 **90 天**，可在设置页调整为 7–3650 天；每天本地时间 03:00 清理过期明细。
-- 按分钟聚合的流量（`traffic_minutes`）**永久保留**：明细被清理后，总览的请求数/token/字节/花费、序列与 breakdown 图表仍有数据；但 priced/unpriced/unmetered 计数与延迟分位数来自明细表，过期后不再可得，请求详情也不可再查。
+- 按分钟聚合的流量（`traffic_minutes`）**永久保留**：明细被清理后，总览的请求数/token/字节/花费、序列与 breakdown 图表仍有数据；但 priced/unpriced/unmetered 计数与延迟分位数来自明细表，过期后不再可得，请求详情也不可再查。分析页的 Top 榜单、缓存节省金额、健康区块的未计量/未解析/断开/慢请求计数与 P95 同样依赖明细，区间超出保留期时置灰（`range.partial=true`）。
 - 全部数据就在一个 SQLite 文件（默认 `llmmeter.db`）里。备份时停止进程后复制该文件即可；不停机时用 `sqlite3 llmmeter.db ".backup backup.db"`（WAL 模式下不要只拷主文件）。
 
 ## 限制

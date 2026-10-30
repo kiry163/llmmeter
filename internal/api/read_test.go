@@ -362,6 +362,33 @@ func TestRequestsDetailAndCursor(t *testing.T) {
 		strings.Contains(rec.Body.String(), `"model":"deepseek-chat"`) {
 		t.Fatalf("priced filter = %d %s", rec.Code, rec.Body.String())
 	}
+
+	// Both seeded records are non-streamed, so the stream filter must exclude
+	// everything for stream=true and keep both rows for stream=false.
+	var streamPage struct {
+		Requests []struct {
+			ID     int64 `json:"id"`
+			Stream bool  `json:"stream"`
+		} `json:"requests"`
+	}
+	rec = doGET(t, srv, "/api/requests?from=2026-10-29&to=2026-10-29&stream=false")
+	if rec.Code != 200 {
+		t.Fatalf("stream=false = %d %s", rec.Code, rec.Body.String())
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &streamPage); err != nil {
+		t.Fatal(err)
+	}
+	if len(streamPage.Requests) != 2 || streamPage.Requests[0].Stream {
+		t.Fatalf("stream=false page = %+v", streamPage)
+	}
+	rec = doGET(t, srv, "/api/requests?from=2026-10-29&to=2026-10-29&stream=true")
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"requests":[]`) {
+		t.Fatalf("stream=true = %d %s", rec.Code, rec.Body.String())
+	}
+	rec = doGET(t, srv, "/api/requests?from=2026-10-29&to=2026-10-29&stream=maybe")
+	if rec.Code != 400 || !strings.Contains(rec.Body.String(), `"code":"validation"`) {
+		t.Fatalf("stream=maybe = %d %s", rec.Code, rec.Body.String())
+	}
 }
 
 func TestDateRangeValidation(t *testing.T) {

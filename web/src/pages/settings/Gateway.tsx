@@ -1,68 +1,56 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState, type ReactNode } from "react";
+import { useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { ApiError, api } from "../api/client";
-import type { Settings as SettingsData, SettingsPatch } from "../api/types";
+import { ApiError, api } from "../../api/client";
+import type { Settings as SettingsData, SettingsPatch } from "../../api/types";
 import {
   Badge,
   Button,
   Card,
   ErrorText,
+  Field,
   Input,
   Select,
   Spinner,
   useToast,
-} from "../components/ui";
-import { formatBytes } from "../lib/format";
+} from "../../components/ui";
 import {
   listenIsLoopback,
   redactSettings,
   timezoneOptions,
+  validateClearPassword,
   validateSettings,
   type FormErrors,
-} from "../lib/settings";
+} from "../../lib/settings";
 
-function Field({
-  label,
-  hint,
-  error,
-  children,
-}: {
-  label: string;
-  hint?: string;
-  error?: string;
-  children: ReactNode;
-}) {
-  return (
-    <label className="block">
-      <span className="mb-1 flex items-baseline justify-between gap-2 text-xs text-muted">
-        <span>{label}</span>
-        {hint && <span className="text-[11px]">{hint}</span>}
-      </span>
-      {children}
-      {error && <span className="mt-1 block text-xs text-danger">{error}</span>}
-    </label>
-  );
-}
+/** FIELD_LABELS turns API validation keys into the visible field names. */
+const FIELD_LABELS: Record<string, string> = {
+  baseUrl: "上游 Base URL",
+  apiKey: "上游 API Key",
+  timeoutS: "超时",
+  timezone: "时区",
+  retentionDays: "明细保留天数",
+  currentPassword: "当前密码",
+  newPassword: "新密码",
+};
 
-export function Settings() {
+/**
+ * Gateway is the upstream and access settings subpage. It also owns the
+ * retention field shared with the data subpage.
+ */
+export function Gateway() {
   const settings = useQuery({ queryKey: ["settings"], queryFn: api.getSettings });
 
   return (
     <div className="space-y-4">
-      <header>
-        <h1 className="text-xl font-semibold">设置</h1>
-        <p className="text-sm text-muted">上游、时区、保留策略与访问控制。</p>
-      </header>
-
       {settings.isPending && <Spinner />}
       {settings.isError && <ErrorText error={settings.error} />}
-      {settings.data && <SettingsForm settings={settings.data} />}
+      {settings.data && <GatewayForm settings={settings.data} />}
     </div>
   );
 }
 
-function SettingsForm({ settings }: { settings: SettingsData }) {
+function GatewayForm({ settings }: { settings: SettingsData }) {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
   const toast = useToast();
@@ -214,6 +202,15 @@ function SettingsForm({ settings }: { settings: SettingsData }) {
     save.mutate(patch);
   }
 
+  function requestClear() {
+    const error = validateClearPassword(currentPassword);
+    if (error) {
+      setErrors((prev) => ({ ...prev, currentPassword: error }));
+      return;
+    }
+    clearPassword.mutate(currentPassword);
+  }
+
   async function copyRotatedKey() {
     if (!rotatedKey) return;
     try {
@@ -336,6 +333,9 @@ function SettingsForm({ settings }: { settings: SettingsData }) {
             />
           </Field>
         </div>
+        <p className="mt-3 text-xs text-muted">
+          超出保留期的请求明细会被删除；聚合统计不随明细清理，永久保留。
+        </p>
       </Card>
 
       <Card
@@ -403,16 +403,7 @@ function SettingsForm({ settings }: { settings: SettingsData }) {
                     <Button
                       variant="danger"
                       disabled={clearPassword.isPending}
-                      onClick={() => {
-                        if (currentPassword === "") {
-                          setErrors((prev) => ({
-                            ...prev,
-                            currentPassword: "清除密码需要当前密码",
-                          }));
-                          return;
-                        }
-                        clearPassword.mutate(currentPassword);
-                      }}
+                      onClick={requestClear}
                     >
                       {clearPassword.isPending ? "清除中…" : "确认清除"}
                     </Button>
@@ -497,30 +488,11 @@ function SettingsForm({ settings }: { settings: SettingsData }) {
         </div>
       </Card>
 
-      <Card title="运行信息">
-        <dl className="grid gap-3 text-sm sm:grid-cols-2">
-          <div>
-            <dt className="text-xs text-muted">有效监听</dt>
-            <dd>
-              {redacted.listen}
-              <span className="ml-2 text-xs text-warning">修改需重启服务</span>
-            </dd>
-          </div>
-          <div>
-            <dt className="text-xs text-muted">数据库路径</dt>
-            <dd className="break-all" title={redacted.dbPath}>
-              {redacted.dbPath}
-            </dd>
-          </div>
-          <div>
-            <dt className="text-xs text-muted">数据库体积</dt>
-            <dd>{formatBytes(redacted.dbSizeBytes)}</dd>
-          </div>
-          <div>
-            <dt className="text-xs text-muted">版本</dt>
-            <dd>{redacted.version}</dd>
-          </div>
-        </dl>
+      <Card title="服务监听">
+        <div className="flex flex-wrap items-baseline gap-2 text-sm">
+          <span className="break-all">{redacted.listen}</span>
+          <span className="text-xs text-warning">修改需重启服务</span>
+        </div>
       </Card>
 
       {save.isError && (
@@ -530,7 +502,7 @@ function SettingsForm({ settings }: { settings: SettingsData }) {
             <ul className="space-y-0.5 text-xs text-danger">
               {saveFields.map(([field, message]) => (
                 <li key={field}>
-                  {field}：{message}
+                  {FIELD_LABELS[field] ?? field}：{message}
                 </li>
               ))}
             </ul>

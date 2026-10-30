@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -227,5 +229,114 @@ func TestClearPassword(t *testing.T) {
 	}
 	if err := repo.ApplyPatch(ctx, settings.Patch{}, &settings.PasswordChange{New: "x", Clear: true}); err == nil {
 		t.Fatal("set and clear together accepted")
+	}
+}
+
+func TestImportModelsCreatesMissingZeroRates(t *testing.T) {
+	repo := newTestRepo(t)
+	ctx := context.Background()
+	if _, err := repo.CreateModel(ctx, settings.ModelInput{Name: "existing", Input: 1}); err != nil {
+		t.Fatal(err)
+	}
+	created, skipped, err := repo.ImportModels(ctx,
+		[]string{" new-a ", "existing", "new-a", "new-b"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(created) != 2 || created[0].Name != "new-a" || created[1].Name != "new-b" {
+		t.Fatalf("created=%+v", created)
+	}
+	if len(skipped) != 1 || skipped[0] != "existing" {
+		t.Fatalf("skipped=%v", skipped)
+	}
+	for _, m := range created {
+		if m.ID == 0 {
+			t.Fatalf("created model without id: %+v", m)
+		}
+		if m.Input != 0 || m.Output != 0 || m.CacheRead != 0 || m.CacheWrite != 0 || m.Reasoning != nil || len(m.Windows) != 0 {
+			t.Fatalf("rates = %+v", m)
+		}
+	}
+	if _, _, err := repo.ImportModels(ctx, make([]string, 101)); !errors.As(err, new(*settings.ValidationError)) {
+		t.Fatalf("limit err = %v", err)
+	}
+	if _, _, err := repo.ImportModels(ctx, []string{"   ", ""}); err == nil {
+		t.Fatal("empty names must error")
+	}
+	long := strings.Repeat("x", 201)
+	var ve *settings.ValidationError
+	if _, _, err := repo.ImportModels(ctx, []string{long}); !errors.As(err, &ve) || ve.Fields["names"] == "" {
+		t.Fatalf("long name err = %v", err)
+	}
+
+	// Imported rows are persisted with zero rates and the existing model keeps
+	// its price.
+	models, err := repo.Models(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(models) != 3 {
+		t.Fatalf("models = %+v", models)
+	}
+	for _, m := range models {
+		switch m.Name {
+		case "existing":
+			if m.Input != 1 {
+				t.Fatalf("existing rate = %+v", m)
+			}
+		case "new-a", "new-b":
+			if m.Input != 0 || m.Reasoning != nil {
+				t.Fatalf("imported = %+v", m)
+			}
+		}
+	}
+
+	// A second import skips everything already present.
+	created, skipped, err = repo.ImportModels(ctx, []string{"new-a", "new-b"})
+	if err != nil || len(created) != 0 || len(skipped) != 2 {
+		t.Fatalf("reimport created=%v skipped=%v err=%v", created, skipped, err)
+	}
+	if skipped[0] != "new-a" || skipped[1] != "new-b" {
+		t.Fatalf("reimport skipped order = %v", skipped)
+	}
+}
+
+func TestImportModelsConcurrentCallsSkipConflicts(t *testing.T) {
+	repo := newTestRepo(t)
+	ctx := context.Background()
+
+	const workers = 4
+	var wg sync.WaitGroup
+	created := make([]int, workers)
+	errs := make([]error, workers)
+	skipped := make([]int, workers)
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			models, skippedNames, err := repo.ImportModels(ctx, []string{"race-a", "race-b", "race-a"})
+			created[i], skipped[i], errs[i] = len(models), len(skippedNames), err
+		}(i)
+	}
+	wg.Wait()
+
+	totalCreated, totalSkipped := 0, 0
+	for i := 0; i < workers; i++ {
+		if errs[i] != nil {
+			t.Fatalf("worker %d: %v", i, errs[i])
+		}
+		totalCreated += created[i]
+		totalSkipped += skipped[i]
+	}
+	if totalCreated != 2 || totalSkipped != 2*(workers-1) {
+		t.Fatalf("created=%v skipped=%v", created, skipped)
+	}
+
+	models, err := repo.Models(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(models) != 2 {
+		t.Fatalf("models = %+v", models)
 	}
 }

@@ -37,6 +37,7 @@ type Server struct {
 	hub     *metrics.Hub
 	now     func() time.Time
 	auth    *Auth
+	catalog *catalog
 }
 
 // New returns a Server for cfg.
@@ -54,6 +55,7 @@ func New(cfg Config) *Server {
 		hub:     cfg.Hub,
 		now:     now,
 		auth:    NewAuth(cfg.Repo, now),
+		catalog: newCatalog(cfg.Repo, cfg.Store, now),
 	}
 }
 
@@ -75,10 +77,12 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/overview", require(s.overview))
 	mux.Handle("GET /api/series", require(s.series))
 	mux.Handle("GET /api/breakdown", require(s.breakdown))
+	mux.Handle("GET /api/analysis", require(s.analysis))
 	mux.Handle("GET /api/requests", require(s.requests))
 	mux.Handle("GET /api/requests/{id}", require(s.request))
 	mux.Handle("GET /api/live/snapshot", require(s.liveSnapshot))
 	mux.Handle("GET /api/live/stream", require(s.liveStream))
+	mux.Handle("GET /api/model-catalog", require(s.modelCatalog))
 
 	// Configuration endpoints. Setup and the pre-setup upstream probe are
 	// limited to the local machine instead of requiring a session.
@@ -86,6 +90,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/upstream/test", s.upstreamTestRoute(s.upstreamTest))
 	mux.Handle("GET /api/models", require(s.listModels))
 	mux.Handle("POST /api/models", require(s.createModel))
+	mux.Handle("POST /api/models/import", require(s.importModels))
 	mux.Handle("PATCH /api/models/{id}", require(s.updateModel))
 	mux.Handle("DELETE /api/models/{id}", require(s.deleteModel))
 	mux.Handle("PUT /api/models/{id}/windows", require(s.replaceWindows))

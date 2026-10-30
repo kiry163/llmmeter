@@ -1,50 +1,31 @@
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import type { EChartsCoreOption } from "echarts/core";
-import { useMemo, useState } from "react";
-import type { ReactNode } from "react";
-import { useSearchParams } from "react-router-dom";
+import { useMemo } from "react";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { api } from "../api/client";
-import type { BreakdownRow, Interval, LiveSparkPoint, SeriesPoint } from "../api/types";
-import { LineChart } from "../components/charts";
-import { StatCard } from "../components/StatCard";
-import { TimeRange } from "../components/TimeRange";
-import type { RangeSelection } from "../components/TimeRange";
-import { Badge, Card, ErrorText, Spinner } from "../components/ui";
-import { useLive } from "../hooks/useLive";
-import { useTimezone } from "../hooks/useTimezone";
+import type { BreakdownRow, Interval, SeriesPoint } from "../api/types";
+import { DataTable } from "../components/DataTable";
+import type { Column } from "../components/DataTable";
 import {
-  formatBytes,
-  formatCost,
-  formatDuration,
-  formatOptionalDuration,
-  formatTokens,
-} from "../lib/format";
-import { autoInterval, isDateString, isRangePreset, presetRange, rangeDays } from "../lib/range";
-import type { RangePreset } from "../lib/range";
+  CHART_GRID,
+  CHART_MUTED,
+  CHART_PALETTE,
+  CHART_TOOLTIP,
+  LineChart,
+} from "../components/charts";
+import { ErrorBanner } from "../components/ErrorBanner";
+import { LiveStrip } from "../components/LiveStrip";
+import { PageHeader } from "../components/PageHeader";
+import { RangeBar } from "../components/RangeBar";
+import { Skeleton } from "../components/Skeleton";
+import { StatCard } from "../components/StatCard";
+import { Badge, Card } from "../components/ui";
+import { useTimezone } from "../hooks/useTimezone";
+import { formatBytes, formatCost, formatTokens } from "../lib/format";
+import { autoInterval, parseRangeSelection, rangeDays } from "../lib/range";
+import type { RangeSelection } from "../lib/range";
 
 type MetricKey = "traffic" | "requests" | "tokens" | "cost";
-
-type BreakdownSortKey =
-  | "model"
-  | "requests"
-  | "errors"
-  | "upBytes"
-  | "downBytes"
-  | "tokens"
-  | "cost"
-  | "unpriced";
-
-interface SortState {
-  key: BreakdownSortKey;
-  dir: "asc" | "desc";
-}
-
-interface BreakdownColumn {
-  key: BreakdownSortKey;
-  label: string;
-  numeric?: boolean;
-  render: (row: BreakdownRow) => ReactNode;
-}
 
 interface ChartSeries {
   name: string;
@@ -66,22 +47,12 @@ const INTERVAL_LABELS: Record<Interval, string> = {
   day: "按天",
 };
 
-const DEFAULT_RANGE_PRESET: RangePreset = "7d";
 const DEFAULT_METRIC: MetricKey = "traffic";
 
-const CHART_PALETTE = ["#4f7cf7", "#f59e0b", "#10b981", "#ef4444"];
-const CHART_MUTED = "#8b95a5";
-const CHART_GRID = "rgba(139, 149, 165, 0.22)";
-const CHART_TOOLTIP = {
-  backgroundColor: "rgba(17, 24, 39, 0.92)",
-  borderWidth: 0,
-  textStyle: { color: "#f8fafc", fontSize: 12 },
-};
-
-const BREAKDOWN_COLUMNS: readonly BreakdownColumn[] = [
+const MODEL_COLUMNS: Column<BreakdownRow>[] = [
   {
     key: "model",
-    label: "模型",
+    header: "模型",
     render: (row) => (
       <span className="inline-flex flex-wrap items-center gap-2">
         <span className="font-medium">{row.key || "（未知）"}</span>
@@ -91,61 +62,23 @@ const BREAKDOWN_COLUMNS: readonly BreakdownColumn[] = [
   },
   {
     key: "requests",
-    label: "请求",
-    numeric: true,
+    header: "请求",
+    className: "text-right tabular-nums",
     render: (row) => formatTokens(row.requests),
   },
   {
-    key: "errors",
-    label: "错误",
-    numeric: true,
-    render: (row) => formatTokens(row.errors),
-  },
-  {
-    key: "upBytes",
-    label: "上行",
-    numeric: true,
-    render: (row) => formatBytes(row.upBytes),
-  },
-  {
-    key: "downBytes",
-    label: "下行",
-    numeric: true,
-    render: (row) => formatBytes(row.downBytes),
-  },
-  {
     key: "tokens",
-    label: "tokens",
-    numeric: true,
+    header: "Tokens",
+    className: "text-right tabular-nums",
     render: (row) => formatTokens(row.promptTokens + row.completionTokens),
   },
   {
     key: "cost",
-    label: "成本",
-    numeric: true,
+    header: "花费",
+    className: "text-right tabular-nums",
     render: (row) => formatCost(row.costNanoUsd),
   },
-  {
-    key: "unpriced",
-    label: "未定价",
-    numeric: true,
-    render: (row) => formatTokens(row.unpriced),
-  },
 ];
-
-function parseRangeSelection(params: URLSearchParams, timeZone?: string): RangeSelection {
-  const raw = params.get("range");
-  const preset = isRangePreset(raw) ? raw : DEFAULT_RANGE_PRESET;
-  if (preset === "custom") {
-    const from = params.get("from");
-    const to = params.get("to");
-    if (isDateString(from) && isDateString(to) && from <= to) {
-      return { preset, from, to };
-    }
-    return { preset, ...presetRange("7d", new Date(), timeZone) };
-  }
-  return { preset, ...presetRange(preset, new Date(), timeZone) };
-}
 
 function parseMetric(params: URLSearchParams): MetricKey {
   const raw = params.get("metric") ?? "";
@@ -257,82 +190,14 @@ function buildSeriesOption(
   };
 }
 
-function buildSparkOption(points: LiveSparkPoint[]): EChartsCoreOption {
-  return {
-    animation: false,
-    color: CHART_PALETTE,
-    grid: { left: 8, right: 8, top: 8, bottom: 4, containLabel: true },
-    tooltip: { trigger: "axis", axisPointer: { type: "line" }, ...CHART_TOOLTIP },
-    xAxis: {
-      type: "value",
-      min: "dataMin",
-      max: "dataMax",
-      axisLabel: {
-        color: CHART_MUTED,
-        formatter: (value: number) => `${Math.round(value)}s`,
-      },
-      axisLine: { lineStyle: { color: CHART_GRID } },
-      axisTick: { show: false },
-      splitLine: { show: false },
-    },
-    yAxis: [
-      { type: "value", show: false },
-      { type: "value", show: false },
-    ],
-    series: [
-      {
-        type: "line",
-        name: "请求数",
-        yAxisIndex: 0,
-        data: points.map((point) => [point.offsetS, point.requests]),
-        showSymbol: false,
-        lineStyle: { width: 1.5 },
-        areaStyle: { opacity: 0.1 },
-        tooltip: { valueFormatter: (value: number) => formatTokens(Number(value)) },
-      },
-      {
-        type: "line",
-        name: "下行流量",
-        yAxisIndex: 1,
-        data: points.map((point) => [point.offsetS, point.downBytes]),
-        showSymbol: false,
-        lineStyle: { width: 1.5 },
-        tooltip: { valueFormatter: (value: number) => formatBytes(Number(value)) },
-      },
-    ],
-  };
+function withPartial(text: string, partial: boolean): string {
+  return partial ? `${text} · 仅保留期内` : text;
 }
 
-function formatQps(qps: number): string {
-  if (!Number.isFinite(qps) || qps <= 0) return "0";
-  if (qps >= 100) return String(Math.round(qps));
-  return qps.toFixed(2).replace(/0+$/, "").replace(/\.$/, "");
-}
-
-function breakdownValue(row: BreakdownRow, key: BreakdownSortKey): string | number {
-  switch (key) {
-    case "model":
-      return row.key;
-    case "requests":
-      return row.requests;
-    case "errors":
-      return row.errors;
-    case "upBytes":
-      return row.upBytes;
-    case "downBytes":
-      return row.downBytes;
-    case "tokens":
-      return row.promptTokens + row.completionTokens;
-    case "cost":
-      return row.costNanoUsd;
-    case "unpriced":
-      return row.unpriced;
-  }
-}
-
-/** Overview combines the live SSE snapshot with historical range queries. */
+/** Overview combines the live stream strip with the historical range views. */
 export function Overview() {
   const [searchParams, setSearchParams] = useSearchParams();
+  const navigate = useNavigate();
   const timeZone = useTimezone();
   const selection = useMemo(
     () => parseRangeSelection(searchParams, timeZone),
@@ -340,8 +205,6 @@ export function Overview() {
   );
   const metric = parseMetric(searchParams);
   const interval = autoInterval(rangeDays(selection));
-  const { snapshot, mode } = useLive();
-  const [sort, setSort] = useState<SortState>({ key: "cost", dir: "desc" });
 
   const overview = useQuery({
     queryKey: ["overview", selection.from, selection.to],
@@ -367,25 +230,11 @@ export function Overview() {
     () => buildSeriesOption(seriesPoints ?? [], interval, metric),
     [seriesPoints, interval, metric],
   );
-  const sparkOption = useMemo(
-    () => (snapshot && snapshot.spark.length > 0 ? buildSparkOption(snapshot.spark) : null),
-    [snapshot],
-  );
 
-  const sortedRows = useMemo(() => {
+  const topModels = useMemo(() => {
     const rows = breakdown.data?.rows ?? [];
-    const sorted = [...rows];
-    sorted.sort((left, right) => {
-      const a = breakdownValue(left, sort.key);
-      const b = breakdownValue(right, sort.key);
-      const order =
-        typeof a === "string" && typeof b === "string"
-          ? a.localeCompare(b, "zh-Hans-CN")
-          : Number(a) - Number(b);
-      return sort.dir === "asc" ? order : -order;
-    });
-    return sorted;
-  }, [breakdown.data, sort]);
+    return [...rows].sort((left, right) => right.costNanoUsd - left.costNanoUsd).slice(0, 5);
+  }, [breakdown.data]);
 
   const updateRange = (next: RangeSelection) => {
     setSearchParams(
@@ -416,135 +265,64 @@ export function Overview() {
     );
   };
 
-  const toggleSort = (key: BreakdownSortKey) => {
-    setSort((current) =>
-      current.key === key
-        ? { key, dir: current.dir === "asc" ? "desc" : "asc" }
-        : { key, dir: key === "model" ? "asc" : "desc" },
-    );
+  const openModel = (row: BreakdownRow) => {
+    const params = new URLSearchParams();
+    if (row.key) params.set("model", row.key);
+    params.set("range", "custom");
+    params.set("from", selection.from);
+    params.set("to", selection.to);
+    navigate(`/analysis?${params.toString()}`);
   };
-
-  const modeLabel = mode === "sse" ? "实时" : mode === "poll" ? "轮询" : "未连接";
-  const modeTone = mode === "sse" ? "success" : mode === "poll" ? "warning" : "danger";
-  const modeHint =
-    mode === "sse" ? "每 1 秒推送" : mode === "poll" ? "每 5 秒轮询" : "等待连接";
 
   const stats = overview.data?.current;
   const previous = overview.data?.previous;
   const partial = overview.data?.partial ?? false;
 
+  const costHint = [
+    stats && stats.unpriced > 0 ? `未定价 ${formatTokens(stats.unpriced)}` : null,
+    partial ? "仅保留期内" : null,
+  ]
+    .filter((part): part is string => part !== null)
+    .join(" · ");
+
   return (
     <div className="space-y-6">
-      <header className="flex flex-wrap items-end justify-between gap-3">
-        <div>
-          <h1 className="text-xl font-semibold">总览</h1>
-          <p className="text-sm text-muted">
-            {selection.from} 至 {selection.to} · {INTERVAL_LABELS[interval]}
-          </p>
-        </div>
-        <div className="flex items-center gap-2">
-          {overview.data?.partial && <Badge tone="warning">仅统计保留期内</Badge>}
-        </div>
-      </header>
+      <PageHeader title="总览" description="实时状态与区间用量概览" />
 
-      <div className="rounded-lg border border-line bg-surface-raised p-3">
-        <TimeRange value={selection} onChange={updateRange} timeZone={timeZone} />
-      </div>
-
-      <section className="space-y-3" aria-labelledby="live-heading">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <h2 id="live-heading" className="text-sm font-semibold">
-            实时
-          </h2>
-          <div className="flex items-center gap-2 text-xs text-muted">
-            <Badge tone={modeTone}>{modeLabel}</Badge>
-            <span>{modeHint}</span>
-          </div>
-        </div>
-
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
-          <StatCard
-            label="当前请求"
-            value={formatTokens(snapshot?.inflight ?? 0)}
-            hint="进行中"
-          />
-          <StatCard label="QPS" value={formatQps(snapshot?.qps ?? 0)} hint="近 60 秒" />
-          <StatCard
-            label="上传"
-            value={`${formatBytes(snapshot?.upBps ?? 0)}/s`}
-            hint="字节/秒"
-          />
-          <StatCard
-            label="下载"
-            value={`${formatBytes(snapshot?.downBps ?? 0)}/s`}
-            hint="字节/秒"
-          />
-          <StatCard
-            label="P95 延迟"
-            value={
-              snapshot?.latencyP95Ms == null ? "—" : formatDuration(snapshot.latencyP95Ms)
-            }
-            hint={
-              snapshot?.latencyP50Ms == null
-                ? "P50 —"
-                : `P50 ${formatDuration(snapshot.latencyP50Ms)}`
-            }
-          />
-          <StatCard
-            label="错误数"
-            value={formatTokens(snapshot?.errors ?? 0)}
-            hint="近 60 秒"
-          />
-        </div>
-
-        {sparkOption && (
-          <Card title="最近 60 秒走势">
-            <LineChart
-              option={sparkOption}
-              ariaLabel="最近 60 秒请求数与下行流量走势"
-              height={200}
-            />
-          </Card>
-        )}
-      </section>
+      <LiveStrip />
 
       <section className="space-y-3" aria-labelledby="range-heading">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <h2 id="range-heading" className="text-sm font-semibold">
-            区间统计
-          </h2>
-          <span className="text-xs text-muted">{INTERVAL_LABELS[interval]}</span>
+        <div className="flex flex-col gap-2 xl:flex-row xl:flex-wrap xl:items-center xl:justify-between">
+          <div className="flex flex-wrap items-center gap-2">
+            <h2 id="range-heading" className="text-sm font-semibold">
+              区间统计
+            </h2>
+            <span className="text-xs text-muted">
+              {selection.from} 至 {selection.to} · {INTERVAL_LABELS[interval]}
+            </span>
+            {partial && <Badge tone="warning">仅保留期内</Badge>}
+          </div>
+          <RangeBar value={selection} onChange={updateRange} timeZone={timeZone} />
         </div>
 
-        {overview.isError && <ErrorText error={overview.error} />}
-        {overview.isPending && !overview.data && <Spinner />}
+        {overview.isError && (
+          <ErrorBanner error={overview.error} onRetry={() => void overview.refetch()} />
+        )}
+
+        {overview.isPending && !overview.data && (
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+            {[0, 1, 2, 3].map((index) => (
+              <Skeleton key={index} className="h-24 w-full" />
+            ))}
+          </div>
+        )}
 
         {stats && previous && (
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
             <StatCard
-              label="请求数"
-              value={formatTokens(stats.requests)}
-              hint={`错误 ${formatTokens(stats.errors)}${
-                stats.requests > 0
-                  ? ` · 错误率 ${((stats.errors / stats.requests) * 100).toFixed(1)}%`
-                  : ""
-              }`}
-              delta={{ current: stats.requests, previous: previous.requests }}
-            />
-            <StatCard
-              label="总 tokens"
-              value={formatTokens(stats.totalTokens)}
-              hint={`输入 ${formatTokens(stats.promptTokens)} · 输出 ${formatTokens(
-                stats.completionTokens,
-              )}`}
-              delta={{ current: stats.totalTokens, previous: previous.totalTokens }}
-            />
-            <StatCard
-              label="成本"
+              label="花费"
               value={formatCost(stats.costNanoUsd)}
-              hint={`未定价 ${formatTokens(stats.unpriced)} · 未计量 ${formatTokens(
-                stats.unmetered,
-              )}`}
+              hint={costHint || undefined}
               delta={{
                 current: stats.costNanoUsd,
                 previous: previous.costNanoUsd,
@@ -552,34 +330,36 @@ export function Overview() {
               }}
             />
             <StatCard
-              label={partial ? "P95 延迟（近似）" : "P95 延迟"}
-              value={formatOptionalDuration(stats.latencyP95Ms)}
-              hint={
-                partial
-                  ? `明细已过保留期，按聚合估算 · 均值 ${formatOptionalDuration(
-                      stats.latencyAvgMs,
-                    )} · 最慢 ${formatOptionalDuration(stats.latencyMaxMs)}`
-                  : `P50 ${formatOptionalDuration(
-                      stats.latencyP50Ms,
-                    )} · 平均 ${formatOptionalDuration(stats.latencyAvgMs)}`
-              }
+              label="Tokens"
+              value={formatTokens(stats.totalTokens)}
+              hint={withPartial(
+                `输入 ${formatTokens(stats.promptTokens)} · 输出 ${formatTokens(
+                  stats.completionTokens,
+                )}`,
+                partial,
+              )}
+              delta={{ current: stats.totalTokens, previous: previous.totalTokens }}
+            />
+            <StatCard
+              label="请求"
+              value={formatTokens(stats.requests)}
+              hint={withPartial(
+                `错误 ${formatTokens(stats.errors)} · 未解析 ${formatTokens(stats.unmetered)}`,
+                partial,
+              )}
+              delta={{ current: stats.requests, previous: previous.requests }}
+            />
+            <StatCard
+              label="流量"
+              value={formatBytes(stats.upBytes + stats.downBytes)}
+              hint={withPartial(
+                `上传 ${formatBytes(stats.upBytes)} · 下载 ${formatBytes(stats.downBytes)}`,
+                partial,
+              )}
               delta={{
-                current: stats.latencyP95Ms,
-                previous: previous.latencyP95Ms,
-                goodDirection: "down",
+                current: stats.upBytes + stats.downBytes,
+                previous: previous.upBytes + previous.downBytes,
               }}
-            />
-            <StatCard
-              label="上行流量"
-              value={formatBytes(stats.upBytes)}
-              hint="请求体与请求头"
-              delta={{ current: stats.upBytes, previous: previous.upBytes }}
-            />
-            <StatCard
-              label="下行流量"
-              value={formatBytes(stats.downBytes)}
-              hint="响应体与响应头"
-              delta={{ current: stats.downBytes, previous: previous.downBytes }}
             />
           </div>
         )}
@@ -612,8 +392,10 @@ export function Overview() {
           </div>
         }
       >
-        {series.isError && <ErrorText error={series.error} />}
-        {series.isPending && !series.data && <Spinner />}
+        {series.isError && (
+          <ErrorBanner error={series.error} onRetry={() => void series.refetch()} />
+        )}
+        {series.isPending && !series.data && <Skeleton className="h-[320px] w-full" />}
         {series.data && (
           <LineChart
             option={seriesOption}
@@ -627,67 +409,20 @@ export function Overview() {
 
       <Card
         title="模型分布"
-        actions={<span className="text-xs text-muted">点击表头排序</span>}
+        actions={<span className="text-xs text-muted">Top 5 · 按花费降序</span>}
       >
-        {breakdown.isError && <ErrorText error={breakdown.error} />}
-        {breakdown.isPending && !breakdown.data && <Spinner />}
-        {breakdown.data && sortedRows.length === 0 && (
-          <p className="py-6 text-center text-sm text-muted">该区间暂无数据</p>
+        {breakdown.isError && (
+          <ErrorBanner error={breakdown.error} onRetry={() => void breakdown.refetch()} />
         )}
-        {sortedRows.length > 0 && (
-          <div className="overflow-x-auto">
-            <table className="w-full min-w-[760px] text-sm">
-              <thead>
-                <tr className="border-b border-line text-xs text-muted">
-                  {BREAKDOWN_COLUMNS.map((column) => (
-                    <th
-                      key={column.key}
-                      scope="col"
-                      aria-sort={
-                        sort.key === column.key
-                          ? sort.dir === "asc"
-                            ? "ascending"
-                            : "descending"
-                          : "none"
-                      }
-                      className={`px-2 py-2 font-medium ${
-                        column.numeric ? "text-right" : "text-left"
-                      }`}
-                    >
-                      <button
-                        type="button"
-                        onClick={() => toggleSort(column.key)}
-                        className={`inline-flex items-center gap-1 hover:text-ink ${
-                          column.numeric ? "w-full justify-end" : ""
-                        }`}
-                      >
-                        {column.label}
-                        <span aria-hidden="true" className="text-[10px]">
-                          {sort.key === column.key ? (sort.dir === "asc" ? "▲" : "▼") : "↕"}
-                        </span>
-                      </button>
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {sortedRows.map((row) => (
-                  <tr key={row.key || "（未知）"} className="border-b border-line/60 last:border-0">
-                    {BREAKDOWN_COLUMNS.map((column) => (
-                      <td
-                        key={column.key}
-                        className={`px-2 py-2 align-middle ${
-                          column.numeric ? "text-right tabular-nums" : ""
-                        }`}
-                      >
-                        {column.render(row)}
-                      </td>
-                    ))}
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+        {breakdown.isPending && !breakdown.data && <Skeleton className="h-40 w-full" />}
+        {breakdown.data && (
+          <DataTable
+            columns={MODEL_COLUMNS}
+            rows={topModels}
+            rowKey={(row) => row.key || "（未知）"}
+            onRowClick={openModel}
+            empty={<span className="text-sm text-muted">该区间暂无数据</span>}
+          />
         )}
       </Card>
     </div>

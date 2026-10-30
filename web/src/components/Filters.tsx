@@ -2,11 +2,13 @@ import { useEffect, useState, type ReactNode } from "react";
 import {
   PATH_CLASS_FILTERS,
   PRICED_FILTER_LABELS,
+  STREAM_FILTERS,
+  STREAM_FILTER_LABELS,
   USAGE_STATUS_FILTERS,
-  USAGE_STATUS_LABELS,
 } from "../lib/query";
 import type { PricedFilter, RequestsFilters } from "../lib/query";
-import { TimeRange } from "./TimeRange";
+import { usageLabel } from "../lib/usage";
+import { RangeBar } from "./RangeBar";
 import { Button, Input, Select } from "./ui";
 
 export interface FiltersProps {
@@ -58,7 +60,7 @@ function StatusInput({ value, onChange }: { value: string; onChange: (next: stri
 export function Filters({ filters, models, onChange, onReset, className = "" }: FiltersProps) {
   return (
     <div className={`space-y-3 ${className}`}>
-      <TimeRange
+      <RangeBar
         value={{ preset: filters.preset, from: filters.from, to: filters.to }}
         onChange={(selection) => onChange({ ...filters, ...selection })}
       />
@@ -120,7 +122,26 @@ export function Filters({ filters, models, onChange, onReset, className = "" }: 
             <option value="">全部</option>
             {USAGE_STATUS_FILTERS.map((status) => (
               <option key={status} value={status}>
-                {USAGE_STATUS_LABELS[status]}
+                {usageLabel(status)}
+              </option>
+            ))}
+          </Select>
+        </Field>
+
+        <Field label="流式">
+          <Select
+            className="w-full"
+            value={filters.stream}
+            onChange={(event) =>
+              onChange({
+                ...filters,
+                stream: event.target.value as RequestsFilters["stream"],
+              })
+            }
+          >
+            {STREAM_FILTERS.map((stream) => (
+              <option key={stream} value={stream}>
+                {STREAM_FILTER_LABELS[stream]}
               </option>
             ))}
           </Select>

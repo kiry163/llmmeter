@@ -55,6 +55,37 @@ export function Select({ className = "", ...rest }: SelectHTMLAttributes<HTMLSel
   );
 }
 
+/**
+ * Field labels one form control, with an optional hint and error. The control
+ * is wrapped by the label so the association is implicit and clickable.
+ */
+export function Field({
+  label,
+  hint,
+  error,
+  children,
+}: {
+  label: string;
+  hint?: string;
+  error?: string;
+  children: ReactNode;
+}) {
+  return (
+    <label className="block">
+      <span className="mb-1 flex items-baseline justify-between gap-2 text-xs text-muted">
+        <span>{label}</span>
+        {hint && <span className="text-[11px]">{hint}</span>}
+      </span>
+      {children}
+      {error && (
+        <span className="mt-1 block text-xs text-danger" role="alert">
+          {error}
+        </span>
+      )}
+    </label>
+  );
+}
+
 export function Card({
   title,
   actions,
