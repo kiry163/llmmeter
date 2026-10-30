@@ -119,10 +119,45 @@ export function parseTimeInput(value: string): number {
   return hours * 60 + minutes;
 }
 
-/** parseRateInput turns a text field into a rate; blank inherits (null). */
-export function parseRateInput(value: string): number | null {
-  if (value.trim() === "") return null;
-  return Number(value);
+/**
+ * parseRateInput turns a text field into a per-million-token rate. A blank
+ * field means zero for optional rates (cache write) but is missing for
+ * required ones. Non-numeric, negative and non-finite inputs return null so
+ * the form can flag the field.
+ */
+export function parseRateInput(
+  input: string,
+  opts: { required: boolean },
+): number | null {
+  const trimmed = input.trim();
+  if (trimmed === "") return opts.required ? null : 0;
+  const value = Number(trimmed);
+  if (!Number.isFinite(value) || value < 0) return null;
+  return value;
+}
+
+/** BaseRates is the model-level rate set used to spot imported zero prices. */
+export interface BaseRates {
+  inputPerMTok: number;
+  outputPerMTok: number;
+  cacheReadPerMTok: number;
+  cacheWritePerMTok: number;
+  reasoningPerMTok: number | null;
+}
+
+/**
+ * isZeroPriced reports whether a model was imported without prices: every
+ * billable base rate is zero. A null reasoning rate inherits the output rate,
+ * so it counts as zero here.
+ */
+export function isZeroPriced(model: BaseRates): boolean {
+  return (
+    model.inputPerMTok === 0 &&
+    model.outputPerMTok === 0 &&
+    model.cacheReadPerMTok === 0 &&
+    model.cacheWritePerMTok === 0 &&
+    (model.reasoningPerMTok ?? 0) === 0
+  );
 }
 
 /**

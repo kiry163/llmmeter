@@ -2,6 +2,7 @@ import { expect, it } from "vitest";
 import {
   activeWindow,
   describeWindow,
+  isZeroPriced,
   parseRateInput,
   parseTimeInput,
   validateModel,
@@ -130,12 +131,37 @@ it("matches windows in the configured timezone", () => {
   expect(activeWindow([mondayMorning], at, "Asia/Shanghai")).toBe(mondayMorning);
 });
 
-it("parses rates with blank meaning inherit", () => {
-  expect(parseRateInput("")).toBeNull();
-  expect(parseRateInput("  ")).toBeNull();
-  expect(parseRateInput("0")).toBe(0);
-  expect(parseRateInput("1.25")).toBe(1.25);
-  expect(Number.isNaN(parseRateInput("abc"))).toBe(true);
+it("treats blank cache write as zero", () => {
+  expect(parseRateInput("", { required: false })).toBe(0);
+  expect(parseRateInput("  ", { required: false })).toBe(0);
+  expect(parseRateInput("0", { required: false })).toBe(0);
+  expect(parseRateInput("0.02", { required: false })).toBe(0.02);
+  expect(parseRateInput("", { required: true })).toBeNull();
+});
+
+it("rejects invalid, negative and non-finite rates", () => {
+  expect(parseRateInput("abc", { required: false })).toBeNull();
+  expect(parseRateInput("abc", { required: true })).toBeNull();
+  expect(parseRateInput("-1", { required: false })).toBeNull();
+  expect(parseRateInput("-1", { required: true })).toBeNull();
+  expect(parseRateInput("Infinity", { required: true })).toBeNull();
+  expect(parseRateInput(" 1.25 ", { required: true })).toBe(1.25);
+  expect(parseRateInput("0", { required: true })).toBe(0);
+});
+
+it("marks only fully zero-priced models as pending", () => {
+  const zero = {
+    inputPerMTok: 0,
+    outputPerMTok: 0,
+    cacheReadPerMTok: 0,
+    cacheWritePerMTok: 0,
+    reasoningPerMTok: 0,
+  };
+  expect(isZeroPriced(zero)).toBe(true);
+  expect(isZeroPriced({ ...zero, reasoningPerMTok: null })).toBe(true);
+  expect(isZeroPriced({ ...zero, inputPerMTok: 0.1 })).toBe(false);
+  expect(isZeroPriced({ ...zero, cacheWritePerMTok: 0.1 })).toBe(false);
+  expect(isZeroPriced({ ...zero, reasoningPerMTok: 0.1 })).toBe(false);
 });
 
 it("parses and rejects time inputs", () => {

@@ -31,10 +31,10 @@ import { Analysis } from "./pages/Analysis";
 import { Logs } from "./pages/Logs";
 import { Login } from "./pages/Login";
 import { Overview } from "./pages/Overview";
-import { Pricing } from "./pages/Pricing";
 import { Setup } from "./pages/Setup";
 import { Data } from "./pages/settings/Data";
 import { Gateway } from "./pages/settings/Gateway";
+import { Pricing } from "./pages/settings/Pricing";
 import { SettingsLayout } from "./pages/settings/SettingsLayout";
 
 const queryClient = new QueryClient({
