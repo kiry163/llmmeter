@@ -33,8 +33,12 @@ export interface LineChartProps {
 
 /** ChartEventParams is the subset of ECharts event payloads the UI reads. */
 export interface ChartEventParams {
+  /** componentType is "series" for curve clicks and "legend" for legend clicks. */
+  componentType?: string;
   seriesName?: string;
   name?: string;
+  /** value carries the legend entry name on legend clicks. */
+  value?: unknown;
   seriesIndex?: number;
 }
 

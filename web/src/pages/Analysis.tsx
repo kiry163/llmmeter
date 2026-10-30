@@ -37,7 +37,13 @@ import {
   formatTime,
   formatTokens,
 } from "../lib/format";
-import { filterModelRows, parseModelFilter, trendHasModel } from "../lib/analysis";
+import {
+  UNKNOWN_KEY,
+  chartClickModel,
+  filterModelRows,
+  parseModelFilter,
+  trendHasModel,
+} from "../lib/analysis";
 import { autoInterval, parseRangeSelection, rangeDays } from "../lib/range";
 import type { RangeSelection } from "../lib/range";
 
@@ -89,8 +95,6 @@ const RANK_LABELS: Record<RankKey, string> = {
 const DEFAULT_METRIC: MetricKey = "cost";
 
 const DEFAULT_TOP_TAB: TopTab = "cost";
-
-const UNKNOWN_KEY = "（未知）";
 
 /** metricValue reads one model's contribution for the active trend metric. */
 function metricValue(model: TrendModel, metric: MetricKey): number {
@@ -429,7 +433,7 @@ export function Analysis(): ReactElement {
   const trendEvents = useMemo(
     () => ({
       click: (params: ChartEventParams) => {
-        const model = params.seriesName === UNKNOWN_KEY ? "" : (params.seriesName ?? "");
+        const model = chartClickModel(params);
         openLogs(model ? { model } : {});
       },
     }),
@@ -666,7 +670,7 @@ export function Analysis(): ReactElement {
               }
             >
               <div className="mb-2 text-xs text-muted">
-                按模型堆叠 · 点击图例切换显示，点击曲线跳转日志
+                按模型堆叠 · 点击图例或曲线跳转日志（图例同时切换显示）
               </div>
               <LineChart
                 option={trendOption}
