@@ -147,7 +147,7 @@ function bucketLabel(bucket: AnalysisTrendBucket, interval: Interval): string {
   return `${day} ${hour}:${minute}`;
 }
 
-function buildTrendOption(
+export function buildTrendOption(
   buckets: AnalysisTrendBucket[],
   interval: Interval,
   metric: MetricKey,
@@ -182,6 +182,9 @@ function buildTrendOption(
       itemHeight: 6,
       textStyle: { color: CHART_MUTED },
       pageTextStyle: { color: CHART_MUTED },
+      // ECharts only packs legend click payloads (componentType/value) when
+      // triggerEvent is on; without it the legend click handler never fires.
+      triggerEvent: true,
     },
     xAxis: {
       type: "category",
@@ -670,7 +673,7 @@ export function Analysis(): ReactElement {
               }
             >
               <div className="mb-2 text-xs text-muted">
-                按模型堆叠 · 点击图例或曲线跳转日志（图例同时切换显示）
+                按模型堆叠 · 点击图例或曲线跳转日志
               </div>
               <LineChart
                 option={trendOption}
