@@ -77,6 +77,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/overview", require(s.overview))
 	mux.Handle("GET /api/series", require(s.series))
 	mux.Handle("GET /api/breakdown", require(s.breakdown))
+	mux.Handle("GET /api/analysis", require(s.analysis))
 	mux.Handle("GET /api/requests", require(s.requests))
 	mux.Handle("GET /api/requests/{id}", require(s.request))
 	mux.Handle("GET /api/live/snapshot", require(s.liveSnapshot))

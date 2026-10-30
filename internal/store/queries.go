@@ -53,6 +53,7 @@ type BreakdownRow struct {
 	Requests, Errors                            int64
 	UpBytes, DownBytes                          int64
 	PromptTokens, CompletionTokens, CostNanoUSD int64
+	CacheReadTokens                             int64
 	Unpriced                                    int64
 }
 
@@ -262,13 +263,13 @@ func (s *Store) Series(from, to string, iv Interval) ([]SeriesPoint, error) {
 const (
 	breakdownModelSQL = `
 SELECT model, SUM(requests), SUM(errors), SUM(req_bytes), SUM(resp_bytes),
-       SUM(prompt_tokens), SUM(completion_tokens), SUM(cost_nano_usd)
+       SUM(prompt_tokens), SUM(completion_tokens), SUM(cache_read_tokens), SUM(cost_nano_usd)
 FROM traffic_minutes WHERE local_day BETWEEN ? AND ?
 GROUP BY model ORDER BY SUM(cost_nano_usd) DESC, model ASC`
 
 	breakdownPathClassSQL = `
 SELECT path_class, SUM(requests), SUM(errors), SUM(req_bytes), SUM(resp_bytes),
-       SUM(prompt_tokens), SUM(completion_tokens), SUM(cost_nano_usd)
+       SUM(prompt_tokens), SUM(completion_tokens), SUM(cache_read_tokens), SUM(cost_nano_usd)
 FROM traffic_minutes WHERE local_day BETWEEN ? AND ?
 GROUP BY path_class ORDER BY SUM(cost_nano_usd) DESC, path_class ASC`
 
@@ -302,7 +303,7 @@ func (s *Store) Breakdown(from, to, by string) ([]BreakdownRow, error) {
 		var r BreakdownRow
 		if err := rows.Scan(
 			&r.Key, &r.Requests, &r.Errors, &r.UpBytes, &r.DownBytes,
-			&r.PromptTokens, &r.CompletionTokens, &r.CostNanoUSD,
+			&r.PromptTokens, &r.CompletionTokens, &r.CacheReadTokens, &r.CostNanoUSD,
 		); err != nil {
 			return nil, fmt.Errorf("scan breakdown row: %w", err)
 		}
