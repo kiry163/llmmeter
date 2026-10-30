@@ -147,6 +147,7 @@ func (s *Server) setup(w http.ResponseWriter, r *http.Request) {
 		writeRepoError(w, err)
 		return
 	}
+	s.catalog.invalidate()
 	if in.AdminPassword != "" {
 		s.auth.Issue(w)
 	}
@@ -582,6 +583,7 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 		writeRepoError(w, err)
 		return
 	}
+	s.catalog.invalidate()
 	writeJSON(w, http.StatusOK, s.settingsView())
 }
 

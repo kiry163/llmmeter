@@ -37,6 +37,7 @@ type Server struct {
 	hub     *metrics.Hub
 	now     func() time.Time
 	auth    *Auth
+	catalog *catalog
 }
 
 // New returns a Server for cfg.
@@ -54,6 +55,7 @@ func New(cfg Config) *Server {
 		hub:     cfg.Hub,
 		now:     now,
 		auth:    NewAuth(cfg.Repo, now),
+		catalog: newCatalog(cfg.Repo, cfg.Store, now),
 	}
 }
 
@@ -79,6 +81,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/requests/{id}", require(s.request))
 	mux.Handle("GET /api/live/snapshot", require(s.liveSnapshot))
 	mux.Handle("GET /api/live/stream", require(s.liveStream))
+	mux.Handle("GET /api/model-catalog", require(s.modelCatalog))
 
 	// Configuration endpoints. Setup and the pre-setup upstream probe are
 	// limited to the local machine instead of requiring a session.
