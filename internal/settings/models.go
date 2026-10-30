@@ -236,60 +236,29 @@ func (r *Repo) ImportModels(ctx context.Context, names []string) (created []pric
 	}
 	defer tx.Rollback()
 
-	args := make([]any, len(unique))
-	placeholders := make([]string, len(unique))
-	for i, name := range unique {
-		args[i] = name
-		placeholders[i] = "?"
-	}
-	existing := make(map[string]struct{}, len(unique))
-	rows, err := tx.QueryContext(ctx,
-		`SELECT name FROM models WHERE name IN (`+strings.Join(placeholders, ",")+`)`, args...)
-	if err != nil {
-		return nil, nil, fmt.Errorf("settings: read models: %w", err)
-	}
-	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
-			rows.Close()
-			return nil, nil, fmt.Errorf("settings: scan model: %w", err)
-		}
-		existing[name] = struct{}{}
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return nil, nil, fmt.Errorf("settings: read models: %w", err)
-	}
-	rows.Close()
-
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	created = make([]pricing.Model, 0, len(unique))
 	skipped = make([]string, 0)
 	for _, name := range unique {
-		if _, ok := existing[name]; ok {
-			skipped = append(skipped, name)
-			continue
-		}
+		// ON CONFLICT DO NOTHING resolves a name that another writer (or an
+		// earlier import) already inserted; the statement is atomic, so no
+		// read-then-write race can surface as an error.
 		res, err := tx.ExecContext(ctx,
 			`INSERT INTO models (name, input_per_mtok, output_per_mtok, cache_read_per_mtok,
 			                     cache_write_per_mtok, reasoning_per_mtok, created_at, updated_at)
-			 VALUES (?, 0, 0, 0, 0, NULL, ?, ?)`,
+			 VALUES (?, 0, 0, 0, 0, NULL, ?, ?)
+			 ON CONFLICT(name) DO NOTHING`,
 			name, now, now)
-		if isUniqueViolation(err) {
-			// A concurrent import won the race for this name: skip it.
-			var clash int
-			if qerr := tx.QueryRowContext(ctx,
-				`SELECT COUNT(*) FROM models WHERE name = ?`, name).Scan(&clash); qerr != nil {
-				return nil, nil, qerr
-			}
-			if clash > 0 {
-				skipped = append(skipped, name)
-				continue
-			}
-			return nil, nil, fmt.Errorf("settings: import model: %w", err)
-		}
 		if err != nil {
 			return nil, nil, fmt.Errorf("settings: import model: %w", err)
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return nil, nil, err
+		}
+		if n == 0 {
+			skipped = append(skipped, name)
+			continue
 		}
 		id, err := res.LastInsertId()
 		if err != nil {

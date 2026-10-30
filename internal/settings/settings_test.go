@@ -5,6 +5,7 @@ import (
 	"errors"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -297,5 +298,45 @@ func TestImportModelsCreatesMissingZeroRates(t *testing.T) {
 	}
 	if skipped[0] != "new-a" || skipped[1] != "new-b" {
 		t.Fatalf("reimport skipped order = %v", skipped)
+	}
+}
+
+func TestImportModelsConcurrentCallsSkipConflicts(t *testing.T) {
+	repo := newTestRepo(t)
+	ctx := context.Background()
+
+	const workers = 4
+	var wg sync.WaitGroup
+	created := make([]int, workers)
+	errs := make([]error, workers)
+	skipped := make([]int, workers)
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			models, skippedNames, err := repo.ImportModels(ctx, []string{"race-a", "race-b", "race-a"})
+			created[i], skipped[i], errs[i] = len(models), len(skippedNames), err
+		}(i)
+	}
+	wg.Wait()
+
+	totalCreated, totalSkipped := 0, 0
+	for i := 0; i < workers; i++ {
+		if errs[i] != nil {
+			t.Fatalf("worker %d: %v", i, errs[i])
+		}
+		totalCreated += created[i]
+		totalSkipped += skipped[i]
+	}
+	if totalCreated != 2 || totalSkipped != 2*(workers-1) {
+		t.Fatalf("created=%v skipped=%v", created, skipped)
+	}
+
+	models, err := repo.Models(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(models) != 2 {
+		t.Fatalf("models = %+v", models)
 	}
 }
