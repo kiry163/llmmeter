@@ -11,37 +11,40 @@ import (
 )
 
 // analysisRates is the rate snapshot of the extra cached request.
-const analysisRates = `{"model":"deepseek-chat","window":"base","input_per_mtok":0.28,"output_per_mtok":0.42,"cache_read_per_mtok":0.028,"cache_write_per_mtok":0,"reasoning_per_mtok":0.42}`
+const analysisRates = `{"model":"shared","window":"base","input_per_mtok":0.28,"output_per_mtok":0.42,"cache_read_per_mtok":0.028,"cache_write_per_mtok":0,"reasoning_per_mtok":0.42}`
 
-// newAnalysisServer starts the seeded API server and appends one priced,
-// cached request so the health and cache aggregates have three requests. The
-// shared seedAPIData stays untouched for the other API tests.
+// newAnalysisServer starts the config-backed read fixture and appends one
+// priced, cached request on upstream a so the health and cache aggregates have
+// four requests and a non-zero cache saving.
 func newAnalysisServer(t *testing.T) *httptest.Server {
 	t.Helper()
-	ts, st := newAPIServerStore(t, true, "127.0.0.1:8100")
+	env := newReadEnv(t)
+	st := env.data
 
 	base := time.Date(2026, 10, 29, 4, 1, 0, 0, time.UTC)
 	st.EnqueueRecord(store.Record{
 		StartedAt: base, CompletedAt: base.Add(150 * time.Millisecond),
 		LocalDay: "2026-10-29", MinuteOfDay: 721,
 		Path: "/v1/chat/completions", PathClass: "chat",
-		Model: "deepseek-chat", Status: 200, LatencyMS: 150,
+		UpstreamID: "a", UpstreamName: "Alpha", KeyID: "ka", KeyName: "Key A",
+		Model: "shared", Status: 200, LatencyMS: 150,
 		ReqBodyBytes: 30, RespBodyBytes: 60,
 		Usage:       usage.Usage{PromptTokens: 200, CompletionTokens: 80, CacheReadTokens: 1000, TotalTokens: 280},
 		WindowLabel: "base", RatesJSON: analysisRates,
-		CostNanoUSD: 2000, Priced: true,
+		CostNanoUSD: 4000, Priced: true,
 		UsageStatus: usage.StatusOK,
 	})
 	st.EnqueueMinute(store.MinuteDelta{
-		LocalDay: "2026-10-29", MinuteOfDay: 721, PathClass: "chat", Model: "deepseek-chat",
+		LocalDay: "2026-10-29", MinuteOfDay: 721, PathClass: "chat",
+		UpstreamID: "a", Model: "shared",
 		Requests: 1, ReqBytes: 30, RespBytes: 60,
 		PromptTokens: 200, CompletionTokens: 80, CacheReadTokens: 1000,
-		CostNanoUSD: 2000, LatencySumMS: 150, LatencyMaxMS: 150,
+		CostNanoUSD: 4000, LatencySumMS: 150, LatencyMaxMS: 150,
 	})
 	if err := st.Flush(); err != nil {
 		t.Fatal(err)
 	}
-	return ts
+	return env.srv
 }
 
 func TestAnalysisEndpoint(t *testing.T) {
@@ -74,7 +77,7 @@ func TestAnalysisEndpoint(t *testing.T) {
 	if body.Range.Interval != "minute" || len(body.Trend) == 0 || len(body.Top.Cost) == 0 {
 		t.Fatalf("body = %+v", body)
 	}
-	if body.Health.Requests != 3 || body.Cache.SavedNanoUSD == nil || *body.Cache.SavedNanoUSD != 252_000 {
+	if body.Health.Requests != 4 || body.Cache.SavedNanoUSD == nil || *body.Cache.SavedNanoUSD != 252_000 {
 		t.Fatalf("health/cache = %+v", body)
 	}
 	if body.Range.From != "2026-10-29" || body.Range.To != "2026-10-29" || body.Range.Partial {
@@ -174,6 +177,125 @@ func TestAnalysisAutoIntervalBoundaries(t *testing.T) {
 	}
 }
 
+func TestAnalysisTrendReturnsSeriesPerUpstream(t *testing.T) {
+	srv := newAnalysisServer(t)
+	type series struct {
+		UpstreamID   string `json:"upstreamId"`
+		UpstreamName string `json:"upstreamName"`
+		Model        string `json:"model"`
+		Requests     int64  `json:"requests"`
+	}
+	decode := func(query string) []series {
+		t.Helper()
+		rec := doGET(t, srv, "/api/analysis?from=2026-10-29&to=2026-10-29&interval=minute"+query)
+		if rec.Code != 200 {
+			t.Fatalf("analysis %q = %d %s", query, rec.Code, rec.Body.String())
+		}
+		var body struct {
+			Trend []struct {
+				MinuteOfDay int      `json:"minuteOfDay"`
+				Series      []series `json:"series"`
+			} `json:"trend"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatal(err)
+		}
+		for _, b := range body.Trend {
+			if b.MinuteOfDay == 720 {
+				return b.Series
+			}
+		}
+		t.Fatalf("no trend bucket for minute 720: %s", rec.Body.String())
+		return nil
+	}
+
+	// The same model on two upstreams in the same minute stays two series.
+	got := decode("")
+	if len(got) != 2 {
+		t.Fatalf("series = %+v", got)
+	}
+	seen := map[string]string{}
+	for _, s := range got {
+		if s.Model != "shared" || s.Requests != 1 {
+			t.Fatalf("series entry = %+v", s)
+		}
+		seen[s.UpstreamID] = s.UpstreamName
+	}
+	if seen["a"] != "Alpha" || seen["b"] != "Beta" {
+		t.Fatalf("series upstream names = %+v", seen)
+	}
+
+	filtered := decode("&upstream=a")
+	if len(filtered) != 1 || filtered[0].UpstreamID != "a" || filtered[0].UpstreamName != "Alpha" {
+		t.Fatalf("filtered series = %+v", filtered)
+	}
+}
+
+func TestAnalysisFiltersByUpstream(t *testing.T) {
+	srv := newAnalysisServer(t)
+	type analysis struct {
+		Models []struct {
+			UpstreamID   string `json:"upstreamId"`
+			UpstreamName string `json:"upstreamName"`
+		} `json:"models"`
+		Top struct {
+			Cost []struct {
+				UpstreamID string `json:"upstreamId"`
+			} `json:"cost"`
+		} `json:"topRequests"`
+		Health struct {
+			Requests int64 `json:"requests"`
+		} `json:"health"`
+		Cache struct {
+			PromptTokens    int64 `json:"promptTokens"`
+			CacheReadTokens int64 `json:"cacheReadTokens"`
+		} `json:"cache"`
+	}
+	get := func(query string) analysis {
+		t.Helper()
+		rec := doGET(t, srv, "/api/analysis?from=2026-10-29&to=2026-10-29"+query)
+		if rec.Code != 200 {
+			t.Fatalf("analysis %q = %d %s", query, rec.Code, rec.Body.String())
+		}
+		var body analysis
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatal(err)
+		}
+		return body
+	}
+
+	all := get("")
+	if all.Health.Requests != 4 || all.Cache.PromptTokens != 520 || all.Cache.CacheReadTokens != 1030 {
+		t.Fatalf("all = %+v", all)
+	}
+	if len(all.Models) != 3 {
+		t.Fatalf("all models = %+v", all.Models)
+	}
+
+	b := get("&upstream=b")
+	if b.Health.Requests != 1 || b.Cache.PromptTokens != 200 || b.Cache.CacheReadTokens != 20 {
+		t.Fatalf("upstream b = %+v", b)
+	}
+	if len(b.Models) != 1 || b.Models[0].UpstreamID != "b" || b.Models[0].UpstreamName != "Beta" {
+		t.Fatalf("upstream b models = %+v", b.Models)
+	}
+	for _, top := range b.Top.Cost {
+		if top.UpstreamID != "b" {
+			t.Fatalf("upstream b top = %+v", b.Top.Cost)
+		}
+	}
+
+	a := get("&upstream=a")
+	if a.Health.Requests != 3 || len(a.Models) != 2 {
+		t.Fatalf("upstream a = %+v", a)
+	}
+	for _, top := range a.Top.Cost {
+		if top.UpstreamID != "a" {
+			t.Fatalf("upstream a top = %+v", a.Top.Cost)
+		}
+	}
+}
+
 func TestAnalysisDTOShape(t *testing.T) {
 	srv := newAnalysisServer(t)
 	rec := doGET(t, srv, "/api/analysis?from=2026-10-29&to=2026-10-29&interval=day")
@@ -206,8 +328,9 @@ func TestAnalysisDTOShape(t *testing.T) {
 		t.Fatalf("models/paths = %s", rec.Body.String())
 	}
 	model := body.Models[0]
-	for _, k := range []string{"key", "requests", "errors", "upBytes", "downBytes",
-		"promptTokens", "completionTokens", "cacheReadTokens", "costNanoUsd", "unpriced"} {
+	for _, k := range []string{"upstreamId", "upstreamName", "key", "requests", "errors",
+		"upBytes", "downBytes", "promptTokens", "completionTokens", "cacheReadTokens",
+		"costNanoUsd", "unpriced"} {
 		if _, ok := model[k]; !ok {
 			t.Fatalf("models[0] missing %q: %s", k, rec.Body.String())
 		}
@@ -219,11 +342,24 @@ func TestAnalysisDTOShape(t *testing.T) {
 	if _, ok := trend["minuteOfDay"]; !ok {
 		t.Fatalf("trend missing minuteOfDay: %s", rec.Body.String())
 	}
-	if _, ok := trend["byModel"]; !ok {
-		t.Fatalf("trend missing byModel: %s", rec.Body.String())
+	series, ok := trend["series"].([]any)
+	if !ok || len(series) == 0 {
+		t.Fatalf("trend missing series: %s", rec.Body.String())
+	}
+	point := series[0].(map[string]any)
+	for _, k := range []string{"upstreamId", "upstreamName", "model", "requests",
+		"promptTokens", "completionTokens", "cacheReadTokens", "costNanoUsd",
+		"upBytes", "downBytes"} {
+		if _, ok := point[k]; !ok {
+			t.Fatalf("trend series missing %q: %s", k, rec.Body.String())
+		}
+	}
+	if _, ok := trend["byModel"]; ok {
+		t.Fatalf("trend still carries the legacy byModel: %s", rec.Body.String())
 	}
 	top := body.Top.Cost[0]
-	for _, k := range []string{"id", "startedAt", "model", "pathClass", "stream",
+	for _, k := range []string{"id", "startedAt", "upstreamId", "upstreamName", "keyId",
+		"keyName", "model", "pathClass", "stream",
 		"promptTokens", "completionTokens", "cacheReadTokens", "totalTokens",
 		"costNanoUsd", "latencyMs", "ttftMs", "status", "usageStatus"} {
 		if _, ok := top[k]; !ok {

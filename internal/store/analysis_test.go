@@ -87,29 +87,41 @@ func seedAnalysisStore(t *testing.T) *store.Store {
 	return st
 }
 
+// trendSeriesFor returns the single trend series of one model in a bucket.
+func trendSeriesFor(t *testing.T, b store.TrendBucket, model string) store.TrendSeries {
+	t.Helper()
+	for _, s := range b.Series {
+		if s.Model == model {
+			return s
+		}
+	}
+	t.Fatalf("bucket %+v has no series for %q", b, model)
+	return store.TrendSeries{}
+}
+
 func TestTrendByModelAndTop(t *testing.T) {
 	st := seedAnalysisStore(t)
 	ctx := context.Background()
-	trend, err := st.TrendByModel(ctx, "2026-10-29", "2026-10-29", store.IntervalHour)
+	trend, err := st.TrendByModel(ctx, "2026-10-29", "2026-10-29", store.IntervalHour, "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(trend) != 2 {
 		t.Fatalf("buckets = %+v", trend)
 	}
-	if trend[1].MinuteOfDay != 10 || trend[1].ByModel["deepseek-chat"].CostNanoUSD != 1_200_000 {
+	if trend[1].MinuteOfDay != 10 || trendSeriesFor(t, trend[1], "deepseek-chat").CostNanoUSD != 1_200_000 {
 		t.Fatalf("bucket = %+v", trend[1])
 	}
 
-	top, err := st.TopRequests(ctx, "2026-10-29", "2026-10-29", "cost", 10)
+	top, err := st.TopRequests(ctx, "2026-10-29", "2026-10-29", "cost", 10, "")
 	if err != nil || len(top) != 2 || top[0].CostNanoUSD < top[1].CostNanoUSD {
 		t.Fatalf("top cost = %+v err=%v", top, err)
 	}
-	byTokens, err := st.TopRequests(ctx, "2026-10-29", "2026-10-29", "tokens", 1)
+	byTokens, err := st.TopRequests(ctx, "2026-10-29", "2026-10-29", "tokens", 1, "")
 	if err != nil || len(byTokens) != 1 || byTokens[0].TotalTokens != 300 {
 		t.Fatalf("top tokens=%+v", byTokens)
 	}
-	if _, err := st.TopRequests(ctx, "2026-10-29", "2026-10-29", "bogus", 10); err == nil {
+	if _, err := st.TopRequests(ctx, "2026-10-29", "2026-10-29", "bogus", 10, ""); err == nil {
 		t.Fatal("invalid by must error")
 	}
 }
@@ -118,19 +130,21 @@ func TestTrendByModelIntervals(t *testing.T) {
 	st := seedAnalysisStore(t)
 	ctx := context.Background()
 
-	minute, err := st.TrendByModel(ctx, "2026-10-29", "2026-10-29", store.IntervalMinute)
+	minute, err := st.TrendByModel(ctx, "2026-10-29", "2026-10-29", store.IntervalMinute, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(minute) != 3 || minute[0].MinuteOfDay != 570 || minute[0].ByModel["deepseek-chat"].Requests != 1 {
+	if len(minute) != 3 || minute[0].MinuteOfDay != 570 ||
+		trendSeriesFor(t, minute[0], "deepseek-chat").Requests != 1 {
 		t.Fatalf("minute buckets = %+v", minute)
 	}
 
-	day, err := st.TrendByModel(ctx, "2026-10-29", "2026-10-29", store.IntervalDay)
+	day, err := st.TrendByModel(ctx, "2026-10-29", "2026-10-29", store.IntervalDay, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(day) != 1 || day[0].MinuteOfDay != 0 || day[0].ByModel["deepseek-chat"].CostNanoUSD != 1_700_000 {
+	if len(day) != 1 || day[0].MinuteOfDay != 0 ||
+		trendSeriesFor(t, day[0], "deepseek-chat").CostNanoUSD != 1_700_000 {
 		t.Fatalf("day buckets = %+v", day)
 	}
 }
@@ -138,7 +152,7 @@ func TestTrendByModelIntervals(t *testing.T) {
 func TestAnalysisHealthAndCache(t *testing.T) {
 	st := seedAnalysisStore(t)
 	ctx := context.Background()
-	h, err := st.AnalysisHealth(ctx, "2026-10-29", "2026-10-29")
+	h, err := st.AnalysisHealth(ctx, "2026-10-29", "2026-10-29", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -146,7 +160,7 @@ func TestAnalysisHealthAndCache(t *testing.T) {
 		h.ClientDisconnected != 1 || h.P95MS == nil || h.CountOver != 0 || h.ThresholdMS != 2000 {
 		t.Fatalf("health = %+v", h)
 	}
-	c, err := st.CacheStats(ctx, "2026-10-29", "2026-10-29")
+	c, err := st.CacheStats(ctx, "2026-10-29", "2026-10-29", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -206,7 +220,7 @@ func TestAnalysisKeepsUpstreamDimension(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	trend, err := st.TrendByModel(ctx, "2026-10-31", "2026-10-31", store.IntervalDay)
+	trend, err := st.TrendByModel(ctx, "2026-10-31", "2026-10-31", store.IntervalDay, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -219,12 +233,15 @@ func TestAnalysisKeepsUpstreamDimension(t *testing.T) {
 	if trend[0].Series[0].CacheReadTokens != 10 || trend[0].Series[0].CostNanoUSD != 2000 {
 		t.Fatalf("series[0] = %+v", trend[0].Series[0])
 	}
-	// ByModel is the legacy merged view: both upstreams sum into model "m".
-	if got := trend[0].ByModel["m"]; got.Requests != 2 || got.CostNanoUSD != 3000 {
-		t.Fatalf("legacy by model = %+v", got)
+
+	// The upstream filter narrows every aggregate to that upstream only.
+	filtered, err := st.TrendByModel(ctx, "2026-10-31", "2026-10-31", store.IntervalDay, "a")
+	if err != nil || len(filtered) != 1 || len(filtered[0].Series) != 1 ||
+		filtered[0].Series[0].UpstreamID != "a" {
+		t.Fatalf("filtered trend = %+v err=%v", filtered, err)
 	}
 
-	rows, err := st.Breakdown("2026-10-31", "2026-10-31", "model")
+	rows, err := st.Breakdown("2026-10-31", "2026-10-31", "model", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -234,13 +251,38 @@ func TestAnalysisKeepsUpstreamDimension(t *testing.T) {
 	if rows[0].Key != "m" || rows[0].Requests != 1 || rows[0].UpBytes != 0 {
 		t.Fatalf("breakdown row0 = %+v", rows[0])
 	}
+	if rows, err = st.Breakdown("2026-10-31", "2026-10-31", "model", "b"); err != nil ||
+		len(rows) != 1 || rows[0].UpstreamID != "b" {
+		t.Fatalf("filtered breakdown = %+v err=%v", rows, err)
+	}
 
-	top, err := st.TopRequests(ctx, "2026-10-31", "2026-10-31", "cost", 10)
+	top, err := st.TopRequests(ctx, "2026-10-31", "2026-10-31", "cost", 10, "")
 	if err != nil || len(top) != 2 {
 		t.Fatalf("top = %+v err=%v", top, err)
 	}
 	if top[0].UpstreamID != "a" || top[0].UpstreamName != "Upstream A" ||
 		top[0].KeyID != "ka" || top[0].KeyName != "Key A" {
 		t.Fatalf("top[0] = %+v", top[0])
+	}
+	if top, err = st.TopRequests(ctx, "2026-10-31", "2026-10-31", "cost", 10, "b"); err != nil ||
+		len(top) != 1 || top[0].UpstreamID != "b" {
+		t.Fatalf("filtered top = %+v err=%v", top, err)
+	}
+
+	health, err := st.AnalysisHealth(ctx, "2026-10-31", "2026-10-31", "a")
+	if err != nil || health.Requests != 1 || health.Errors != 0 {
+		t.Fatalf("filtered health = %+v err=%v", health, err)
+	}
+	allHealth, err := st.AnalysisHealth(ctx, "2026-10-31", "2026-10-31", "")
+	if err != nil || allHealth.Requests != 2 {
+		t.Fatalf("health = %+v err=%v", allHealth, err)
+	}
+	cache, err := st.CacheStats(ctx, "2026-10-31", "2026-10-31", "a")
+	if err != nil || cache.PromptTokens != 10 || cache.CacheReadTokens != 10 {
+		t.Fatalf("filtered cache = %+v err=%v", cache, err)
+	}
+	allCache, err := st.CacheStats(ctx, "2026-10-31", "2026-10-31", "")
+	if err != nil || allCache.PromptTokens != 20 {
+		t.Fatalf("cache = %+v err=%v", allCache, err)
 	}
 }

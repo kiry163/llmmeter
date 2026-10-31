@@ -101,6 +101,16 @@ func statusClassRange(class string) (lo, hi int, ok bool) {
 	return 0, 0, false
 }
 
+// upstreamCondition returns the WHERE fragment and argument that restrict a
+// query over traffic_minutes or requests to one upstream. An empty ID means
+// every upstream.
+func upstreamCondition(upstreamID string) (string, []any) {
+	if upstreamID == "" {
+		return "", nil
+	}
+	return " AND upstream_id = ?", []any{upstreamID}
+}
+
 const (
 	// defaultRequestLimit is used when RequestFilter.Limit is not positive.
 	defaultRequestLimit = 50
@@ -111,16 +121,20 @@ const (
 )
 
 // latencyBucketsSQL buckets latency into latencyBucketMS-wide buckets. The
-// literal 100 must track latencyBucketMS.
+// literal 100 must track latencyBucketMS. The trailing %s is the optional
+// upstream restriction.
 const latencyBucketsSQL = `
 SELECT latency_ms / 100 * 100 AS bucket, COUNT(*), MAX(latency_ms)
-FROM requests WHERE local_day BETWEEN ? AND ?
+FROM requests WHERE local_day BETWEEN ? AND ?%s
 GROUP BY bucket ORDER BY bucket`
 
-// Overview aggregates the inclusive local_day range [from, to].
-func (s *Store) Overview(from, to string) (Overview, error) {
+// Overview aggregates the inclusive local_day range [from, to], restricted to
+// one upstream when upstreamID is not empty.
+func (s *Store) Overview(from, to, upstreamID string) (Overview, error) {
+	cond, extra := upstreamCondition(upstreamID)
 	var ov Overview
 	var sumLatency, maxLatency int64
+	sumArgs := append([]any{from, to}, extra...)
 	err := s.db.QueryRow(`
 SELECT COALESCE(SUM(requests), 0), COALESCE(SUM(errors), 0),
        COALESCE(SUM(req_bytes), 0), COALESCE(SUM(resp_bytes), 0),
@@ -128,7 +142,7 @@ SELECT COALESCE(SUM(requests), 0), COALESCE(SUM(errors), 0),
        COALESCE(SUM(cache_read_tokens), 0), COALESCE(SUM(reasoning_tokens), 0),
        COALESCE(SUM(cost_nano_usd), 0), COALESCE(SUM(latency_sum_ms), 0),
        COALESCE(MAX(latency_max_ms), 0)
-FROM traffic_minutes WHERE local_day BETWEEN ? AND ?`, from, to).Scan(
+FROM traffic_minutes WHERE local_day BETWEEN ? AND ?`+cond, sumArgs...).Scan(
 		&ov.Requests, &ov.Errors, &ov.UpBytes, &ov.DownBytes,
 		&ov.PromptTokens, &ov.CompletionTokens,
 		&ov.CacheReadTokens, &ov.ReasoningTokens,
@@ -144,19 +158,19 @@ FROM traffic_minutes WHERE local_day BETWEEN ? AND ?`, from, to).Scan(
 		ov.LatencyMaxMS = &maxLatency
 	}
 
+	countArgs := append([]any{usage.StatusOK, usage.StatusNotApplicable, from, to}, extra...)
 	err = s.db.QueryRow(`
 SELECT COALESCE(SUM(CASE WHEN priced = 1 THEN 1 ELSE 0 END), 0),
        COALESCE(SUM(CASE WHEN priced = 0 THEN 1 ELSE 0 END), 0),
        COALESCE(SUM(CASE WHEN usage_status NOT IN (?, ?) THEN 1 ELSE 0 END), 0)
-FROM requests WHERE local_day BETWEEN ? AND ?`,
-		usage.StatusOK, usage.StatusNotApplicable, from, to).Scan(
+FROM requests WHERE local_day BETWEEN ? AND ?`+cond, countArgs...).Scan(
 		&ov.Priced, &ov.Unpriced, &ov.Unmetered,
 	)
 	if err != nil {
 		return Overview{}, fmt.Errorf("overview counts: %w", err)
 	}
 
-	buckets, err := s.latencyBuckets(from, to)
+	buckets, err := s.latencyBuckets(from, to, upstreamID)
 	if err != nil {
 		return Overview{}, err
 	}
@@ -181,8 +195,10 @@ type latencyBucket struct {
 // latencyBuckets returns the non-empty latency histogram buckets in ascending
 // order. Percentiles come from requests because traffic_minutes only keeps the
 // sum and the maximum.
-func (s *Store) latencyBuckets(from, to string) ([]latencyBucket, error) {
-	rows, err := s.db.Query(latencyBucketsSQL, from, to)
+func (s *Store) latencyBuckets(from, to, upstreamID string) ([]latencyBucket, error) {
+	cond, extra := upstreamCondition(upstreamID)
+	args := append([]any{from, to}, extra...)
+	rows, err := s.db.Query(fmt.Sprintf(latencyBucketsSQL, cond), args...)
 	if err != nil {
 		return nil, fmt.Errorf("latency buckets: %w", err)
 	}
@@ -244,31 +260,34 @@ func (s *Store) EarliestDay() (string, error) {
 }
 
 const (
+	// The trailing %s of every series query is the optional upstream
+	// restriction.
 	seriesMinuteSQL = `
 SELECT local_day, minute_of_day,
        SUM(requests), SUM(errors), SUM(req_bytes), SUM(resp_bytes),
        SUM(prompt_tokens), SUM(completion_tokens), SUM(cache_read_tokens), SUM(cost_nano_usd)
-FROM traffic_minutes WHERE local_day BETWEEN ? AND ?
+FROM traffic_minutes WHERE local_day BETWEEN ? AND ?%s
 GROUP BY local_day, minute_of_day ORDER BY local_day, minute_of_day`
 
 	seriesHourSQL = `
 SELECT local_day, minute_of_day / 60,
        SUM(requests), SUM(errors), SUM(req_bytes), SUM(resp_bytes),
        SUM(prompt_tokens), SUM(completion_tokens), SUM(cache_read_tokens), SUM(cost_nano_usd)
-FROM traffic_minutes WHERE local_day BETWEEN ? AND ?
+FROM traffic_minutes WHERE local_day BETWEEN ? AND ?%s
 GROUP BY local_day, minute_of_day / 60 ORDER BY local_day, minute_of_day / 60`
 
 	seriesDaySQL = `
 SELECT local_day, 0,
        SUM(requests), SUM(errors), SUM(req_bytes), SUM(resp_bytes),
        SUM(prompt_tokens), SUM(completion_tokens), SUM(cache_read_tokens), SUM(cost_nano_usd)
-FROM traffic_minutes WHERE local_day BETWEEN ? AND ?
+FROM traffic_minutes WHERE local_day BETWEEN ? AND ?%s
 GROUP BY local_day ORDER BY local_day`
 )
 
 // Series returns traffic buckets for the inclusive local_day range, ordered
-// ascending. Day buckets carry MinuteOfDay = 0.
-func (s *Store) Series(from, to string, iv Interval) ([]SeriesPoint, error) {
+// ascending, restricted to one upstream when upstreamID is not empty. Day
+// buckets carry MinuteOfDay = 0.
+func (s *Store) Series(from, to string, iv Interval, upstreamID string) ([]SeriesPoint, error) {
 	q := seriesDaySQL
 	switch iv {
 	case IntervalMinute:
@@ -276,7 +295,9 @@ func (s *Store) Series(from, to string, iv Interval) ([]SeriesPoint, error) {
 	case IntervalHour:
 		q = seriesHourSQL
 	}
-	rows, err := s.db.Query(q, from, to)
+	cond, extra := upstreamCondition(upstreamID)
+	args := append([]any{from, to}, extra...)
+	rows, err := s.db.Query(fmt.Sprintf(q, cond), args...)
 	if err != nil {
 		return nil, fmt.Errorf("series: %w", err)
 	}
@@ -301,38 +322,43 @@ func (s *Store) Series(from, to string, iv Interval) ([]SeriesPoint, error) {
 }
 
 const (
+	// The trailing %s of every breakdown query is the optional upstream
+	// restriction.
 	breakdownModelSQL = `
 SELECT upstream_id, model, SUM(requests), SUM(errors), SUM(req_bytes), SUM(resp_bytes),
        SUM(prompt_tokens), SUM(completion_tokens), SUM(cache_read_tokens), SUM(cost_nano_usd)
-FROM traffic_minutes WHERE local_day BETWEEN ? AND ?
+FROM traffic_minutes WHERE local_day BETWEEN ? AND ?%s
 GROUP BY upstream_id, model ORDER BY SUM(cost_nano_usd) DESC, upstream_id ASC, model ASC`
 
 	breakdownPathClassSQL = `
 SELECT upstream_id, path_class, SUM(requests), SUM(errors), SUM(req_bytes), SUM(resp_bytes),
        SUM(prompt_tokens), SUM(completion_tokens), SUM(cache_read_tokens), SUM(cost_nano_usd)
-FROM traffic_minutes WHERE local_day BETWEEN ? AND ?
+FROM traffic_minutes WHERE local_day BETWEEN ? AND ?%s
 GROUP BY upstream_id, path_class ORDER BY SUM(cost_nano_usd) DESC, upstream_id ASC, path_class ASC`
 
 	unpricedByModelSQL = `
 SELECT upstream_id, model, COUNT(*) FROM requests
-WHERE local_day BETWEEN ? AND ? AND priced = 0
+WHERE local_day BETWEEN ? AND ?%s AND priced = 0
 GROUP BY upstream_id, model`
 
 	unpricedByPathClassSQL = `
 SELECT upstream_id, path_class, COUNT(*) FROM requests
-WHERE local_day BETWEEN ? AND ? AND priced = 0
+WHERE local_day BETWEEN ? AND ?%s AND priced = 0
 GROUP BY upstream_id, path_class`
 )
 
 // Breakdown aggregates the inclusive local_day range by "model" (anything
-// else groups by path_class), ordered by cost descending. Unpriced counts come
-// from the requests retention window.
-func (s *Store) Breakdown(from, to, by string) ([]BreakdownRow, error) {
+// else groups by path_class), ordered by cost descending, restricted to one
+// upstream when upstreamID is not empty. Unpriced counts come from the
+// requests retention window.
+func (s *Store) Breakdown(from, to, by, upstreamID string) ([]BreakdownRow, error) {
 	q, unpricedSQL := breakdownPathClassSQL, unpricedByPathClassSQL
 	if by == "model" {
 		q, unpricedSQL = breakdownModelSQL, unpricedByModelSQL
 	}
-	rows, err := s.db.Query(q, from, to)
+	cond, extra := upstreamCondition(upstreamID)
+	args := append([]any{from, to}, extra...)
+	rows, err := s.db.Query(fmt.Sprintf(q, cond), args...)
 	if err != nil {
 		return nil, fmt.Errorf("breakdown: %w", err)
 	}
@@ -353,7 +379,7 @@ func (s *Store) Breakdown(from, to, by string) ([]BreakdownRow, error) {
 		return nil, fmt.Errorf("iterate breakdown: %w", err)
 	}
 
-	unpriced, err := s.unpricedCounts(unpricedSQL, from, to)
+	unpriced, err := s.unpricedCounts(unpricedSQL, from, to, upstreamID)
 	if err != nil {
 		return nil, err
 	}
@@ -371,8 +397,10 @@ type unpricedKey struct {
 
 // unpricedCounts maps each (upstream, key) pair to the number of unpriced
 // requests in the range.
-func (s *Store) unpricedCounts(q, from, to string) (map[unpricedKey]int64, error) {
-	rows, err := s.db.Query(q, from, to)
+func (s *Store) unpricedCounts(q, from, to, upstreamID string) (map[unpricedKey]int64, error) {
+	cond, extra := upstreamCondition(upstreamID)
+	args := append([]any{from, to}, extra...)
+	rows, err := s.db.Query(fmt.Sprintf(q, cond), args...)
 	if err != nil {
 		return nil, fmt.Errorf("unpriced counts: %w", err)
 	}

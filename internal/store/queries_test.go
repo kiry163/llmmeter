@@ -62,7 +62,7 @@ func seedStore(t *testing.T) *store.Store {
 
 func TestOverviewAndSeries(t *testing.T) {
 	st := seedStore(t)
-	ov, err := st.Overview("2026-10-29", "2026-10-29")
+	ov, err := st.Overview("2026-10-29", "2026-10-29", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,7 +85,7 @@ func TestOverviewAndSeries(t *testing.T) {
 		t.Fatalf("percentiles = %d %d", *ov.LatencyP50MS, *ov.LatencyP95MS)
 	}
 
-	pts, err := st.Series("2026-10-29", "2026-10-29", store.IntervalDay)
+	pts, err := st.Series("2026-10-29", "2026-10-29", store.IntervalDay, "")
 	if err != nil || len(pts) != 1 || pts[0].Requests != 2 {
 		t.Fatalf("series = %+v err=%v", pts, err)
 	}
@@ -102,16 +102,16 @@ func TestOverviewAndSeries(t *testing.T) {
 
 func TestSeriesIntervals(t *testing.T) {
 	st := seedStore(t)
-	pts, err := st.Series("2026-10-29", "2026-10-29", store.IntervalMinute)
+	pts, err := st.Series("2026-10-29", "2026-10-29", store.IntervalMinute, "")
 	if err != nil || len(pts) != 1 || pts[0].MinuteOfDay != 720 {
 		t.Fatalf("minute series = %+v err=%v", pts, err)
 	}
-	pts, err = st.Series("2026-10-29", "2026-10-29", store.IntervalHour)
+	pts, err = st.Series("2026-10-29", "2026-10-29", store.IntervalHour, "")
 	if err != nil || len(pts) != 1 || pts[0].MinuteOfDay != 12 {
 		t.Fatalf("hour series = %+v err=%v", pts, err)
 	}
 	// Out-of-range days yield no series points.
-	pts, err = st.Series("2026-10-30", "2026-10-30", store.IntervalDay)
+	pts, err = st.Series("2026-10-30", "2026-10-30", store.IntervalDay, "")
 	if err != nil || len(pts) != 0 {
 		t.Fatalf("empty series = %+v err=%v", pts, err)
 	}
@@ -119,7 +119,7 @@ func TestSeriesIntervals(t *testing.T) {
 
 func TestOverviewEmptyRange(t *testing.T) {
 	st := seedStore(t)
-	ov, err := st.Overview("2026-10-30", "2026-10-30")
+	ov, err := st.Overview("2026-10-30", "2026-10-30", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,7 +133,7 @@ func TestOverviewEmptyRange(t *testing.T) {
 
 func TestBreakdown(t *testing.T) {
 	st := seedStore(t)
-	rows, err := st.Breakdown("2026-10-29", "2026-10-29", "model")
+	rows, err := st.Breakdown("2026-10-29", "2026-10-29", "model", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -148,7 +148,7 @@ func TestBreakdown(t *testing.T) {
 		t.Fatalf("row1 = %+v", rows[1])
 	}
 
-	rows, err = st.Breakdown("2026-10-29", "2026-10-29", "pathClass")
+	rows, err = st.Breakdown("2026-10-29", "2026-10-29", "pathClass", "")
 	if err != nil || len(rows) != 1 {
 		t.Fatalf("pathClass rows = %+v err=%v", rows, err)
 	}
@@ -407,7 +407,7 @@ func TestOverviewHistoricalLatencyFallback(t *testing.T) {
 	if err := st.Flush(); err != nil {
 		t.Fatal(err)
 	}
-	ov, err := st.Overview("2026-01-01", "2026-01-01")
+	ov, err := st.Overview("2026-01-01", "2026-01-01", "")
 	if err != nil {
 		t.Fatal(err)
 	}

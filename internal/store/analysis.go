@@ -26,14 +26,12 @@ type TrendSeries struct {
 }
 
 // TrendBucket is one time bucket of the per-model trend query. MinuteOfDay is
-// 0 for day buckets. Series keeps the upstream dimension; ByModel is the
-// legacy per-model view that sums every upstream together and is retained
-// until the API serves series[].
+// 0 for day buckets. Series keeps the upstream dimension: the same model served
+// by two upstreams yields two series entries.
 type TrendBucket struct {
 	Day         string
 	MinuteOfDay int
 	Series      []TrendSeries
-	ByModel     map[string]TrendModel
 }
 
 // TopRequest is one entry of a top-requests ranking. The upstream and key
@@ -90,11 +88,13 @@ const (
 )
 
 const (
+	// The trailing %s of every trend query is the optional upstream
+	// restriction.
 	trendModelMinuteSQL = `
 SELECT local_day, minute_of_day, upstream_id, model,
        SUM(requests), SUM(prompt_tokens), SUM(completion_tokens), SUM(cache_read_tokens),
        SUM(cost_nano_usd), SUM(req_bytes), SUM(resp_bytes)
-FROM traffic_minutes WHERE local_day BETWEEN ? AND ?
+FROM traffic_minutes WHERE local_day BETWEEN ? AND ?%s
 GROUP BY local_day, minute_of_day, upstream_id, model HAVING SUM(requests) > 0
 ORDER BY local_day, minute_of_day, upstream_id, model`
 
@@ -102,7 +102,7 @@ ORDER BY local_day, minute_of_day, upstream_id, model`
 SELECT local_day, minute_of_day / 60, upstream_id, model,
        SUM(requests), SUM(prompt_tokens), SUM(completion_tokens), SUM(cache_read_tokens),
        SUM(cost_nano_usd), SUM(req_bytes), SUM(resp_bytes)
-FROM traffic_minutes WHERE local_day BETWEEN ? AND ?
+FROM traffic_minutes WHERE local_day BETWEEN ? AND ?%s
 GROUP BY local_day, minute_of_day / 60, upstream_id, model HAVING SUM(requests) > 0
 ORDER BY local_day, minute_of_day / 60, upstream_id, model`
 
@@ -110,14 +110,15 @@ ORDER BY local_day, minute_of_day / 60, upstream_id, model`
 SELECT local_day, 0, upstream_id, model,
        SUM(requests), SUM(prompt_tokens), SUM(completion_tokens), SUM(cache_read_tokens),
        SUM(cost_nano_usd), SUM(req_bytes), SUM(resp_bytes)
-FROM traffic_minutes WHERE local_day BETWEEN ? AND ?
+FROM traffic_minutes WHERE local_day BETWEEN ? AND ?%s
 GROUP BY local_day, upstream_id, model HAVING SUM(requests) > 0
 ORDER BY local_day, upstream_id, model`
 )
 
-// TrendByModel returns per-model traffic buckets for the inclusive local_day
-// range, ordered ascending by (day, bucket). Day buckets carry MinuteOfDay 0.
-func (s *Store) TrendByModel(ctx context.Context, from, to string, iv Interval) ([]TrendBucket, error) {
+// TrendByModel returns per-(upstream, model) traffic buckets for the inclusive
+// local_day range, ordered ascending by (day, bucket), restricted to one
+// upstream when upstreamID is not empty. Day buckets carry MinuteOfDay 0.
+func (s *Store) TrendByModel(ctx context.Context, from, to string, iv Interval, upstreamID string) ([]TrendBucket, error) {
 	q := trendModelDaySQL
 	switch iv {
 	case IntervalMinute:
@@ -125,7 +126,9 @@ func (s *Store) TrendByModel(ctx context.Context, from, to string, iv Interval) 
 	case IntervalHour:
 		q = trendModelHourSQL
 	}
-	rows, err := s.db.QueryContext(ctx, q, from, to)
+	cond, extra := upstreamCondition(upstreamID)
+	args := append([]any{from, to}, extra...)
+	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(q, cond), args...)
 	if err != nil {
 		return nil, fmt.Errorf("trend by model: %w", err)
 	}
@@ -148,24 +151,11 @@ func (s *Store) TrendByModel(ctx context.Context, from, to string, iv Interval) 
 		}
 		n := len(buckets)
 		if n == 0 || buckets[n-1].Day != day || buckets[n-1].MinuteOfDay != minute {
-			buckets = append(buckets, TrendBucket{
-				Day: day, MinuteOfDay: minute, ByModel: make(map[string]TrendModel),
-			})
+			buckets = append(buckets, TrendBucket{Day: day, MinuteOfDay: minute})
 			n++
 		}
 		b := &buckets[n-1]
 		b.Series = append(b.Series, series)
-		// The legacy map folds every upstream into the model total; the API
-		// switches to Series, which keeps them apart.
-		total := b.ByModel[series.Model]
-		total.Requests += series.Requests
-		total.PromptTokens += series.PromptTokens
-		total.CompletionTokens += series.CompletionTokens
-		total.CacheReadTokens += series.CacheReadTokens
-		total.CostNanoUSD += series.CostNanoUSD
-		total.UpBytes += series.UpBytes
-		total.DownBytes += series.DownBytes
-		b.ByModel[series.Model] = total
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate trend: %w", err)
@@ -184,14 +174,15 @@ const topRequestsSQL = `
 SELECT id, started_at, upstream_id, upstream_name, key_id, key_name, model, path_class, stream,
        prompt_tokens, completion_tokens, cache_read_tokens,
        total_tokens, cost_nano_usd, latency_ms, ttft_ms, status, usage_status
-FROM requests WHERE local_day BETWEEN ? AND ? AND status < 400
+FROM requests WHERE local_day BETWEEN ? AND ?%s AND status < 400
 ORDER BY %s DESC, id DESC LIMIT ?`
 
 // TopRequests returns the highest-ranked requests for the inclusive local_day
-// range. by must be "cost", "tokens" or "latency"; limit is clamped to
-// 1..topRequestMaxLimit. Failed requests (status >= 400) are excluded because
-// their usage is unreliable and would otherwise top the latency ranking.
-func (s *Store) TopRequests(ctx context.Context, from, to, by string, limit int) ([]TopRequest, error) {
+// range, restricted to one upstream when upstreamID is not empty. by must be
+// "cost", "tokens" or "latency"; limit is clamped to 1..topRequestMaxLimit.
+// Failed requests (status >= 400) are excluded because their usage is
+// unreliable and would otherwise top the latency ranking.
+func (s *Store) TopRequests(ctx context.Context, from, to, by string, limit int, upstreamID string) ([]TopRequest, error) {
 	col, ok := topRequestColumns[by]
 	if !ok {
 		return nil, fmt.Errorf("top requests: unknown ranking %q", by)
@@ -202,8 +193,11 @@ func (s *Store) TopRequests(ctx context.Context, from, to, by string, limit int)
 	if limit > topRequestMaxLimit {
 		limit = topRequestMaxLimit
 	}
-	q := fmt.Sprintf(topRequestsSQL, col)
-	rows, err := s.db.QueryContext(ctx, q, from, to, limit)
+	cond, extra := upstreamCondition(upstreamID)
+	args := append([]any{from, to}, extra...)
+	args = append(args, limit)
+	q := fmt.Sprintf(topRequestsSQL, cond, col)
+	rows, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("top requests: %w", err)
 	}
@@ -243,26 +237,32 @@ func (s *Store) TopRequests(ctx context.Context, from, to, by string, limit int)
 }
 
 // AnalysisHealth aggregates the health counters for the inclusive local_day
-// range and approximates the 95th latency percentile from the histogram.
-func (s *Store) AnalysisHealth(ctx context.Context, from, to string) (AnalysisHealth, error) {
+// range, restricted to one upstream when upstreamID is not empty, and
+// approximates the 95th latency percentile from the histogram.
+func (s *Store) AnalysisHealth(ctx context.Context, from, to, upstreamID string) (AnalysisHealth, error) {
+	cond, extra := upstreamCondition(upstreamID)
 	h := AnalysisHealth{ThresholdMS: slowRequestMS}
+	sumArgs := append([]any{from, to}, extra...)
 	err := s.db.QueryRowContext(ctx, `
 SELECT COALESCE(SUM(requests), 0), COALESCE(SUM(errors), 0)
-FROM traffic_minutes WHERE local_day BETWEEN ? AND ?`, from, to).Scan(
+FROM traffic_minutes WHERE local_day BETWEEN ? AND ?`+cond, sumArgs...).Scan(
 		&h.Requests, &h.Errors,
 	)
 	if err != nil {
 		return AnalysisHealth{}, fmt.Errorf("analysis health totals: %w", err)
 	}
 
+	countArgs := append([]any{
+		usage.StatusOK, usage.StatusNotApplicable, usage.StatusTooLarge,
+		h.ThresholdMS, from, to,
+	}, extra...)
 	err = s.db.QueryRowContext(ctx, `
 SELECT COALESCE(SUM(CASE WHEN usage_status NOT IN (?, ?) THEN 1 ELSE 0 END), 0),
        COALESCE(SUM(CASE WHEN usage_status = ? THEN 1 ELSE 0 END), 0),
        COALESCE(SUM(CASE WHEN client_disconnected = 1 THEN 1 ELSE 0 END), 0),
        COALESCE(SUM(CASE WHEN latency_ms > ? THEN 1 ELSE 0 END), 0)
-FROM requests WHERE local_day BETWEEN ? AND ?`,
-		usage.StatusOK, usage.StatusNotApplicable, usage.StatusTooLarge,
-		h.ThresholdMS, from, to).Scan(
+FROM requests WHERE local_day BETWEEN ? AND ?`+cond,
+		countArgs...).Scan(
 		&h.Unmetered, &h.TooLarge, &h.ClientDisconnected, &h.CountOver,
 	)
 	if err != nil {
@@ -272,7 +272,7 @@ FROM requests WHERE local_day BETWEEN ? AND ?`,
 	if h.Requests > 0 {
 		h.ErrorRate = float64(h.Errors) / float64(h.Requests)
 	}
-	buckets, err := s.latencyBuckets(from, to)
+	buckets, err := s.latencyBuckets(from, to, upstreamID)
 	if err != nil {
 		return AnalysisHealth{}, err
 	}
@@ -280,13 +280,16 @@ FROM requests WHERE local_day BETWEEN ? AND ?`,
 	return h, nil
 }
 
-// CacheStats aggregates prompt-cache usage for the inclusive local_day range.
-// The saving is estimated per priced detail row from its rates snapshot.
-func (s *Store) CacheStats(ctx context.Context, from, to string) (CacheStats, error) {
+// CacheStats aggregates prompt-cache usage for the inclusive local_day range,
+// restricted to one upstream when upstreamID is not empty. The saving is
+// estimated per priced detail row from its rates snapshot.
+func (s *Store) CacheStats(ctx context.Context, from, to, upstreamID string) (CacheStats, error) {
+	cond, extra := upstreamCondition(upstreamID)
 	var c CacheStats
+	sumArgs := append([]any{from, to}, extra...)
 	err := s.db.QueryRowContext(ctx, `
 SELECT COALESCE(SUM(prompt_tokens), 0), COALESCE(SUM(cache_read_tokens), 0)
-FROM traffic_minutes WHERE local_day BETWEEN ? AND ?`, from, to).Scan(
+FROM traffic_minutes WHERE local_day BETWEEN ? AND ?`+cond, sumArgs...).Scan(
 		&c.PromptTokens, &c.CacheReadTokens,
 	)
 	if err != nil {
@@ -296,10 +299,11 @@ FROM traffic_minutes WHERE local_day BETWEEN ? AND ?`, from, to).Scan(
 		c.HitRate = float64(c.CacheReadTokens) / float64(c.PromptTokens)
 	}
 
+	rowArgs := append([]any{from, to}, extra...)
 	rows, err := s.db.QueryContext(ctx, `
 SELECT cache_read_tokens, rates_json FROM requests
-WHERE local_day BETWEEN ? AND ? AND cache_read_tokens > 0 AND rates_json <> ''`,
-		from, to)
+WHERE local_day BETWEEN ? AND ? AND cache_read_tokens > 0 AND rates_json <> ''`+cond,
+		rowArgs...)
 	if err != nil {
 		return CacheStats{}, fmt.Errorf("cache rows: %w", err)
 	}

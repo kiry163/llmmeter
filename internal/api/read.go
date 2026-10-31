@@ -43,9 +43,9 @@ type me struct {
 }
 
 func (s *Server) me(w http.ResponseWriter, r *http.Request) {
-	snap := s.repo.Snapshot()
+	snap := s.configSnapshot()
 	writeJSON(w, http.StatusOK, me{
-		AuthRequired:  snap != nil && snap.AdminPasswordHash != "",
+		AuthRequired:  snap != nil && snap.Config.Auth.AdminPasswordHash != "",
 		Authenticated: s.auth.Authenticated(r),
 	})
 }
@@ -119,7 +119,8 @@ func (s *Server) overview(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	current, err := s.store.Overview(from, to)
+	upstream := r.URL.Query().Get("upstream")
+	current, err := s.store.Overview(from, to, upstream)
 	if err != nil {
 		writeInternal(w, err)
 		return
@@ -130,7 +131,7 @@ func (s *Server) overview(w http.ResponseWriter, r *http.Request) {
 	prevTo := fromDay.AddDate(0, 0, -1)
 	prevFrom := prevTo.AddDate(0, 0, -(days - 1))
 
-	previous, err := s.store.Overview(prevFrom.Format(dateLayout), prevTo.Format(dateLayout))
+	previous, err := s.store.Overview(prevFrom.Format(dateLayout), prevTo.Format(dateLayout), upstream)
 	if err != nil {
 		writeInternal(w, err)
 		return
@@ -213,7 +214,7 @@ func (s *Server) series(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	points, err := s.store.Series(from, to, iv)
+	points, err := s.store.Series(from, to, iv, r.URL.Query().Get("upstream"))
 	if err != nil {
 		writeInternal(w, err)
 		return
@@ -236,8 +237,12 @@ func (s *Server) series(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"points": out})
 }
 
-// breakdownRow is one key of the breakdown response.
+// breakdownRow is one key of the breakdown response. The key is scoped to the
+// upstream, so the same model or path class under two upstreams yields two
+// rows.
 type breakdownRow struct {
+	UpstreamID       string `json:"upstreamId"`
+	UpstreamName     string `json:"upstreamName"`
 	Key              string `json:"key"`
 	Requests         int64  `json:"requests"`
 	Errors           int64  `json:"errors"`
@@ -260,7 +265,7 @@ func (s *Server) breakdown(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rows, err := s.store.Breakdown(from, to, by)
+	rows, err := s.store.Breakdown(from, to, by, r.URL.Query().Get("upstream"))
 	if err != nil {
 		writeInternal(w, err)
 		return
@@ -268,6 +273,8 @@ func (s *Server) breakdown(w http.ResponseWriter, r *http.Request) {
 	out := make([]breakdownRow, 0, len(rows))
 	for _, row := range rows {
 		out = append(out, breakdownRow{
+			UpstreamID:       row.UpstreamID,
+			UpstreamName:     s.upstreamDisplayName(row.UpstreamID, ""),
 			Key:              row.Key,
 			Requests:         row.Requests,
 			Errors:           row.Errors,
@@ -292,6 +299,10 @@ type recordDTO struct {
 	MinuteOfDay   int    `json:"minuteOfDay"`
 	Path          string `json:"path"`
 	PathClass     string `json:"pathClass"`
+	UpstreamID    string `json:"upstreamId"`
+	UpstreamName  string `json:"upstreamName"`
+	KeyID         string `json:"keyId"`
+	KeyName       string `json:"keyName"`
 	Model         string `json:"model"`
 	UpstreamModel string `json:"upstreamModel"`
 	Stream        bool   `json:"stream"`
@@ -322,7 +333,7 @@ type recordDTO struct {
 }
 
 // recordToDTO flattens r for the wire.
-func recordToDTO(r store.Record) recordDTO {
+func (s *Server) recordToDTO(r store.Record) recordDTO {
 	return recordDTO{
 		ID:            r.ID,
 		StartedAt:     r.StartedAt.UTC().Format(time.RFC3339),
@@ -331,6 +342,10 @@ func recordToDTO(r store.Record) recordDTO {
 		MinuteOfDay:   r.MinuteOfDay,
 		Path:          r.Path,
 		PathClass:     r.PathClass,
+		UpstreamID:    r.UpstreamID,
+		UpstreamName:  s.upstreamDisplayName(r.UpstreamID, r.UpstreamName),
+		KeyID:         r.KeyID,
+		KeyName:       r.KeyName,
 		Model:         r.Model,
 		UpstreamModel: r.UpstreamModel,
 		Stream:        r.Stream,
@@ -395,6 +410,12 @@ func (s *Server) requests(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 
 	f := store.RequestFilter{From: from, To: to}
+	f.UpstreamID = q.Get("upstream")
+	f.KeyID = q.Get("key")
+	if f.KeyID != "" && f.UpstreamID == "" {
+		writeAPIError(w, http.StatusBadRequest, codeValidation, "key filter requires upstream")
+		return
+	}
 	f.Model = q.Get("model")
 	f.PathClass = q.Get("pathClass")
 
@@ -464,7 +485,7 @@ func (s *Server) requests(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]recordDTO, 0, len(rows))
 	for _, row := range rows {
-		out = append(out, recordToDTO(row))
+		out = append(out, s.recordToDTO(row))
 	}
 	var next int64
 	if len(out) > 0 {
@@ -497,7 +518,7 @@ func (s *Server) request(w http.ResponseWriter, r *http.Request) {
 		writeInternal(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, recordToDTO(row))
+	writeJSON(w, http.StatusOK, s.recordToDTO(row))
 }
 
 func (s *Server) liveSnapshot(w http.ResponseWriter, r *http.Request) {
@@ -631,19 +652,30 @@ func (s *Server) localToday() time.Time {
 
 // location returns the configured timezone, defaulting to UTC.
 func (s *Server) location() *time.Location {
-	if snap := s.repo.Snapshot(); snap != nil && snap.Location != nil {
-		return snap.Location
-	}
-	return time.UTC
+	return s.configLocation()
 }
 
 // retentionDays returns the configured detail retention, defaulting to zero
-// when settings are unavailable.
+// when the configuration is unavailable.
 func (s *Server) retentionDays() int {
-	if snap := s.repo.Snapshot(); snap != nil {
-		return snap.RetentionDays
+	if snap := s.configSnapshot(); snap != nil {
+		return snap.Config.General.RetentionDays
 	}
 	return 0
+}
+
+// upstreamDisplayName resolves an upstream's current display name from the
+// configuration snapshot. A deleted upstream falls back to the name stored on
+// the request row when there is one, then to the ID so aggregate rows stay
+// distinguishable.
+func (s *Server) upstreamDisplayName(id, stored string) string {
+	if name := upstreamName(s.configSnapshot(), id); name != "" {
+		return name
+	}
+	if stored != "" {
+		return stored
+	}
+	return id
 }
 
 // writeInternal answers an unexpected failure without leaking its details to

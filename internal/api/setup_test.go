@@ -13,6 +13,7 @@ import (
 
 	"github.com/kiry163/llmmeter/internal/api"
 	"github.com/kiry163/llmmeter/internal/config"
+	"github.com/kiry163/llmmeter/internal/metrics"
 	"github.com/kiry163/llmmeter/internal/secure"
 	"github.com/kiry163/llmmeter/internal/store"
 )
@@ -43,12 +44,14 @@ func newConfigEnv(t *testing.T, listen string) *configTestEnv {
 	t.Cleanup(func() { data.Close() })
 
 	now := func() time.Time { return time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC) }
+	hub := metrics.New(data, now)
 	srv := api.New(api.Config{
 		Version:     "test",
 		DBPath:      dbPath,
 		Paths:       config.Paths{Config: configPath, Database: dbPath, Listen: listen},
 		ConfigStore: cs,
 		Store:       data,
+		Hub:         hub,
 		Now:         now,
 	})
 	ts := httptest.NewServer(srv.Handler())

@@ -20,25 +20,34 @@ type analysisRange struct {
 	Partial  bool   `json:"partial"`
 }
 
-// analysisTrendModel is one model's contribution to a trend bucket.
-type analysisTrendModel struct {
-	Requests         int64 `json:"requests"`
-	PromptTokens     int64 `json:"promptTokens"`
-	CompletionTokens int64 `json:"completionTokens"`
-	CostNanoUSD      int64 `json:"costNanoUsd"`
-	UpBytes          int64 `json:"upBytes"`
-	DownBytes        int64 `json:"downBytes"`
+// analysisTrendSeries is one (upstream, model) contribution to a trend bucket.
+// Upstreams are never merged: the same model served by two upstreams yields
+// two entries.
+type analysisTrendSeries struct {
+	UpstreamID       string `json:"upstreamId"`
+	UpstreamName     string `json:"upstreamName"`
+	Model            string `json:"model"`
+	Requests         int64  `json:"requests"`
+	PromptTokens     int64  `json:"promptTokens"`
+	CompletionTokens int64  `json:"completionTokens"`
+	CacheReadTokens  int64  `json:"cacheReadTokens"`
+	CostNanoUSD      int64  `json:"costNanoUsd"`
+	UpBytes          int64  `json:"upBytes"`
+	DownBytes        int64  `json:"downBytes"`
 }
 
-// analysisTrendBucket is one bucket of the trend, keyed by model name.
+// analysisTrendBucket is one bucket of the trend with its per-upstream model
+// series.
 type analysisTrendBucket struct {
-	Day         string                        `json:"day"`
-	MinuteOfDay int                           `json:"minuteOfDay"`
-	ByModel     map[string]analysisTrendModel `json:"byModel"`
+	Day         string                `json:"day"`
+	MinuteOfDay int                   `json:"minuteOfDay"`
+	Series      []analysisTrendSeries `json:"series"`
 }
 
-// analysisRow is one model or path-class aggregate.
+// analysisRow is one model or path-class aggregate, scoped to an upstream.
 type analysisRow struct {
+	UpstreamID       string `json:"upstreamId"`
+	UpstreamName     string `json:"upstreamName"`
 	Key              string `json:"key"`
 	Requests         int64  `json:"requests"`
 	Errors           int64  `json:"errors"`
@@ -55,6 +64,10 @@ type analysisRow struct {
 type analysisTopRequest struct {
 	ID               int64  `json:"id"`
 	StartedAt        string `json:"startedAt"`
+	UpstreamID       string `json:"upstreamId"`
+	UpstreamName     string `json:"upstreamName"`
+	KeyID            string `json:"keyId"`
+	KeyName          string `json:"keyName"`
 	Model            string `json:"model"`
 	PathClass        string `json:"pathClass"`
 	Stream           bool   `json:"stream"`
@@ -133,31 +146,32 @@ func (s *Server) analysis(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	partial := s.partialRange(from)
+	upstream := r.URL.Query().Get("upstream")
 
 	ctx, cancel := context.WithTimeout(r.Context(), analysisTimeout)
 	defer cancel()
 
-	trend, err := s.store.TrendByModel(ctx, from, to, iv)
+	trend, err := s.store.TrendByModel(ctx, from, to, iv, upstream)
 	if err != nil {
 		writeInternal(w, err)
 		return
 	}
-	models, err := s.store.Breakdown(from, to, "model")
+	models, err := s.store.Breakdown(from, to, "model", upstream)
 	if err != nil {
 		writeInternal(w, err)
 		return
 	}
-	paths, err := s.store.Breakdown(from, to, "pathClass")
+	paths, err := s.store.Breakdown(from, to, "pathClass", upstream)
 	if err != nil {
 		writeInternal(w, err)
 		return
 	}
-	health, err := s.store.AnalysisHealth(ctx, from, to)
+	health, err := s.store.AnalysisHealth(ctx, from, to, upstream)
 	if err != nil {
 		writeInternal(w, err)
 		return
 	}
-	cache, err := s.store.CacheStats(ctx, from, to)
+	cache, err := s.store.CacheStats(ctx, from, to, upstream)
 	if err != nil {
 		writeInternal(w, err)
 		return
@@ -171,8 +185,8 @@ func (s *Server) analysis(w http.ResponseWriter, r *http.Request) {
 			Partial:  partial,
 		},
 		Trend:  make([]analysisTrendBucket, 0, len(trend)),
-		Models: analysisRows(models),
-		Paths:  analysisRows(paths),
+		Models: s.analysisRows(models),
+		Paths:  s.analysisRows(paths),
 		TopRequests: analysisTop{
 			Cost:    make([]analysisTopRequest, 0),
 			Tokens:  make([]analysisTopRequest, 0),
@@ -203,17 +217,21 @@ func (s *Server) analysis(w http.ResponseWriter, r *http.Request) {
 		dto := analysisTrendBucket{
 			Day:         b.Day,
 			MinuteOfDay: b.MinuteOfDay,
-			ByModel:     make(map[string]analysisTrendModel, len(b.ByModel)),
+			Series:      make([]analysisTrendSeries, 0, len(b.Series)),
 		}
-		for model, m := range b.ByModel {
-			dto.ByModel[model] = analysisTrendModel{
-				Requests:         m.Requests,
-				PromptTokens:     m.PromptTokens,
-				CompletionTokens: m.CompletionTokens,
-				CostNanoUSD:      m.CostNanoUSD,
-				UpBytes:          m.UpBytes,
-				DownBytes:        m.DownBytes,
-			}
+		for _, series := range b.Series {
+			dto.Series = append(dto.Series, analysisTrendSeries{
+				UpstreamID:       series.UpstreamID,
+				UpstreamName:     s.upstreamDisplayName(series.UpstreamID, ""),
+				Model:            series.Model,
+				Requests:         series.Requests,
+				PromptTokens:     series.PromptTokens,
+				CompletionTokens: series.CompletionTokens,
+				CacheReadTokens:  series.CacheReadTokens,
+				CostNanoUSD:      series.CostNanoUSD,
+				UpBytes:          series.UpBytes,
+				DownBytes:        series.DownBytes,
+			})
 		}
 		body.Trend = append(body.Trend, dto)
 	}
@@ -228,34 +246,36 @@ func (s *Server) analysis(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cost, err := s.store.TopRequests(ctx, from, to, "cost", 10)
+	cost, err := s.store.TopRequests(ctx, from, to, "cost", 10, upstream)
 	if err != nil {
 		writeInternal(w, err)
 		return
 	}
-	tokens, err := s.store.TopRequests(ctx, from, to, "tokens", 10)
+	tokens, err := s.store.TopRequests(ctx, from, to, "tokens", 10, upstream)
 	if err != nil {
 		writeInternal(w, err)
 		return
 	}
-	latency, err := s.store.TopRequests(ctx, from, to, "latency", 10)
+	latency, err := s.store.TopRequests(ctx, from, to, "latency", 10, upstream)
 	if err != nil {
 		writeInternal(w, err)
 		return
 	}
 	body.TopRequests = analysisTop{
-		Cost:    topRequestsDTO(cost),
-		Tokens:  topRequestsDTO(tokens),
-		Latency: topRequestsDTO(latency),
+		Cost:    s.topRequestsDTO(cost),
+		Tokens:  s.topRequestsDTO(tokens),
+		Latency: s.topRequestsDTO(latency),
 	}
 	writeJSON(w, http.StatusOK, body)
 }
 
 // analysisRows converts store breakdown rows to wire rows.
-func analysisRows(rows []store.BreakdownRow) []analysisRow {
+func (s *Server) analysisRows(rows []store.BreakdownRow) []analysisRow {
 	out := make([]analysisRow, 0, len(rows))
 	for _, row := range rows {
 		out = append(out, analysisRow{
+			UpstreamID:       row.UpstreamID,
+			UpstreamName:     s.upstreamDisplayName(row.UpstreamID, ""),
 			Key:              row.Key,
 			Requests:         row.Requests,
 			Errors:           row.Errors,
@@ -271,13 +291,19 @@ func analysisRows(rows []store.BreakdownRow) []analysisRow {
 	return out
 }
 
-// topRequestsDTO converts a store ranking to wire entries.
-func topRequestsDTO(rows []store.TopRequest) []analysisTopRequest {
+// topRequestsDTO converts a store ranking to wire entries. The upstream name
+// comes from the configuration snapshot, falling back to the snapshot stored
+// on the request row when the upstream has since been deleted.
+func (s *Server) topRequestsDTO(rows []store.TopRequest) []analysisTopRequest {
 	out := make([]analysisTopRequest, 0, len(rows))
 	for _, row := range rows {
 		out = append(out, analysisTopRequest{
 			ID:               row.ID,
 			StartedAt:        row.StartedAt.UTC().Format(time.RFC3339),
+			UpstreamID:       row.UpstreamID,
+			UpstreamName:     s.upstreamDisplayName(row.UpstreamID, row.UpstreamName),
+			KeyID:            row.KeyID,
+			KeyName:          row.KeyName,
 			Model:            row.Model,
 			PathClass:        row.PathClass,
 			Stream:           row.Stream,
