@@ -25,6 +25,7 @@ import (
 // Defaults applied by Default and Parse.
 const (
 	DefaultListen        = "127.0.0.1:8100"
+	DefaultDatabase      = "~/.cache/llmmeter/llmmeter.db"
 	DefaultRetentionDays = 90
 )
 
@@ -131,18 +132,21 @@ func (u Upstream) Active() bool { return u.Enabled == nil || *u.Enabled }
 // means active.
 func (k GatewayKey) Active() bool { return k.Enabled == nil || *k.Enabled }
 
-// Default returns a Config with the documented defaults. The caller fills the
-// timezone, which has no safe cross-platform default.
+// Default returns a Config with the documented defaults. The result passes
+// Validate. The caller fills the timezone, which has no safe cross-platform
+// default.
 func Default() *Config {
 	return &Config{
-		Server:  Server{Listen: DefaultListen},
+		Version: 1,
+		Server:  Server{Listen: DefaultListen, Database: DefaultDatabase},
 		General: General{RetentionDays: DefaultRetentionDays},
 	}
 }
 
 // Parse strictly decodes YAML over the defaults. Unknown fields, duplicate
-// keys, type errors and multiple documents are rejected. Parsing does not
-// validate; call Validate on the result.
+// keys and type errors are rejected. Any trailing YAML document is rejected
+// too, even an empty one after a bare "---". Parsing does not validate; call
+// Validate on the result.
 func Parse(data []byte) (*Config, error) {
 	c := Default()
 	dec := yaml.NewDecoder(bytes.NewReader(data))
@@ -442,7 +446,12 @@ func validPHC(s string) bool {
 			return false
 		}
 		seen[k] = true
-		n, err := strconv.ParseUint(v, 10, 32)
+		bits := 32
+		if k == "p" {
+			// The runtime stores parallelism in a uint8.
+			bits = 8
+		}
+		n, err := strconv.ParseUint(v, 10, bits)
 		if err != nil || n == 0 {
 			return false
 		}
@@ -450,12 +459,12 @@ func validPHC(s string) bool {
 	if len(seen) != 3 {
 		return false
 	}
-	salt, err := decodeBase64(parts[4])
-	if err != nil || len(salt) == 0 {
+	salt, err := base64.RawStdEncoding.DecodeString(parts[4])
+	if err != nil || len(salt) < 8 {
 		return false
 	}
-	hash, err := decodeBase64(parts[5])
-	if err != nil || len(hash) == 0 {
+	hash, err := base64.RawStdEncoding.DecodeString(parts[5])
+	if err != nil || len(hash) < 4 {
 		return false
 	}
 	return true

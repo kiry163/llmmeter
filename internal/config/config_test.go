@@ -105,6 +105,12 @@ func TestParseFullExample(t *testing.T) {
 	}
 }
 
+func TestDefaultValidates(t *testing.T) {
+	if err := Default().Validate(); err != nil {
+		t.Fatalf("default config must validate: %v", err)
+	}
+}
+
 func TestValidateAcceptsMinimalConfig(t *testing.T) {
 	if err := minimalConfig().Validate(); err != nil {
 		t.Fatalf("minimal config must validate: %v", err)
@@ -207,6 +213,10 @@ func TestValidateAuthFields(t *testing.T) {
 		{"valid", testPasswordHash, testSessionSecret, ""},
 		{"bad hash", "$argon2id$nope", "", "admin_password_hash"},
 		{"wrong algo", "$argon2i$v=19$m=65536,t=3,p=2$c2FsdA$aGFzaA", "", "admin_password_hash"},
+		{"padded salt", "$argon2id$v=19$m=65536,t=3,p=2$c2FsdHNhbHRzYWx0c2FsdA==$aGFzaGhhc2hoYXNoaGFzaGhhc2hoYXNoaGFzaA", "", "admin_password_hash"},
+		{"p out of range", "$argon2id$v=19$m=65536,t=3,p=999$c2FsdHNhbHRzYWx0c2FsdA$aGFzaGhhc2hoYXNoaGFzaGhhc2hoYXNoaGFzaA", "", "admin_password_hash"},
+		{"short salt", "$argon2id$v=19$m=65536,t=3,p=2$c2FsdA$aGFzaGhhc2hoYXNoaGFzaGhhc2hoYXNoaGFzaA", "", "admin_password_hash"},
+		{"short hash", "$argon2id$v=19$m=65536,t=3,p=2$c2FsdHNhbHRzYWx0c2FsdA$c2Fs", "", "admin_password_hash"},
 		{"secret not base64", "", "not base64!!", "session_secret"},
 		{"secret wrong length", "", "c2hvcnQ", "session_secret"},
 	}
