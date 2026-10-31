@@ -14,14 +14,14 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Store owns config.yaml and the current in-memory configuration. All writes
-// are serialized and land in the file before the in-memory configuration
-// changes, so readers always observe a complete, validated configuration.
-// The in-memory value is immutable: Config returns a deep copy.
+// Store owns config.yaml and the current compiled configuration snapshot. All
+// writes are serialized and land in the file before the in-memory snapshot
+// changes, so readers always observe a complete, validated snapshot. The
+// snapshot is immutable: Config returns a deep copy of its configuration.
 type Store struct {
 	mu       sync.Mutex
 	path     string
-	cfg      atomic.Pointer[Config]
+	snap     atomic.Pointer[Snapshot]
 	writable atomic.Bool
 }
 
@@ -73,12 +73,13 @@ func OpenStore(path string, opts ...Option) (*Store, error) {
 		tightenPermissions(path)
 	} else if options.database != "" {
 		cfg.Server.Database = options.database
-		if err := cfg.Validate(); err != nil {
-			return nil, err
-		}
+	}
+	snap, err := Build(cfg)
+	if err != nil {
+		return nil, err
 	}
 	st := &Store{path: path}
-	st.cfg.Store(cfg)
+	st.snap.Store(snap)
 	st.writable.Store(exists)
 	return st, nil
 }
@@ -86,7 +87,13 @@ func OpenStore(path string, opts ...Option) (*Store, error) {
 // Config returns a deep copy of the current configuration. The copy is safe
 // for the caller to mutate.
 func (s *Store) Config() *Config {
-	return s.cfg.Load().clone()
+	return s.snap.Load().Config.clone()
+}
+
+// Snapshot returns the current compiled snapshot. It is immutable and shared:
+// callers must not mutate it or the configuration it points at.
+func (s *Store) Snapshot() *Snapshot {
+	return s.snap.Load()
 }
 
 // Writable reports whether the configuration has been persisted: false in
@@ -112,11 +119,12 @@ func (s *Store) Update(fn func(*Config) error) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	next := s.cfg.Load().clone()
+	next := s.snap.Load().Config.clone()
 	if err := fn(next); err != nil {
 		return err
 	}
-	if err := next.Validate(); err != nil {
+	snap, err := Build(next)
+	if err != nil {
 		return err
 	}
 	data, err := marshalConfig(next)
@@ -126,7 +134,7 @@ func (s *Store) Update(fn func(*Config) error) error {
 	if err := writeFileAtomic(s.path, data, 0o600); err != nil {
 		return err
 	}
-	s.cfg.Store(next)
+	s.snap.Store(snap)
 	s.writable.Store(true)
 	return nil
 }
@@ -144,7 +152,11 @@ func (s *Store) Reload() error {
 	if !exists {
 		return fmt.Errorf("config: reload %s: %w", s.path, fs.ErrNotExist)
 	}
-	s.cfg.Store(next)
+	snap, err := Build(next)
+	if err != nil {
+		return err
+	}
+	s.snap.Store(snap)
 	s.writable.Store(true)
 	return nil
 }
