@@ -11,7 +11,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/kiry163/llmmeter/internal/settings"
+	"github.com/kiry163/llmmeter/internal/config"
+	"github.com/kiry163/llmmeter/internal/pricecatalog"
 	"github.com/kiry163/llmmeter/internal/store"
 )
 
@@ -36,89 +37,167 @@ type catalogObserved struct {
 	LastSeen time.Time `json:"lastSeen"`
 }
 
-// catalogBody is the model catalog response. FetchedAt is nil until an
-// upstream listing succeeds; UpstreamError explains a failed attempt.
+// catalogBody is the per-upstream model catalog response. FetchedAt is nil
+// until an upstream listing succeeds; UpstreamError explains a failed attempt.
+// Presets come from the embedded price snapshot and never hit the network.
 type catalogBody struct {
-	FetchedAt     *time.Time        `json:"fetchedAt"`
-	Upstream      []catalogModel    `json:"upstream"`
-	Observed      []catalogObserved `json:"observed"`
-	UpstreamError string            `json:"upstreamError"`
+	FetchedAt      *time.Time            `json:"fetchedAt"`
+	Provider       string                `json:"provider"`
+	PresetSnapshot string                `json:"presetSnapshot"`
+	Configured     []string              `json:"configured"`
+	Upstream       []catalogModel        `json:"upstream"`
+	Observed       []catalogObserved     `json:"observed"`
+	Presets        []pricecatalog.Preset `json:"presets"`
+	UpstreamError  string                `json:"upstreamError"`
 }
 
-// catalog combines the upstream model listing, cached for catalogCacheTTL,
-// with the models observed in local traffic.
+// catalogCacheEntry is one cached upstream model listing. The endpoint and key
+// are part of the entry so a configuration change is observed even before an
+// explicit invalidation.
+type catalogCacheEntry struct {
+	base string
+	key  string
+	body catalogBody
+	at   time.Time
+}
+
+// catalog combines the cached upstream model listing of each upstream with the
+// models observed in local traffic and the embedded price presets.
 type catalog struct {
-	repo   *settings.Repo
-	store  *store.Store
-	now    func() time.Time
-	client *http.Client
+	configStore *config.Store
+	store       *store.Store
+	now         func() time.Time
+	client      *http.Client
 
-	mu       sync.Mutex
-	cached   catalogBody
-	cachedAt time.Time
+	mu     sync.Mutex
+	cached map[string]catalogCacheEntry
 }
 
-// newCatalog returns a catalog reading settings and traffic from repo and st.
-func newCatalog(repo *settings.Repo, st *store.Store, now func() time.Time) *catalog {
+// newCatalog returns a catalog reading the configuration from cs and traffic
+// from st.
+func newCatalog(cs *config.Store, st *store.Store, now func() time.Time) *catalog {
 	return &catalog{
-		repo:   repo,
-		store:  st,
-		now:    now,
-		client: &http.Client{},
+		configStore: cs,
+		store:       st,
+		now:         now,
+		client:      &http.Client{},
+		cached:      make(map[string]catalogCacheEntry),
 	}
 }
 
-// invalidate drops the cached upstream listing. Settings handlers call it
-// after saving a new upstream endpoint or key.
+// invalidate drops every cached upstream listing. Setup, upstream and
+// configuration-reload handlers call it after the configuration changes.
 func (c *catalog) invalidate() {
 	c.mu.Lock()
-	c.cached = catalogBody{}
-	c.cachedAt = time.Time{}
+	c.cached = make(map[string]catalogCacheEntry)
 	c.mu.Unlock()
 }
 
-// get returns the catalog, refetching upstream when the cache is empty, older
-// than catalogCacheTTL, or refresh is set. Observed models are always read
-// from the store.
-func (c *catalog) get(ctx context.Context, refresh bool) (catalogBody, error) {
-	observed, err := c.store.ObservedModels(ctx, c.observedSince())
+// get returns the catalog of one upstream, refetching its model listing when
+// the cache is empty, stale, belongs to a different endpoint or key, or refresh
+// is set. Observed models are always read from the store.
+func (c *catalog) get(ctx context.Context, u *config.Upstream, refresh bool) (catalogBody, error) {
+	observed, err := c.observed(ctx, u.ID)
 	if err != nil {
 		return catalogBody{}, err
 	}
 
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
 	now := c.now()
-	if refresh || c.cachedAt.IsZero() || now.Sub(c.cachedAt) >= catalogCacheTTL {
-		c.cached = c.fetch(ctx)
-		c.cachedAt = now
+	c.mu.Lock()
+	entry, ok := c.cached[u.ID]
+	c.mu.Unlock()
+
+	fresh := ok && entry.base == u.BaseURL && entry.key == u.APIKey &&
+		now.Sub(entry.at) < catalogCacheTTL
+	if refresh || !fresh {
+		entry = catalogCacheEntry{
+			base: u.BaseURL,
+			key:  u.APIKey,
+			body: c.fetch(ctx, u.BaseURL, u.APIKey),
+			at:   now,
+		}
+		c.mu.Lock()
+		c.cached[u.ID] = entry
+		c.mu.Unlock()
 	}
 
-	body := c.cached
-	body.Observed = make([]catalogObserved, 0, len(observed))
-	for _, m := range observed {
-		body.Observed = append(body.Observed, catalogObserved{
-			Model:    m.Model,
-			Requests: m.Requests,
-			LastSeen: m.LastSeen,
-		})
+	return c.compose(u, entry.body, observed), nil
+}
+
+// compose merges a cached listing with the configured and observed model sets
+// and the embedded presets.
+func (c *catalog) compose(u *config.Upstream, cached catalogBody, observed []catalogObserved) catalogBody {
+	body := cached
+	body.Provider = pricecatalog.Provider(u.BaseURL)
+	body.PresetSnapshot = pricecatalog.SnapshotDate
+	body.Configured = make([]string, 0, len(u.Models))
+	candidates := make([]string, 0, len(u.Models)+len(body.Upstream)+len(observed))
+	for _, m := range u.Models {
+		body.Configured = append(body.Configured, m.Name)
+		candidates = append(candidates, m.Name)
 	}
+	for _, m := range body.Upstream {
+		candidates = append(candidates, m.ID)
+	}
+	for _, m := range observed {
+		candidates = append(candidates, m.Model)
+	}
+	body.Presets = pricecatalog.Match(u.BaseURL, candidates)
+	body.Observed = observed
 	if body.Upstream == nil {
 		body.Upstream = []catalogModel{}
 	}
-	return body, nil
+	return body
+}
+
+// observed returns the models this upstream served inside the retention
+// window, most frequent first.
+func (c *catalog) observed(ctx context.Context, upstreamID string) ([]catalogObserved, error) {
+	out := make([]catalogObserved, 0)
+	if c.store == nil {
+		return out, nil
+	}
+	rows, err := c.store.DB().QueryContext(ctx, `
+SELECT model, COUNT(*), MAX(started_at) FROM requests
+WHERE model <> '' AND upstream_id = ? AND local_day >= ?
+GROUP BY model ORDER BY COUNT(*) DESC, model ASC`, upstreamID, c.observedSince())
+	if err != nil {
+		return nil, fmt.Errorf("observed models: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var (
+			m       catalogObserved
+			started string
+		)
+		if err := rows.Scan(&m.Model, &m.Requests, &started); err != nil {
+			return nil, fmt.Errorf("scan observed model: %w", err)
+		}
+		lastSeen, err := time.Parse(time.RFC3339, started)
+		if err != nil {
+			return nil, fmt.Errorf("parse started_at %q: %w", started, err)
+		}
+		m.LastSeen = lastSeen
+		out = append(out, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate observed models: %w", err)
+	}
+	return out, nil
 }
 
 // observedSince returns the first local day inside the retention window.
 func (c *catalog) observedSince() string {
 	loc := time.UTC
-	retention := 0
-	if snap := c.repo.Snapshot(); snap != nil {
-		if snap.Location != nil {
-			loc = snap.Location
+	retention := config.DefaultRetentionDays
+	if c.configStore != nil {
+		if snap := c.configStore.Snapshot(); snap != nil {
+			if snap.Location != nil {
+				loc = snap.Location
+			}
+			retention = snap.Config.General.RetentionDays
 		}
-		retention = snap.RetentionDays
 	}
 	now := c.now().In(loc)
 	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc)
@@ -128,18 +207,16 @@ func (c *catalog) observedSince() string {
 // fetch queries the upstream models endpoint. A missing endpoint yields an
 // empty listing without an error; every failure leaves FetchedAt nil and
 // records a message that never contains the API key.
-func (c *catalog) fetch(ctx context.Context) catalogBody {
+func (c *catalog) fetch(ctx context.Context, base, key string) catalogBody {
 	body := catalogBody{Upstream: []catalogModel{}}
-
-	var base, key string
-	if snap := c.repo.Snapshot(); snap != nil {
-		base = strings.TrimRight(strings.TrimSpace(snap.Upstream.BaseURL), "/")
-		key = snap.Upstream.APIKey
-	}
+	base = strings.TrimRight(strings.TrimSpace(base), "/")
 	if base == "" {
 		body.UpstreamError = "upstream not configured"
 		return body
 	}
+
+	ctx, cancel := context.WithTimeout(ctx, upstreamProbeTimeout)
+	defer cancel()
 
 	endpoints := []string{"/models"}
 	if !strings.HasSuffix(base, "/v1") {
@@ -162,7 +239,7 @@ func (c *catalog) fetch(ctx context.Context) catalogBody {
 		}
 		resp, reqErr = c.client.Do(req)
 		if reqErr != nil {
-			body.UpstreamError = c.redact(reqErr.Error(), key)
+			body.UpstreamError = redactUpstreamMessage(reqErr.Error(), key)
 			return body
 		}
 		// An OpenAI-compatible server may expose only the versioned path.
@@ -227,8 +304,9 @@ func decodeCatalogModels(resp *http.Response) ([]catalogModel, error) {
 	return models, nil
 }
 
-// redact removes the API key from a message and drops any query string.
-func (c *catalog) redact(msg, key string) string {
+// redactUpstreamMessage removes the API key from a message and drops any query
+// string.
+func redactUpstreamMessage(msg, key string) string {
 	if key != "" {
 		msg = strings.ReplaceAll(msg, key, "[redacted]")
 	}
@@ -238,9 +316,13 @@ func (c *catalog) redact(msg, key string) string {
 	return msg
 }
 
-// modelCatalog answers the model catalog, combining upstream models with the
-// models seen in retained traffic.
-func (s *Server) modelCatalog(w http.ResponseWriter, r *http.Request) {
+// upstreamCatalog answers GET /api/upstreams/{id}/catalog, combining the
+// upstream-visible models with the configured and observed ones.
+func (s *Server) upstreamCatalog(w http.ResponseWriter, r *http.Request) {
+	u, ok := s.upstreamFromPath(w, r)
+	if !ok {
+		return
+	}
 	refresh := false
 	if v := r.URL.Query().Get("refresh"); v != "" {
 		parsed, err := strconv.ParseBool(v)
@@ -251,7 +333,7 @@ func (s *Server) modelCatalog(w http.ResponseWriter, r *http.Request) {
 		}
 		refresh = parsed
 	}
-	body, err := s.catalog.get(r.Context(), refresh)
+	body, err := s.catalog.get(r.Context(), u, refresh)
 	if err != nil {
 		writeInternal(w, err)
 		return

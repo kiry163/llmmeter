@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/kiry163/llmmeter/internal/config"
+	"github.com/kiry163/llmmeter/internal/pricecatalog"
 	"github.com/kiry163/llmmeter/internal/secure"
 	"github.com/kiry163/llmmeter/internal/store"
 	"github.com/kiry163/llmmeter/internal/usage"
@@ -294,12 +295,14 @@ func TestUpstreamProbeDoesNotWriteConfig(t *testing.T) {
 		t.Fatalf("probe = %d %s", rec.Code, rec.Body.String())
 	}
 	var got struct {
-		OK        bool `json:"ok"`
-		LatencyMS int64
-		Provider  string `json:"provider"`
-		Models    []struct {
+		OK             bool   `json:"ok"`
+		LatencyMS      int64  `json:"latencyMs"`
+		Provider       string `json:"provider"`
+		PresetSnapshot string `json:"presetSnapshot"`
+		Models         []struct {
 			ID      string `json:"id"`
 			OwnedBy string `json:"ownedBy"`
+			Matched bool   `json:"matched"`
 		} `json:"models"`
 		Presets []any  `json:"presets"`
 		Error   string `json:"error"`
@@ -312,6 +315,16 @@ func TestUpstreamProbeDoesNotWriteConfig(t *testing.T) {
 	}
 	if len(got.Models) != 2 || got.Models[0].ID != "m1" || got.Models[1].OwnedBy != "y" {
 		t.Fatalf("models = %+v", got.Models)
+	}
+	// The test upstream is a loopback host, so no provider or preset matches.
+	if got.Provider != "" {
+		t.Fatalf("provider = %q, want empty", got.Provider)
+	}
+	if got.PresetSnapshot != pricecatalog.SnapshotDate {
+		t.Fatalf("presetSnapshot = %q", got.PresetSnapshot)
+	}
+	if got.Models[0].Matched || got.Models[1].Matched {
+		t.Fatalf("unexpected preset match: %+v", got.Models)
 	}
 	if got.Presets == nil {
 		t.Fatal("presets must be an empty array, not null")

@@ -68,7 +68,7 @@ func New(cfg Config) *Server {
 		configStore: cfg.ConfigStore,
 		now:         now,
 		auth:        NewAuth(cfg.ConfigStore, now),
-		catalog:     newCatalog(cfg.Repo, cfg.Store, now),
+		catalog:     newCatalog(cfg.ConfigStore, cfg.Store, now),
 	}
 }
 
@@ -96,7 +96,6 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/requests/{id}", require(s.request))
 	mux.Handle("GET /api/live/snapshot", require(s.liveSnapshot))
 	mux.Handle("GET /api/live/stream", require(s.liveStream))
-	mux.Handle("GET /api/model-catalog", require(s.modelCatalog))
 
 	// Configuration endpoints. Setup and the pre-setup upstream probe are
 	// limited to the local machine instead of requiring a session.
@@ -109,6 +108,10 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("DELETE /api/upstreams/{id}", require(s.deleteUpstream))
 	mux.Handle("POST /api/upstreams/{id}/test", require(s.testUpstream))
 	mux.Handle("GET /api/upstreams/{id}/secret", require(s.upstreamSecret))
+	mux.Handle("GET /api/upstreams/{id}/pricing", require(s.upstreamPricing))
+	mux.Handle("PUT /api/upstreams/{id}/pricing", require(s.replaceUpstreamPricing))
+	mux.Handle("POST /api/upstreams/{id}/pricing/import", require(s.importUpstreamPricing))
+	mux.Handle("GET /api/upstreams/{id}/catalog", require(s.upstreamCatalog))
 	mux.Handle("GET /api/keys", require(s.listKeys))
 	mux.Handle("POST /api/keys", require(s.createKey))
 	mux.Handle("PATCH /api/keys/{keyId}", require(s.patchKey))

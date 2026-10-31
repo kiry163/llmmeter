@@ -5,13 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"net/url"
 	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
 
 	"github.com/kiry163/llmmeter/internal/config"
+	"github.com/kiry163/llmmeter/internal/pricecatalog"
 )
 
 const (
@@ -395,27 +395,16 @@ type upstreamProbeModel struct {
 	Matched bool   `json:"matched"`
 }
 
-// upstreamProbePreset is one price preset suggested for a probed model. The
-// preset catalog arrives with the pricing task; the field is present so the
-// response shape is stable.
-type upstreamProbePreset struct {
-	Model      string  `json:"model"`
-	Input      float64 `json:"input"`
-	Output     float64 `json:"output"`
-	CacheRead  float64 `json:"cacheRead"`
-	CacheWrite float64 `json:"cacheWrite"`
-	Reasoning  float64 `json:"reasoning"`
-}
-
 // upstreamProbeResponse is the probe result. OK is false for upstream
-// failures; Error never contains the API key.
+// failures; Error never contains the API key. Presets come from the embedded
+// price snapshot and are matched against the discovered model names.
 type upstreamProbeResponse struct {
 	OK             bool                  `json:"ok"`
 	LatencyMS      int64                 `json:"latencyMs"`
 	Provider       string                `json:"provider"`
-	PresetSnapshot string                `json:"presetSnapshot,omitempty"`
+	PresetSnapshot string                `json:"presetSnapshot"`
 	Models         []upstreamProbeModel  `json:"models"`
-	Presets        []upstreamProbePreset `json:"presets"`
+	Presets        []pricecatalog.Preset `json:"presets"`
 	Error          string                `json:"error"`
 }
 
@@ -455,18 +444,32 @@ func (s *Server) probeUpstream(w http.ResponseWriter, r *http.Request) {
 	key := strings.TrimSpace(in.APIKey)
 	models, latency, errMsg := fetchUpstreamModels(r.Context(), base, key)
 	if errMsg != "" {
-		errMsg = s.catalog.redact(errMsg, key)
+		errMsg = redactUpstreamMessage(errMsg, key)
+	}
+	names := make([]string, len(models))
+	for i, m := range models {
+		names[i] = m.ID
+	}
+	presets := pricecatalog.Match(base, names)
+	matched := make(map[string]bool, len(presets))
+	for _, p := range presets {
+		matched[p.Model] = true
 	}
 	out := upstreamProbeResponse{
-		OK:        errMsg == "",
-		LatencyMS: latency,
-		Provider:  detectProvider(base),
-		Models:    make([]upstreamProbeModel, 0, len(models)),
-		Presets:   []upstreamProbePreset{},
-		Error:     errMsg,
+		OK:             errMsg == "",
+		LatencyMS:      latency,
+		Provider:       pricecatalog.Provider(base),
+		PresetSnapshot: pricecatalog.SnapshotDate,
+		Models:         make([]upstreamProbeModel, 0, len(models)),
+		Presets:        presets,
+		Error:          errMsg,
 	}
 	for _, m := range models {
-		out.Models = append(out.Models, upstreamProbeModel{ID: m.ID, OwnedBy: m.OwnedBy})
+		out.Models = append(out.Models, upstreamProbeModel{
+			ID:      m.ID,
+			OwnedBy: m.OwnedBy,
+			Matched: matched[m.ID],
+		})
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -487,7 +490,7 @@ func (s *Server) testUpstream(w http.ResponseWriter, r *http.Request) {
 	}
 	models, latency, errMsg := fetchUpstreamModels(r.Context(), u.BaseURL, u.APIKey)
 	if errMsg != "" {
-		errMsg = s.catalog.redact(errMsg, u.APIKey)
+		errMsg = redactUpstreamMessage(errMsg, u.APIKey)
 	}
 	writeJSON(w, http.StatusOK, upstreamTestResult{
 		OK:         errMsg == "",
@@ -546,45 +549,6 @@ func fetchUpstreamModels(ctx context.Context, base, apiKey string) ([]catalogMod
 		return nil, latency, "invalid upstream response"
 	}
 	return models, latency, ""
-}
-
-// probeProviders maps a base URL host suffix to the provider preset name.
-// Matching is a dot-boundary suffix comparison, never a substring search.
-var probeProviders = []struct {
-	suffix string
-	name   string
-}{
-	{"deepseek.com", "deepseek"},
-	{"openai.com", "openai"},
-	{"openrouter.ai", "openrouter"},
-	{"moonshot.cn", "moonshot"},
-	{"bigmodel.cn", "zhipu"},
-	{"dashscope.aliyuncs.com", "dashscope"},
-	{"siliconflow.cn", "siliconflow"},
-	{"siliconflow.com", "siliconflow"},
-	{"groq.com", "groq"},
-	{"together.ai", "together"},
-	{"together.xyz", "together"},
-	{"fireworks.ai", "fireworks"},
-	{"x.ai", "xai"},
-	{"mistral.ai", "mistral"},
-	{"minimax.io", "minimax"},
-	{"minimaxi.com", "minimax"},
-}
-
-// detectProvider names the provider a base URL host belongs to, or "" when it
-// is unknown.
-func detectProvider(raw string) string {
-	host := ""
-	if u, err := url.Parse(raw); err == nil {
-		host = strings.ToLower(u.Hostname())
-	}
-	for _, p := range probeProviders {
-		if host == p.suffix || strings.HasSuffix(host, "."+p.suffix) {
-			return p.name
-		}
-	}
-	return ""
 }
 
 // --- shared helpers --------------------------------------------------------
