@@ -166,15 +166,16 @@ flowchart LR
 | `upstreams[].name` | 去空白后非空，最大 100 字符 |
 | `upstreams[].base_url` | 必填，`http`/`https`，含 host；末尾 `/` 归一化去掉 |
 | `upstreams[].api_key` | 可空；为空时不向上游发送 `Authorization` |
-| `upstreams[].keys[].id` | 必填，同上游内唯一，匹配 `[a-z0-9][a-z0-9-]{0,31}` |
-| `upstreams[].keys[].name` | 去空白后非空，最大 100 字符 |
-| `upstreams[].keys[].key` | 全局唯一，长度 ≥ 16 |
+| `gateway_keys[].id` | 必填，全局唯一，匹配 `[a-z0-9][a-z0-9-]{0,31}` |
+| `gateway_keys[].name` | 去空白后非空，最大 100 字符 |
+| `gateway_keys[].key` | 全局唯一，长度 ≥ 16 |
+| `gateway_keys[].upstream_id` | 必填，必须引用存在的 `upstreams[].id` |
 | `upstreams[].models[].name` | 同上游内唯一，非空，最大 200 字符 |
 | 费率 | 有限且 ≥ 0 |
 | `windows` | 每个模型最多 32 个；`label` 非空；`days` 是 `mon..sun` 的非空无重复子集；`start`/`end` 为 `HH:MM` 且不相等；`end < start` 表示跨午夜 |
 | 窗口覆盖费率 | 省略或 `null` 表示继承该模型的 base 价 |
 
-配置中零个上游是合法状态，对应 setup 模式。上游可以没有本地 key，但 UI 必须显示“该上游不可用”的警告。
+配置中零个上游是合法状态，对应 setup 模式。`gateway_keys` 可以为空；上游也可以没有绑定 key，但 UI 必须显示“该上游不可用”的警告。每个 `gateway_keys[].upstream_id` 必须指向存在的上游。
 
 ### 4.4 写入与生效
 
@@ -200,7 +201,7 @@ flowchart LR
   1. 上游：名称、baseURL、上游 key（可空）、测试连接；按 host 识别 provider 并提示预设。测试与模型预览走 `POST /api/upstreams/probe`，不要求先保存配置。
   2. 本地 key：自动生成，默认名“默认”，展示完整值并可复制。
   3. 价格：用同一份草稿 baseURL/key 拉取上游模型，按内嵌预设匹配预填，可跳过。
-- 提交后生成 `session_secret`、至少一个上游、一个本地 key、可选价格，原子写入配置。价格以 `models` 数组随 `POST /api/setup` 一并提交，避免 setup 成功但价格写入失败的半状态。
+- 提交后生成 `session_secret`、至少一个上游、一个顶层 `gateway_keys` 条目（绑定该上游）、可选价格，原子写入配置。价格以 `models` 数组随 `POST /api/setup` 一并提交，避免 setup 成功但价格写入失败的半状态。
 - 配置已有上游时再次提交返回 `409 conflict`。
 - setup 不修改 `listen` 与 `database`；这两个值来自 flag/默认值，写入生成的配置。
 
@@ -223,7 +224,7 @@ llmmeter init \
 
 - `-upstream-name`、`-upstream-url` 必填；`-upstream-key` 可空。
 - `-admin-password-stdin` 从标准输入读一行密码并计算 Argon2id 哈希；不接受明文密码命令行参数。
-- 生成 `session_secret` 与一个本地 key；本地 key 打印到标准输出，便于首次接入。
+- 生成 `session_secret` 与一个顶层 `gateway_keys` 条目（绑定到 `-upstream-name` 创建的上游）；本地 key 打印到标准输出，便于首次接入。
 - 配置文件已存在时拒绝执行，不提供覆盖开关。
 - 非回环 `listen` 且没有管理员密码时拒绝写入。
 - 写入内容与网页 setup 生成的结构一致。
@@ -254,16 +255,26 @@ upstreams:
     base_url: https://api.deepseek.com
     api_key: sk-...
     enabled: true
-    keys:
-      - id: macbook
-        name: MacBook
-        key: sk-local-...
-        enabled: true
     models: []
+  - id: openrouter
+    name: OpenRouter
+    base_url: https://openrouter.ai/api/v1
+    api_key: sk-or-...
+    enabled: true
+    models: []
+
+gateway_keys:
+  - id: macbook
+    name: MacBook
+    key: sk-local-...
+    upstream_id: deepseek
+    enabled: true
 ```
 
-- 一个上游可挂多个本地 key，用于区分设备或用途。
-- 一个本地 key 只属于一个上游。
+- `gateway_keys` 是顶层列表；每个本地 key 有且只有一个 `upstream_id`。
+- WebUI 可直接把某个 key 改绑到另一个上游；保存后新请求立即走新上游，客户端使用的 key 不变。
+- 已在途的请求保持开始时绑定的上游与费率快照，改绑只影响之后的请求。
+- 一个上游可以被多个本地 key 使用，也可以没有本地 key。
 - 上游 key 为空时，网关不向上游发送 `Authorization`，支持 Ollama、LM Studio 等本地服务。
 - 上游禁用时，绑定到它的所有本地 key 立即失效。
 
@@ -286,23 +297,25 @@ upstreams:
 - 轮换：生成新值并原子替换配置；旧值立即失效，无需重启。
 - 禁用：配置 `enabled: false`，请求返回 `401`。
 - 删除：从配置移除；历史请求保留 key 名称快照。
-- 最近使用：从 `requests` 表按 `(upstream_id, key_id)` 取 `MAX(started_at)`；超出保留期后可能为空。
+- 改绑：更新 `gateway_keys[].upstream_id` 并原子替换配置；新请求立即生效，客户端 key 不变。
+- 最近使用：从 `requests` 表按 `key_id` 取 `MAX(started_at)`；改绑后该时间可能来自旧上游，仅表示“这个 key 最近被用过”。
 - 同名 key 允许；`id` 由服务端生成且不可变。
 
 ### 5.4 显示与掩码
 
 - 列表只返回 `keyMasked` / `apiKeyMasked`：保留可识别前缀与末四位，例如 `sk-local-8f3a…9c21`。
 - 掩码规则：长度 ≤ 12 时全部替换为 `…`；否则保留前 8 与后 4，中间用 `…`。
-- 完整值通过 `GET /api/upstreams/{id}/keys/{keyId}/secret` 与 `GET /api/upstreams/{id}/secret` 获取。
+- 完整值通过 `GET /api/keys/{keyId}/secret` 与 `GET /api/upstreams/{id}/secret` 获取。
 - 前端默认打码，点击“显示”后展示完整值，提供复制按钮；再次点击隐藏。
 - reveal 接口要求管理会话或回环访问，响应带 `Cache-Control: no-store`。
 
 ### 5.5 重命名与删除
 
 - 上游 `id` 不可变；`name`、`base_url`、`api_key`、`enabled` 可改。
-- 本地 key 的 `id` 不可变；`name`、`enabled` 可改，值通过轮换改变。
-- 请求记录保存 `upstream_id`、`upstream_name`、`key_id`、`key_name` 快照；改名或删除上游不改变历史显示。
-- 删除上游允许；如果删到零个上游，UI 进入 setup 引导，网关返回 `503 setup_required`。
+- 本地 key 的 `id` 不可变；`name`、`enabled`、`upstream_id` 可改，值通过轮换改变。
+- 请求记录保存 `upstream_id`、`upstream_name`、`key_id`、`key_name` 快照；改名、改绑或删除上游不改变历史显示。
+- 删除上游前必须先转移或删除绑定到它的所有本地 key；否则 `DELETE` 返回 `409 upstream_in_use`，UI 列出待处理的 key。
+- 删除允许；如果删到零个上游，UI 进入 setup 引导，网关返回 `503 setup_required`。
 - 删除最后一个上游或最后一个 key 只做二次确认，不做额外阻止。
 
 ### 5.6 实时指标
@@ -610,7 +623,7 @@ CREATE TABLE traffic_minutes (
 响应：
 
 ```json
-{"upstreamId":"deepseek","gatewayKey":"sk-local-...","configPath":"/Users/me/.config/llmmeter/config.yaml"}
+{"upstreamId":"deepseek","keyId":"default","gatewayKey":"sk-local-...","configPath":"/Users/me/.config/llmmeter/config.yaml"}
 ```
 
 - 配置已有上游时返回 `409`。
@@ -632,10 +645,10 @@ CREATE TABLE traffic_minutes (
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| GET | `/api/upstreams` | 上游列表 + 本地 key + 最近使用 |
+| GET | `/api/upstreams` | 上游列表 + key 数量 + 最近使用 |
 | POST | `/api/upstreams` | 新建上游 |
 | PATCH | `/api/upstreams/{id}` | 修改名称、baseURL、上游 key、启用状态 |
-| DELETE | `/api/upstreams/{id}` | 删除上游及其本地 key |
+| DELETE | `/api/upstreams/{id}` | 删除无绑定 key 的上游 |
 | POST | `/api/upstreams/probe` | 用草稿 baseURL/key 测试连接并拉取模型（不落配置） |
 | POST | `/api/upstreams/{id}/test` | 测试已保存上游的连接 |
 
@@ -652,25 +665,18 @@ CREATE TABLE traffic_minutes (
       "enabled": true,
       "lastUsedAt": "2026-10-31T05:25:14Z",
       "modelCount": 2,
-      "keys": [
-        {
-          "id": "macbook",
-          "name": "MacBook",
-          "keyMasked": "sk-local-8f3a…9c21",
-          "enabled": true,
-          "lastUsedAt": "2026-10-31T05:25:14Z"
-        }
-      ]
+      "keyCount": 1
     }
   ]
 }
 ```
 
 - `lastUsedAt` 从 `requests` 计算；没有记录时为 `null`。
+- `keyCount` 为该上游当前绑定的本地 key 数量。
 - `apiKey` 为空时 `apiKeyMasked` 为空字符串。
 - `POST` 请求体：`{name, baseUrl, apiKey, enabled}`；`id` 由服务端从 `name` 生成 slug：小写 ASCII 字母数字转 `-`，无可用字符时用 `upstream`，冲突时追加 `-2`、`-3`。
 - `PATCH` 请求体只包含要改的字段；修改 `baseUrl` 或 `apiKey` 会清空该上游的模型目录缓存。
-- `DELETE` 保留历史数据。
+- `DELETE` 只允许删除没有绑定本地 key 的上游；否则返回 `409`，错误码 `upstream_in_use`，`fields.keys` 列出绑定中的 key id。删除成功保留历史数据。
 - `POST /api/upstreams/probe` 请求体 `{baseUrl, apiKey}`，响应：
 
   ```json
@@ -700,20 +706,42 @@ CREATE TABLE traffic_minutes (
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| POST | `/api/upstreams/{id}/keys` | 新建 key |
-| PATCH | `/api/upstreams/{id}/keys/{keyId}` | 改名、启用/禁用 |
-| DELETE | `/api/upstreams/{id}/keys/{keyId}` | 删除 |
-| POST | `/api/upstreams/{id}/keys/{keyId}/rotate` | 轮换 |
-| GET | `/api/upstreams/{id}/keys/{keyId}/secret` | 读取明文 |
+| GET | `/api/keys?upstream=` | 本地 key 列表 |
+| POST | `/api/keys` | 新建 key 并绑定上游 |
+| PATCH | `/api/keys/{keyId}` | 改名、启用/禁用、改绑上游 |
+| DELETE | `/api/keys/{keyId}` | 删除 |
+| POST | `/api/keys/{keyId}/rotate` | 轮换 |
+| GET | `/api/keys/{keyId}/secret` | 读取明文 |
 | GET | `/api/upstreams/{id}/secret` | 读取上游 key 明文 |
 
-- `POST` 请求体 `{name}`；响应：
+`GET /api/keys` 响应：
+
+```json
+{
+  "keys": [
+    {
+      "id": "macbook",
+      "name": "MacBook",
+      "keyMasked": "sk-local-8f3a…9c21",
+      "enabled": true,
+      "upstreamId": "deepseek",
+      "upstreamName": "DeepSeek",
+      "lastUsedAt": "2026-10-31T05:25:14Z"
+    }
+  ]
+}
+```
+
+- `upstream` 查询参数可选，用于只列出某个上游的 key。
+- `lastUsedAt` 从 `requests` 按 `key_id` 计算；没有记录时为 `null`。
+- `POST` 请求体 `{name, upstreamId}`；`upstreamId` 必须存在。响应：
 
   ```json
-  {"id":"macbook","name":"MacBook","key":"sk-local-...","keyMasked":"sk-local-8f3a…9c21"}
+  {"id":"macbook","name":"MacBook","key":"sk-local-...","keyMasked":"sk-local-8f3a…9c21","upstreamId":"deepseek","upstreamName":"DeepSeek"}
   ```
 
-- key `id` 的生成规则与上游相同：由名称转 slug，无 ASCII 可用字符时用 `key`，同上游内冲突追加 `-2`、`-3`。
+- `PATCH` 请求体只包含要改的字段：`{name?, upstreamId?, enabled?}`。修改 `upstreamId` 即切换上游，保存后新请求立即生效；响应更新后的 key 条目。
+- key `id` 全局唯一；生成规则与上游相同：由名称转 slug，无 ASCII 可用字符时用 `key`，冲突时追加 `-2`、`-3`。
 - `rotate` 响应同 `POST`，新值写入配置，旧值立即失效。
 - `secret` 响应：
 
@@ -968,6 +996,7 @@ CREATE TABLE traffic_minutes (
 
 - 总览、日志、分析共用：上游选择（全部 + 每个上游）+ 时间范围。
 - 状态写入 URL；刷新、前进后退、分享不丢。
+- 过滤条的上游选择只影响展示，不改变请求路由；真正切换路由在 `/settings/upstreams` 的本地 key 表格里改绑。
 - 上游选择不触发 SSE 重连；只切换展示数据源。
 - 窄屏下过滤条折叠为“筛选”按钮，打开抽屉。
 
@@ -1033,12 +1062,13 @@ CREATE TABLE traffic_minutes (
 
 #### 上游与密钥 `/settings/upstreams`
 
-- 上游卡片列表；每张显示名称、baseURL、上游 key 掩码、启用状态、最近使用、模型数。
-- 卡片操作：测试连接、编辑、删除。
-- 卡片内本地 key 列表：名称、掩码、最近使用、启用开关、显示/复制、轮换、删除。
+- 上游卡片列表；每张显示名称、baseURL、上游 key 掩码、启用状态、最近使用、模型数、绑定的 key 数量。
+- 卡片操作：测试连接、编辑、删除；`keyCount > 0` 时删除按钮禁用并提示先转移或删除绑定 key。
+- 本地 key 表格（独立于上游卡片）：名称、掩码、绑定上游下拉框、启用开关、最近使用、显示/复制、轮换、删除。
+- 改绑上游：在 key 行的下拉框选择目标上游后立即调用 `PATCH /api/keys/{keyId}`；成功 toast“已切换到 X”，失败回滚选择并显示错误。客户端不需要换 key。
 - “新建上游”向导：名称、baseURL、上游 key（可空）、启用；提交前可测试连接。
-- “新建本地 key”：输入名称，生成并展示完整值，可复制；之后仍可通过显示按钮读取。
-- 删除上游二次确认，说明本地 key 会立即失效、历史数据保留。
+- “新建本地 key”：输入名称并选择上游，生成并展示完整值，可复制；之后仍可通过显示按钮读取。
+- 删除上游二次确认；若仍有绑定 key，列出这些 key 并阻止删除，历史数据保留。
 - 没有本地 key 的上游显示警告“客户端无法通过该上游接入”。
 
 #### 价格 `/settings/pricing`
@@ -1176,17 +1206,18 @@ CREATE TABLE traffic_minutes (
 Go：
 
 - `internal/config`：默认路径解析、严格 YAML、未知字段、重复 key、字段校验表、窗口校验、slug 生成、key 生成、原子写、权限、深拷贝、SIGHUP 重载失败保留旧快照。
-- `internal/gateway`：key 哈希索引、多个 key 绑定同一/不同上游、禁用 key、缺失 key、禁用上游、空上游 key 不发 Authorization、路径透传、上游 key 覆盖、按上游计价、错误形状。
+- `internal/gateway`：key 哈希索引、多个 key 绑定同一/不同上游、运行时改绑后新请求走新上游、在途请求保持旧上游、禁用 key、缺失 key、禁用上游、空上游 key 不发 Authorization、路径透传、上游 key 覆盖、按上游计价、错误形状。
 - `internal/store`：schema v2 创建、错误版本拒绝、上游/key 筛选、分钟聚合主键、保留清理、partial 计算、earliestDay。
 - `internal/metrics`：全局与按上游快照、byModel 带 upstream、per-upstream spark、in-flight 过滤。
 - `internal/pricing`：窗口匹配、跨午夜、列表顺序、继承、成本公式、负数归零。
 - `internal/pricecatalog`：provider host 匹配、模型精确匹配、未匹配不预填、预设快照日期。
-- `internal/api`：setup 回环限制与 409、上游 CRUD、key 创建/轮换/reveal/掩码、pricing PUT 校验与原子性、catalog 缓存、config reload、CSRF、密码变更。
+- `internal/api`：setup 回环限制与 409、上游 CRUD、有绑定 key 时删除上游 409、key 创建/改绑/轮换/reveal/掩码、pricing PUT 校验与原子性、catalog 缓存、config reload、CSRF、密码变更。
 
 前端：
 
 - 查询状态序列化/反序列化（上游、范围、筛选）。
 - 掩码显示与显隐切换。
+- key 绑定上游下拉框的切换、失败回滚与成功提示。
 - 价格预设匹配展示。
 - 金额/字节/tokens 格式化。
 - 分析趋势按 `上游 × 模型` 聚合与 Top N。
@@ -1210,7 +1241,7 @@ Go：
 | 阶段 | 内容 | 完成标准 |
 | --- | --- | --- |
 | M1 配置层 | `internal/config`、YAML schema、路径与权限、原子写、SIGHUP、`llmmeter init`、setup 写配置；删除 DB 配置表；schema v2 | 配置单测通过；`make build`；无配置可启动到 setup |
-| M2 多上游核心 | 上游/本地 key 配置模型、哈希索引、路由、请求快照字段、分钟聚合上游维度、metrics 按上游、upstream/key API | 路由与存储单测通过；多 key 绑定行为正确 |
+| M2 多上游核心 | 上游/顶层本地 key 配置模型、哈希索引、路由、改绑、请求快照字段、分钟聚合上游维度、metrics 按上游、upstream/key API | 路由与存储单测通过；多 key 绑定与运行时改绑行为正确 |
 | M3 计费 | 按上游价格表、价格预设、catalog、pricing API | 计费与预设单测通过；同名模型跨上游不串价 |
 | M4 UI | 全局上游筛选、四页改版、设置四个子页、setup 向导、key 管理、浅色主题与空状态 | 前端单测通过；`make build`；窄屏不溢出 |
 | M5 开源化 | README 双语、截图、LICENSE、CI、goreleaser、Docker、Homebrew、文档 | CI 通过；release 构建通过；Docker 示例可启动 |
@@ -1230,6 +1261,8 @@ Go：
 | 多上游系列过多 | 图表 Top N + 其他，图例可滚动；分钟聚合带 upstream 维度 |
 | 实时指标内存增长 | 上游数量为个人级；环形缓冲按上游维护，删除上游后自然过期 |
 | 按上游价格重复配置 | UI 支持复制价格列表到其他上游；首次 setup 用预设降低摩擦 |
+| 改绑 key 误切上游 | 下拉框选择后立即保存并 toast；失败回滚；在途请求保持旧上游；历史记录保留旧上游快照 |
+| 删除上游时 key 悬空 | 服务端强制 `409 upstream_in_use`；UI 先要求转移或删除绑定 key |
 | 功能范围回弹 | 预算、告警、CSV 导出、多用户、模型路由均列为非目标，需新设计文档才能加入 |
 
 ## 14. 附录
@@ -1258,11 +1291,6 @@ upstreams:
     base_url: "https://api.deepseek.com"
     api_key: "sk-..."
     enabled: true
-    keys:
-      - id: macbook
-        name: "MacBook"
-        key: "sk-local-..."
-        enabled: true
     models:
       - name: deepseek-chat
         input: 1.0
@@ -1285,11 +1313,6 @@ upstreams:
     base_url: "http://127.0.0.1:11434"
     api_key: ""
     enabled: true
-    keys:
-      - id: local
-        name: "Local"
-        key: "sk-local-..."
-        enabled: true
     models:
       - name: "llama3.3"
         input: 0
@@ -1298,6 +1321,18 @@ upstreams:
         cache_write: 0
         reasoning: null
         windows: []
+
+gateway_keys:
+  - id: macbook
+    name: "MacBook"
+    key: "sk-local-..."
+    upstream_id: deepseek
+    enabled: true
+  - id: local
+    name: "Local"
+    key: "sk-local-..."
+    upstream_id: ollama
+    enabled: true
 ```
 
 ### B. 关键响应示例
