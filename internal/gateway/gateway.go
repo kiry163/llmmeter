@@ -119,7 +119,7 @@ type proxyResult struct {
 // non chat/responses path are forwarded without their body being inspected.
 func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	snap := g.cfg.Snapshot()
-	if snap == nil || len(snap.Upstreams) == 0 || len(snap.Keys) == 0 {
+	if snap == nil || len(snap.Upstreams) == 0 {
 		writeError(w, http.StatusServiceUnavailable, "setup_required")
 		return
 	}

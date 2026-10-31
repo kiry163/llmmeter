@@ -629,6 +629,30 @@ func TestGatewayDisabledUpstreamIs503(t *testing.T) {
 	}
 }
 
+func TestGatewayNoKeysIs401InvalidAPIKey(t *testing.T) {
+	upstream := upstreamWithBody(t, `{"ok":true}`, nil)
+	g, _, _, _ := newTestGatewayWith(t,
+		[]config.Upstream{{ID: "a", Name: "Upstream A", BaseURL: upstream.URL, Models: chatModel()}},
+		nil,
+	)
+	for _, header := range []string{"", "Bearer sk-local-anything-000000000000000000"} {
+		req := httptest.NewRequest("POST", "/v1/chat/completions",
+			strings.NewReader(`{"model":"deepseek-chat"}`))
+		if header != "" {
+			req.Header.Set("Authorization", header)
+		}
+		rec := httptest.NewRecorder()
+		g.ServeHTTP(rec, req)
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("header %q: status %d body %s", header, rec.Code, rec.Body.String())
+		}
+		body := decodeGatewayError(t, rec)
+		if body.Error.Code != "invalid_api_key" {
+			t.Fatalf("header %q: error = %+v", header, body.Error)
+		}
+	}
+}
+
 func TestGatewayNoUpstreamsIs503SetupRequired(t *testing.T) {
 	g, _, _, _ := newTestGatewayWith(t, nil, nil)
 	req := httptest.NewRequest("GET", "/v1/models", nil)
