@@ -187,7 +187,7 @@ func TestPatchUpstreamPartial(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 		t.Fatal(err)
 	}
-	if got.Name != "Renamed" || got.Enabled || got.BaseURL != "https://a.example.com" || got.APIKeyMasked != "sk-aaaa…1111" {
+	if got.Name != "Renamed" || got.Enabled || got.BaseURL != "https://a.example.com" || got.APIKeyMasked != "sk-…" {
 		t.Fatalf("patched = %+v", got)
 	}
 
@@ -432,6 +432,145 @@ func TestUpstreamSecretRevealNoStore(t *testing.T) {
 	}
 }
 
+func TestUpstreamMaskHidesShortKeys(t *testing.T) {
+	env := newConfigEnv(t, "127.0.0.1:8100")
+	short := map[string]string{
+		"u9":  "lm-studio",
+		"u10": "1234567890",
+		"u12": "123456789012",
+		"u13": "1234567890123",
+	}
+	ids := []string{"u9", "u10", "u12", "u13"}
+	if err := env.config.Update(func(c *config.Config) error {
+		for _, id := range ids {
+			c.Upstreams = append(c.Upstreams, config.Upstream{
+				ID: id, Name: id, BaseURL: "https://" + id + ".example.com", APIKey: short[id],
+			})
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := doGET(t, env.srv, "/api/upstreams")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list = %d %s", rec.Code, rec.Body.String())
+	}
+	ups := decodeUpstreams(t, rec.Body.Bytes())
+	if len(ups) != len(ids) {
+		t.Fatalf("upstreams = %+v", ups)
+	}
+	// A short secret keeps only its prefix; head and tail would cover it.
+	want := map[string]string{
+		"u9":  "lm-s…",
+		"u10": "1234…",
+		"u12": "1234…",
+		"u13": "1234…",
+	}
+	seen := map[string]int{}
+	for _, u := range ups {
+		if u.APIKeyMasked != want[u.ID] {
+			t.Fatalf("%s masked = %q, want %q", u.ID, u.APIKeyMasked, want[u.ID])
+		}
+		if strings.Contains(rec.Body.String(), short[u.ID]) {
+			t.Fatalf("%s leaked the full key %q", u.ID, short[u.ID])
+		}
+		seen[u.ID]++
+	}
+	for _, id := range ids {
+		if seen[id] != 1 {
+			t.Fatalf("%s missing from list", id)
+		}
+	}
+
+	// The create response uses the same masking.
+	rec = doPOST(t, env.srv, "/api/upstreams", `{"name":"Short","baseUrl":"https://s.example.com","apiKey":"lm-studio"}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create = %d %s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "lm-studio") {
+		t.Fatalf("create leaked the key: %s", rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"apiKeyMasked":"lm-s…"`) {
+		t.Fatalf("create = %s", rec.Body.String())
+	}
+}
+
+func TestUpstreamProbeWithoutKeySendsNoAuthorization(t *testing.T) {
+	var gotAuth string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/models", func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		_, _ = w.Write([]byte(`{"data":[{"id":"m1"}]}`))
+	})
+	up := httptest.NewServer(mux)
+	t.Cleanup(up.Close)
+
+	env := newConfigEnv(t, "127.0.0.1:8100")
+	if err := env.config.Update(func(c *config.Config) error {
+		c.Upstreams = append(c.Upstreams, config.Upstream{
+			ID: "a", Name: "A", BaseURL: up.URL, APIKey: "sk-upstream-secret",
+		})
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := doPOST(t, env.srv, "/api/upstreams/probe", `{"baseUrl":"`+up.URL+`"}`)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"ok":true`) {
+		t.Fatalf("probe = %d %s", rec.Code, rec.Body.String())
+	}
+	if gotAuth != "" {
+		t.Fatalf("probe reused a saved key: Authorization = %q", gotAuth)
+	}
+	if strings.Contains(rec.Body.String(), "sk-upstream-secret") {
+		t.Fatalf("probe leaked the saved key: %s", rec.Body.String())
+	}
+}
+
+func TestUpstreamProbeTimeoutIsTotal(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/models", func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-time.After(4 * time.Second):
+			w.WriteHeader(http.StatusNotFound)
+		case <-r.Context().Done():
+		}
+	})
+	mux.HandleFunc("/v1/models", func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-time.After(4 * time.Second):
+			_, _ = w.Write([]byte(`{"data":[{"id":"late"}]}`))
+		case <-r.Context().Done():
+		}
+	})
+	up := httptest.NewServer(mux)
+	t.Cleanup(up.Close)
+
+	env := newConfigEnv(t, "127.0.0.1:8100")
+	start := time.Now()
+	rec := doPOST(t, env.srv, "/api/upstreams/probe", `{"baseUrl":"`+up.URL+`"}`)
+	elapsed := time.Since(start)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("probe = %d %s", rec.Code, rec.Body.String())
+	}
+	var got struct {
+		OK    bool   `json:"ok"`
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.OK || got.Error == "" {
+		t.Fatalf("probe = %+v", got)
+	}
+	// Per-attempt deadlines would allow 4s + 4s; the shared deadline must stop
+	// the probe near 5s.
+	if elapsed >= 7*time.Second {
+		t.Fatalf("probe took %v, want the two attempts to share one 5s deadline", elapsed)
+	}
+}
+
 func TestConfigWritesRequireSetup(t *testing.T) {
 	env := newConfigEnv(t, "127.0.0.1:8100")
 
@@ -457,6 +596,17 @@ func TestConfigWritesRequireSetup(t *testing.T) {
 		}
 		if rec.Code != http.StatusConflict {
 			t.Fatalf("%s %s = %d %s", tc.method, tc.path, rec.Code, rec.Body.String())
+		}
+		var body struct {
+			Error struct {
+				Code string `json:"code"`
+			} `json:"error"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatalf("%s %s: decode: %v", tc.method, tc.path, err)
+		}
+		if body.Error.Code != "setup_required" {
+			t.Fatalf("%s %s code = %q, want setup_required", tc.method, tc.path, body.Error.Code)
 		}
 	}
 

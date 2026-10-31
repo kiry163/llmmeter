@@ -7,12 +7,13 @@ import (
 
 // Error codes of the API error envelope (spec §6).
 const (
-	codeValidation   = "validation"
-	codeUnauthorized = "unauthorized"
-	codeForbidden    = "forbidden"
-	codeNotFound     = "not_found"
-	codeConflict     = "conflict"
-	codeInternal     = "internal"
+	codeValidation    = "validation"
+	codeUnauthorized  = "unauthorized"
+	codeForbidden     = "forbidden"
+	codeNotFound      = "not_found"
+	codeConflict      = "conflict"
+	codeSetupRequired = "setup_required"
+	codeInternal      = "internal"
 )
 
 // writeJSON writes v as the JSON response body with the given status.

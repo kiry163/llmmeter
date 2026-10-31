@@ -146,7 +146,7 @@ func (s *Server) earliestDay() string {
 func (s *Server) requireConfigSetup(w http.ResponseWriter) bool {
 	snap := s.configSnapshot()
 	if snap == nil || len(snap.Config.Upstreams) == 0 {
-		writeAPIError(w, http.StatusConflict, codeConflict, "setup required")
+		writeAPIError(w, http.StatusConflict, codeSetupRequired, "setup required")
 		return false
 	}
 	return true

@@ -15,8 +15,8 @@ import (
 )
 
 const (
-	// upstreamProbeTimeout bounds one upstream models listing, including the
-	// fallback path attempt.
+	// upstreamProbeTimeout bounds one upstream models fetch: the /models
+	// attempt and its /v1/models fallback share this single deadline.
 	upstreamProbeTimeout = 5 * time.Second
 
 	// maxUpstreamNameLen mirrors the configuration rule for upstream and key
@@ -73,9 +73,9 @@ type upstreamSecretResponse struct {
 	APIKey string `json:"apiKey"`
 }
 
-// maskSecret keeps the recognizable prefix and the last four characters of a
-// secret. Secrets too short to mask keep only their prefix, so masking never
-// reveals the whole value.
+// maskSecret keeps the recognizable prefix and, when the secret is long
+// enough, the last four characters. Short secrets keep only their prefix so
+// masking can never reproduce the whole value.
 func maskSecret(secret string) string {
 	if secret == "" {
 		return ""
@@ -92,7 +92,9 @@ func maskSecret(secret string) string {
 		return "…"
 	}
 	rest := secret[len(prefix):]
-	if len(rest) <= 4 {
+	// Head and tail together need at least twelve remaining characters;
+	// anything shorter would be fully covered by them.
+	if len(rest) < 12 {
 		return prefix + "…"
 	}
 	return prefix + rest[:4] + "…" + rest[len(rest)-4:]
@@ -437,8 +439,8 @@ func normalizeProbeBaseURL(raw string) (string, bool) {
 
 // probeUpstream answers POST /api/upstreams/probe. It fetches the models
 // listing of a draft upstream and never touches the configuration. An omitted
-// API key falls back to the key of a saved upstream with the same base URL, so
-// the UI can preview a configured upstream without revealing its key.
+// API key means the probe sends no Authorization header; it never borrows a
+// saved upstream secret.
 func (s *Server) probeUpstream(w http.ResponseWriter, r *http.Request) {
 	var in upstreamProbeRequest
 	if !decodeJSON(w, r, &in) {
@@ -451,9 +453,6 @@ func (s *Server) probeUpstream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	key := strings.TrimSpace(in.APIKey)
-	if key == "" {
-		key = s.savedAPIKeyForBase(base)
-	}
 	models, latency, errMsg := fetchUpstreamModels(r.Context(), base, key)
 	if errMsg != "" {
 		errMsg = s.catalog.redact(errMsg, key)
@@ -498,31 +497,18 @@ func (s *Server) testUpstream(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// savedAPIKeyForBase returns the API key of a configured upstream whose base
-// URL matches, or "".
-func (s *Server) savedAPIKeyForBase(base string) string {
-	snap := s.configSnapshot()
-	if snap == nil {
-		return ""
-	}
-	for _, u := range snap.Config.Upstreams {
-		if strings.TrimRight(strings.TrimSpace(u.BaseURL), "/") == base {
-			return u.APIKey
-		}
-	}
-	return ""
-}
-
 // fetchUpstreamModels lists the models of an OpenAI-compatible upstream. It
 // tries <base>/models first and, when that path is missing, <base>/v1/models
-// unless base already ends in /v1. The returned error message is plain text;
-// the caller redacts the key.
+// unless base already ends in /v1. Both attempts share one total deadline. The
+// returned error message is plain text; the caller redacts the key.
 func fetchUpstreamModels(ctx context.Context, base, apiKey string) ([]catalogModel, int64, string) {
 	endpoints := []string{"/models"}
 	if !strings.HasSuffix(base, "/v1") {
 		endpoints = append(endpoints, "/v1/models")
 	}
-	client := &http.Client{Timeout: upstreamProbeTimeout}
+	ctx, cancel := context.WithTimeout(ctx, upstreamProbeTimeout)
+	defer cancel()
+	client := &http.Client{}
 	start := time.Now()
 
 	var resp *http.Response
