@@ -2,7 +2,6 @@
 
 export interface Bootstrap {
   version: string;
-  needsSetup: boolean;
   authRequired: boolean;
   listen: string;
   timezone: string;
@@ -234,15 +233,6 @@ export interface SettingsPatch {
 
 export interface GatewayKeyResponse {
   gatewayKey: string;
-}
-
-export interface SetupInput {
-  upstream: {
-    baseUrl: string;
-    apiKey: string;
-  };
-  timezone: string;
-  adminPassword: string;
 }
 
 export interface UpstreamTestInput {

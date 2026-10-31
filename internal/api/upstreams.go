@@ -198,7 +198,7 @@ func upstreamInputFields(name, baseURL string) map[string]string {
 	case utf8.RuneCountInString(strings.TrimSpace(name)) > maxUpstreamNameLen:
 		fields["name"] = fmt.Sprintf("must be at most %d characters", maxUpstreamNameLen)
 	}
-	if !validSetupURL(strings.TrimSpace(baseURL)) {
+	if !validUpstreamURL(strings.TrimSpace(baseURL)) {
 		fields["baseUrl"] = "must be an http or https URL with a host"
 	}
 	return fields
@@ -207,9 +207,6 @@ func upstreamInputFields(name, baseURL string) map[string]string {
 // createUpstream answers POST /api/upstreams. The ID is derived from the name
 // and made unique by appending -2, -3, ...
 func (s *Server) createUpstream(w http.ResponseWriter, r *http.Request) {
-	if !s.requireConfigSetup(w) {
-		return
-	}
 	var in upstreamCreateRequest
 	if !decodeJSON(w, r, &in) {
 		return
@@ -250,9 +247,6 @@ func (s *Server) createUpstream(w http.ResponseWriter, r *http.Request) {
 // patchUpstream answers PATCH /api/upstreams/{id}. Changing the endpoint or
 // the API key drops the cached model catalog of the instance.
 func (s *Server) patchUpstream(w http.ResponseWriter, r *http.Request) {
-	if !s.requireConfigSetup(w) {
-		return
-	}
 	id := r.PathValue("id")
 	var in upstreamPatchRequest
 	if !decodeJSON(w, r, &in) {
@@ -268,7 +262,7 @@ func (s *Server) patchUpstream(w http.ResponseWriter, r *http.Request) {
 			fields["name"] = fmt.Sprintf("must be at most %d characters", maxUpstreamNameLen)
 		}
 	}
-	if in.BaseURL != nil && !validSetupURL(strings.TrimSpace(*in.BaseURL)) {
+	if in.BaseURL != nil && !validUpstreamURL(strings.TrimSpace(*in.BaseURL)) {
 		fields["baseUrl"] = "must be an http or https URL with a host"
 	}
 	if len(fields) > 0 {
@@ -325,9 +319,6 @@ func (s *Server) patchUpstream(w http.ResponseWriter, r *http.Request) {
 // local keys are refused with 409 upstream_in_use and the key IDs in
 // fields.keys. Usage history is retained.
 func (s *Server) deleteUpstream(w http.ResponseWriter, r *http.Request) {
-	if !s.requireConfigSetup(w) {
-		return
-	}
 	id := r.PathValue("id")
 	var inUse []string
 	err := s.configStore.Update(func(c *config.Config) error {
@@ -420,7 +411,7 @@ type upstreamTestResult struct {
 // absolute http(s) URL.
 func normalizeProbeBaseURL(raw string) (string, bool) {
 	base := strings.TrimRight(strings.TrimSpace(raw), "/")
-	if !validSetupURL(base) {
+	if !validUpstreamURL(base) {
 		return "", false
 	}
 	return base, true

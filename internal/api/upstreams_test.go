@@ -584,52 +584,24 @@ func TestUpstreamProbeTimeoutIsTotal(t *testing.T) {
 	}
 }
 
-func TestConfigWritesRequireSetup(t *testing.T) {
+func TestConfigWritesAllowedWithoutUpstreams(t *testing.T) {
 	env := newConfigEnv(t, "127.0.0.1:8100")
 
-	for _, tc := range []struct {
-		method, path, body string
-	}{
-		{http.MethodPost, "/api/upstreams", `{"name":"A","baseUrl":"https://a.example.com"}`},
-		{http.MethodPatch, "/api/upstreams/a", `{"name":"B"}`},
-		{http.MethodDelete, "/api/upstreams/a", ""},
-		{http.MethodPost, "/api/keys", `{"name":"K","upstreamId":"a"}`},
-		{http.MethodPatch, "/api/keys/k", `{"name":"B"}`},
-		{http.MethodDelete, "/api/keys/k", ""},
-		{http.MethodPost, "/api/keys/k/rotate", ""},
-	} {
-		var rec *httptest.ResponseRecorder
-		switch tc.method {
-		case http.MethodPost:
-			rec = doPOST(t, env.srv, tc.path, tc.body)
-		case http.MethodPatch:
-			rec = doPATCH(t, env.srv, tc.path, tc.body)
-		default:
-			rec = doDELETE(t, env.srv, tc.path)
-		}
-		if rec.Code != http.StatusConflict {
-			t.Fatalf("%s %s = %d %s", tc.method, tc.path, rec.Code, rec.Body.String())
-		}
-		var body struct {
-			Error struct {
-				Code string `json:"code"`
-			} `json:"error"`
-		}
-		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
-			t.Fatalf("%s %s: decode: %v", tc.method, tc.path, err)
-		}
-		if body.Error.Code != "setup_required" {
-			t.Fatalf("%s %s code = %q, want setup_required", tc.method, tc.path, body.Error.Code)
-		}
+	rec := doPOST(t, env.srv, "/api/upstreams", `{"name":"A","baseUrl":"https://a.example.com"}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("first upstream = %d %s", rec.Code, rec.Body.String())
+	}
+	rec = doGET(t, env.srv, "/api/upstreams")
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"id":"a"`) {
+		t.Fatalf("upstreams = %d %s", rec.Code, rec.Body.String())
 	}
 
-	for _, path := range []string{"/api/upstreams", "/api/keys"} {
-		rec := doGET(t, env.srv, path)
-		if rec.Code != http.StatusOK {
-			t.Fatalf("%s = %d %s", path, rec.Code, rec.Body.String())
-		}
-		if !strings.Contains(rec.Body.String(), `[]`) {
-			t.Fatalf("%s = %s", path, rec.Body.String())
-		}
+	rec = doPOST(t, env.srv, "/api/keys", `{"name":"K","upstreamId":"a"}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("first key = %d %s", rec.Code, rec.Body.String())
+	}
+	rec = doGET(t, env.srv, "/api/keys")
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"upstreamId":"a"`) {
+		t.Fatalf("keys = %d %s", rec.Code, rec.Body.String())
 	}
 }

@@ -22,7 +22,6 @@ import type {
   Series,
   Settings,
   SettingsPatch,
-  SetupInput,
   UpstreamTestInput,
   UpstreamTestResult,
   WindowInput,
@@ -264,9 +263,6 @@ export const api = {
 
   logout: (): Promise<{ authenticated: boolean }> =>
     request<{ authenticated: boolean }>("/auth/logout", { method: "POST" }),
-
-  setup: (input: SetupInput): Promise<GatewayKeyResponse> =>
-    request<GatewayKeyResponse>("/setup", { method: "POST", body: JSON.stringify(input) }),
 
   testUpstream: (input: UpstreamTestInput): Promise<UpstreamTestResult> =>
     request<UpstreamTestResult>("/upstream/test", {

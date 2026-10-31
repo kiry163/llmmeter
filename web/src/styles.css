@@ -927,10 +927,6 @@
   .auth-meta { margin-top: 14px; text-align: center; font-size: 10px; color: var(--faint); }
   .key-box { display: flex; align-items: center; gap: 8px; padding: 9px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel-solid); }
   .key-box code { flex: 1; min-width: 0; color: var(--accent); font-family: var(--font-mono); font-size: 11.5px; overflow-wrap: anywhere; }
-  .setup-warning { margin-top: 10px; color: var(--warning); font-size: 10.5px; line-height: 1.6; }
-  .setup-steps { display: flex; gap: 14px; margin-bottom: 18px; color: var(--faint); font-size: 10.5px; }
-  .setup-steps span { padding-bottom: 6px; border-bottom: 2px solid transparent; }
-  .setup-steps span.on { color: var(--accent); border-bottom-color: var(--accent); }
   .auth-previews { display: flex; gap: 8px; flex-wrap: wrap; padding: 0 2px; }
 
   @media (min-width: 821px) and (max-width: 1200px) {

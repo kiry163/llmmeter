@@ -351,14 +351,14 @@ func TestRequireAndRequireLoopback(t *testing.T) {
 	}
 
 	lh := a.RequireLoopback(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }))
-	req = httptest.NewRequest("POST", "/api/setup", nil)
+	req = httptest.NewRequest("POST", "/api/upstreams", nil)
 	req.RemoteAddr = "192.0.2.7:9999"
 	rec = httptest.NewRecorder()
 	lh.ServeHTTP(rec, req)
 	if rec.Code != 403 {
 		t.Fatalf("non-loopback must be rejected, code=%d", rec.Code)
 	}
-	req = httptest.NewRequest("POST", "/api/setup", nil)
+	req = httptest.NewRequest("POST", "/api/upstreams", nil)
 	req.RemoteAddr = "[::1]:9999"
 	rec = httptest.NewRecorder()
 	lh.ServeHTTP(rec, req)
@@ -526,7 +526,7 @@ func TestAPIErrorEnvelope(t *testing.T) {
 
 	// 403 from RequireLoopback.
 	rec = httptest.NewRecorder()
-	req = httptest.NewRequest("POST", "/api/setup", nil)
+	req = httptest.NewRequest("POST", "/api/upstreams", nil)
 	req.RemoteAddr = "192.0.2.7:9999"
 	a.RequireLoopback(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })).ServeHTTP(rec, req)
 	assertAPIError(t, rec, http.StatusForbidden, "forbidden")

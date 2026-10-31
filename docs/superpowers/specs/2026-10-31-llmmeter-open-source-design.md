@@ -66,11 +66,11 @@
 ```bash
 llmmeter serve -config ~/.config/llmmeter/config.yaml
 llmmeter -config ~/.config/llmmeter/config.yaml -listen 127.0.0.1:8100 -db ~/.cache/llmmeter/llmmeter.db
-llmmeter init ...          # 非交互写配置，供 Docker/无头服务器使用
 llmmeter version
 ```
 
 - `serve` 可省略。
+- 首次启动时配置文件不存在则自动生成带注释的 YAML 模板并继续启动；没有独立写配置的子命令。
 - `-config` 缺省为 `$XDG_CONFIG_HOME/llmmeter/config.yaml`，未设置时 `~/.config/llmmeter/config.yaml`。
 - `-db` 缺省取配置中的 `server.database`；配置未写时取 `$XDG_CACHE_HOME/llmmeter/llmmeter.db`，未设置时 `~/.cache/llmmeter/llmmeter.db`。
 - `-listen` 缺省取配置中的 `server.listen`；配置未写时 `127.0.0.1:8100`。
@@ -89,7 +89,7 @@ llmmeter version
 | `internal/usage` | usage 归一化（纯函数） |
 | `internal/store` | schema v2、单写协程、查询、聚合、保留清理 |
 | `internal/metrics` | 全局与按上游的进行中计数、秒级环形缓冲、SSE hub、分钟增量 |
-| `internal/api` | 管理 REST、会话、静态资源、SPA fallback、setup |
+| `internal/api` | 管理 REST、会话、静态资源、SPA fallback |
 | `web` | React 19 + Vite + TS + ECharts |
 
 现有 `internal/settings` 包与数据库中的 `settings` / `models` / `price_windows` 表整体删除，由 `internal/config` 取代。
@@ -141,7 +141,7 @@ flowchart LR
 
 - 配置中的 `database` 支持 `~` 展开；相对路径相对于配置文件所在目录解析。
 - 配置目录与数据库目录不存在时创建，目录权限 `0700`；配置文件与数据库文件权限 `0600`（WAL/SHM 由 SQLite 创建，启动后按同权限收敛）。
-- 配置文件不存在是合法状态：进入 setup 模式，使用默认值启动，不写文件。
+- 配置文件不存在时，启动先写入一份带注释的模板（字段见 4.5），再按该文件启动。
 
 ### 4.2 格式
 
@@ -175,7 +175,7 @@ flowchart LR
 | `windows` | 每个模型最多 32 个；`label` 非空；`days` 是 `mon..sun` 的非空无重复子集；`start`/`end` 为 `HH:MM` 且不相等；`end < start` 表示跨午夜 |
 | 窗口覆盖费率 | 省略或 `null` 表示继承该模型的 base 价 |
 
-配置中零个上游是合法状态，对应 setup 模式。`gateway_keys` 可以为空；上游也可以没有绑定 key，但 UI 必须显示“该上游不可用”的警告。每个 `gateway_keys[].upstream_id` 必须指向存在的上游。
+配置中零个上游是合法状态：服务正常运行，配置写接口仍可用，以便添加第一个上游。`gateway_keys` 可以为空；上游也可以没有绑定 key，但 UI 必须显示“该上游不可用”的警告。每个 `gateway_keys[].upstream_id` 必须指向存在的上游。
 
 ### 4.4 写入与生效
 
@@ -190,44 +190,22 @@ flowchart LR
 - UI 保存会重新序列化文件，手写注释可能丢失；文件头注释由程序固定写入。
 - 外部编辑与 UI 保存并发时，最后写入者生效；v1 不做文件级冲突检测。
 
-### 4.5 首次配置
+### 4.5 首次启动与配置模板
 
-#### 网页向导
+不存在首次配置向导页面，也没有独立写配置命令；配置来源只有 YAML 与运行期 WebUI 管理。
 
-- 当配置不存在或 `upstreams` 为空时，`/setup` 可用。
-- 配置文件不存在时使用进程内临时 session secret；setup 成功时生成正式 secret 并写入配置。
-- 只接受来自回环地址的请求。
-- 三步：
-  1. 上游：名称、baseURL、上游 key（可空）、测试连接；按 host 识别 provider 并提示预设。测试与模型预览走 `POST /api/upstreams/probe`，不要求先保存配置。
-  2. 本地 key：自动生成，默认名“默认”，展示完整值并可复制。
-  3. 价格：用同一份草稿 baseURL/key 拉取上游模型，按内嵌预设匹配预填，可跳过。
-- 提交后生成 `session_secret`、至少一个上游、一个顶层 `gateway_keys` 条目（绑定该上游）、可选价格，原子写入配置。价格以 `models` 数组随 `POST /api/setup` 一并提交，避免 setup 成功但价格写入失败的半状态。
-- 配置已有上游时再次提交返回 `409 conflict`。
-- setup 不修改 `listen` 与 `database`；这两个值来自 flag/默认值，写入生成的配置。
-
-#### `llmmeter init`
-
-用于 Docker、无头服务器和可复现部署，不启动服务、不创建数据库。
-
-```bash
-llmmeter init \
-  -config ~/.config/llmmeter/config.yaml \
-  -listen 127.0.0.1:8100 \
-  -database ~/.cache/llmmeter/llmmeter.db \
-  -timezone Asia/Shanghai \
-  -upstream-name DeepSeek \
-  -upstream-url https://api.deepseek.com \
-  -upstream-key sk-... \
-  -key-name default \
-  -admin-password-stdin
-```
-
-- `-upstream-name`、`-upstream-url` 必填；`-upstream-key` 可空。
-- `-admin-password-stdin` 从标准输入读一行密码并计算 Argon2id 哈希；不接受明文密码命令行参数。
-- 生成 `session_secret` 与一个顶层 `gateway_keys` 条目（绑定到 `-upstream-name` 创建的上游）；本地 key 打印到标准输出，便于首次接入。
-- 配置文件已存在时拒绝执行，不提供覆盖开关。
-- 非回环 `listen` 且没有管理员密码时拒绝写入。
-- 写入内容与网页 setup 生成的结构一致。
+- 启动时若配置文件不存在，先写入带注释的模板并继续启动：
+  - `version: 1`
+  - `server.listen`、`server.database` 使用本次解析出的有效值
+  - `general.timezone` 使用 `time.Local.String()`（`time.LoadLocation` 可解析）
+  - `general.retention_days: 90`
+  - `auth.admin_password_hash`、`auth.session_secret` 为空；启动后 `ensureSessionSecret` 生成并写回 session secret
+  - `upstreams: []`、`gateway_keys: []`，注释说明可在 YAML 或 WebUI 添加第一个上游与本地 key
+- 文件已存在时不做任何修改；内容是否合法由加载阶段校验。
+- 模板通过既有原子写落盘，文件 `0600`，新建目录 `0700`。
+- 零上游时服务正常运行：面板可登录、读空配置，并可创建第一个上游/key；网关返回 `503 not_configured`。
+- 上游、key、价格、时区、保留天数可在 WebUI 保存；`listen` 与 `database` 修改后需重启。
+- 第一次保存会用常规序列化重写文件，模板注释不保证保留。
 
 ### 4.6 安全
 
@@ -316,7 +294,7 @@ gateway_keys:
 - 本地 key 的 `id` 不可变；`name`、`enabled`、`upstream_id` 可改，值通过轮换改变。
 - 请求记录保存 `upstream_id`、`upstream_name`、`key_id`、`key_name` 快照；改名、改绑或删除上游不改变历史显示。
 - 删除上游前必须先转移或删除绑定到它的所有本地 key；否则 `DELETE` 返回 `409 upstream_in_use`，UI 列出待处理的 key。
-- 删除允许；如果删到零个上游，UI 进入 setup 引导，网关返回 `503 setup_required`。
+- 删除允许；如果删到零个上游，UI 显示空状态，网关返回 `503 not_configured`。
 - 删除最后一个上游或最后一个 key 只做二次确认，不做额外阻止。
 
 ### 5.6 实时指标
@@ -336,7 +314,7 @@ gateway_keys:
 
 | 场景 | HTTP | code |
 | --- | --- | --- |
-| 未配置上游 | 503 | `setup_required` |
+| 未配置上游 | 503 | `not_configured` |
 | key 缺失/错误/禁用 | 401 | `invalid_api_key` |
 | 上游禁用/绑定缺失 | 503 | `upstream_disabled` |
 | 上游连接失败 | 502 | `upstream_error` |
@@ -532,7 +510,7 @@ CREATE TABLE traffic_minutes (
   - MiniMax
   - Ollama / LM Studio（0 费率）
 - 匹配顺序：provider host → 模型名精确匹配（大小写不敏感）→ 预设别名。不做模糊匹配，避免错误计价。
-- setup 与价格页显示“预设 2026-10-31”，只预填缺失模型，不覆盖用户已填费率。
+- 价格页显示“预设 2026-10-31”，只预填缺失模型，不覆盖用户已填费率。
 - 预设可能过期，UI 明确提示“请核对后保存”。
 
 ### 7.5 定价状态
@@ -574,16 +552,15 @@ CREATE TABLE traffic_minutes (
 
 - 错误码：`validation`、`unauthorized`、`forbidden`、`not_found`、`conflict`、`internal`、`upstream`。
 - 列表接口只返回掩码；reveal 接口返回明文且 `Cache-Control: no-store`。
-- setup 完成前（`upstreams` 为空），除 health、bootstrap、probe、setup 外的配置写接口返回 `409 setup_required`；读接口返回空配置即可。
+- `upstreams` 为空时配置写接口仍可用，以便添加第一个上游/key；网关请求返回 `503 not_configured`。
 
-### 8.2 bootstrap、setup、认证
+### 8.2 bootstrap 与认证
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | GET | `/api/health` | 公开健康检查，含 DB 写探针 |
 | GET | `/api/bootstrap` | 公开启动信息 |
 | GET | `/api/me` | 当前会话 |
-| POST | `/api/setup` | 仅回环 Host/RemoteAddr；首次写配置；已有管理员密码时要求会话 + `currentPassword` |
 | POST | `/api/auth/login` | 登录 |
 | POST | `/api/auth/logout` | 登出 |
 | POST | `/api/auth/password` | 设置/修改/清除管理密码 |
@@ -593,7 +570,6 @@ CREATE TABLE traffic_minutes (
 ```json
 {
   "version": "v0.1.0",
-  "needsSetup": false,
   "authRequired": false,
   "listen": "127.0.0.1:8100",
   "timezone": "Asia/Shanghai",
@@ -603,38 +579,9 @@ CREATE TABLE traffic_minutes (
 }
 ```
 
-- 不返回任何密钥。
-- `needsSetup = upstreams.length == 0`。
+- 不返回任何密钥，也不再有首次配置标志；零上游不是特殊启动状态。
 - 非回环且未设置管理密码时进程启动失败，不会出现 `authRequired=false` 的远程实例。
-
-`POST /api/setup`：
-
-```json
-{
-  "upstreamName": "DeepSeek",
-  "baseUrl": "https://api.deepseek.com",
-  "apiKey": "sk-...",
-  "timezone": "Asia/Shanghai",
-  "adminPassword": "",
-  "currentPassword": "",
-  "keyName": "默认",
-  "models": [
-    {"name":"deepseek-chat","input":1.0,"output":4.0,"cacheRead":0.02,"cacheWrite":0,"reasoning":4.0,"windows":[]}
-  ]
-}
-```
-
-响应：
-
-```json
-{"upstreamId":"deepseek","keyId":"default","gatewayKey":"sk-local-...","configPath":"/Users/me/.config/llmmeter/config.yaml"}
-```
-
-- 配置已有上游时返回 `409`。
-- 只接受回环 RemoteAddr，且请求 Host 必须是 `localhost`、`127.0.0.0/8` 或 `[::1]`；反代把 RemoteAddr 变成回环时仍不能绕过 Host 检查。
-- 首次配置（尚无 `admin_password_hash`）：`adminPassword` 为空且监听非回环时拒绝。
-- 已有 `admin_password_hash` 时：必须带有效管理会话；若提供 `adminPassword`，`currentPassword` 必须匹配现有哈希，否则返回 `403`。`adminPassword` 为空时保留现有哈希，不清除认证。
-- `models` 可省略；存在时按 8.5 的价格校验规则验证，并与配置在同一个原子写中落盘。
+- 不存在首次配置专用的写接口，其 `currentPassword` 规则一并删除；首次配置通过 4.5 的模板与常规配置写接口完成。
 
 `POST /api/auth/password`：
 
@@ -995,7 +942,7 @@ CREATE TABLE traffic_minutes (
 | `/settings/access` | 访问与安全 |
 | `/settings/data` | 数据与配置 |
 
-`/settings` 重定向到 `/settings/upstreams`。`/setup`、`/login` 独立全屏页面。
+`/settings` 重定向到 `/settings/upstreams`。`/login` 是独立全屏页面；没有首次配置路由。
 
 ### 9.2 全局过滤
 
@@ -1018,7 +965,7 @@ CREATE TABLE traffic_minutes (
 
 空状态：
 
-- 没有上游：引导去 `/setup` 或 `/settings/upstreams`。
+- 没有上游：提示去 `/settings/upstreams` 添加第一个上游；不跳转、不拦页面。
 - 有上游没请求：展示 OpenAI SDK / curl 接入片段与复制按钮。
 - 区间无数据：显示“该区间无请求”，保留过滤条。
 
@@ -1105,19 +1052,12 @@ CREATE TABLE traffic_minutes (
 - 备份说明：停止进程后复制配置与 DB；不停机时用 `sqlite3 ... ".backup ..."`。
 - 无导出、清理、删除按钮。
 
-### 9.7 首次配置向导
+### 9.7 首次启动体验
 
-三步，全屏布局：
-
-1. **上游**：名称、baseURL、上游 key（可空）、时区；用 `POST /api/upstreams/probe` 测试连接；识别 provider 并提示预设。
-2. **本地 key**：自动生成 `sk-local-…`，默认名“默认”，展示完整值、复制按钮；说明“之后可在设置中再次查看”。
-3. **价格**：用同一份草稿 baseURL/key 拉取上游模型；展示可匹配的预设；只预填缺失模型；可跳过。选择结果作为 `models` 随 setup 提交。
-
-完成后：
-
-- 写入配置，进入总览。
-- 展示 OpenAI SDK、curl、codex 接入片段。
-- 如果上游测试失败，允许继续保存，但在总览显示配置警告。
+- 没有独立首次配置向导，也没有对应路由。
+- 首次启动生成 YAML 模板后直接进入总览；没有上游时各页面正常渲染空状态，不重定向。
+- 在 `/settings/upstreams` 添加第一个上游与本地 key；`/settings/pricing` 可用内嵌预设预填缺失模型。
+- 保存后展示 OpenAI SDK、curl、codex 接入片段；上游测试失败时仍可保存，并在总览显示配置警告。
 
 ### 9.8 视觉与交互规范
 
@@ -1162,10 +1102,10 @@ CREATE TABLE traffic_minutes (
 - Tag 触发 release workflow：goreleaser + Docker 多架构镜像。
 - 不运行端到端浏览器测试；产品级验收由维护者执行。
 
-### 10.4 Docker 与无头初始化
+### 10.4 Docker 与无头部署
 
 - 容器内默认监听 `0.0.0.0:8100` 时，必须提供管理密码，否则启动失败。
-- 网页 setup 只接受回环请求，端口映射后不可用；使用 `llmmeter init` 预生成配置，或挂载手写 YAML。
+- 没有独立写配置命令：挂载配置目录，首次启动会写入带注释的模板；在宿主编辑 `config/config.yaml`，填写 `auth.admin_password_hash`、`upstreams` 与 `gateway_keys`（或先在回环环境通过 WebUI 配置后复制文件）。
 - 示例 `docker-compose.yml`：
 
   ```yaml
@@ -1187,14 +1127,9 @@ CREATE TABLE traffic_minutes (
 - 首次使用：
 
   ```bash
-  echo "$ADMIN_PASSWORD" | llmmeter init \
-    -config ./config/config.yaml \
-    -database /data/llmmeter.db \
-    -listen 0.0.0.0:8100 \
-    -upstream-name DeepSeek \
-    -upstream-url https://api.deepseek.com \
-    -upstream-key "$DEEPSEEK_API_KEY" \
-    -admin-password-stdin
+  docker compose run --rm llmmeter   # 生成 config/config.yaml 模板；非回环缺密码时会退出
+  $EDITOR ./config/config.yaml       # 填写 admin_password_hash、upstreams 与 gateway_keys
+  docker compose up -d
   ```
 
 ### 10.5 安全与隐私
@@ -1218,7 +1153,7 @@ Go：
 - `internal/metrics`：全局与按上游快照、byModel 带 upstream、per-upstream spark、in-flight 过滤。
 - `internal/pricing`：窗口匹配、跨午夜、列表顺序、继承、成本公式、负数归零。
 - `internal/pricecatalog`：provider host 匹配、模型精确匹配、未匹配不预填、预设快照日期。
-- `internal/api`：setup 回环限制与 409、上游 CRUD、有绑定 key 时删除上游 409、key 创建/改绑/轮换/reveal/掩码、pricing PUT 校验与原子性、catalog 缓存、config reload、CSRF、密码变更。
+- `internal/api`：零上游时配置写接口可用、上游 CRUD、有绑定 key 时删除上游 409、key 创建/改绑/轮换/reveal/掩码、pricing PUT 校验与原子性、catalog 缓存、config reload、CSRF、密码变更。
 
 前端：
 
@@ -1247,10 +1182,10 @@ Go：
 
 | 阶段 | 内容 | 完成标准 |
 | --- | --- | --- |
-| M1 配置层 | `internal/config`、YAML schema、路径与权限、原子写、SIGHUP、`llmmeter init`、setup 写配置；删除 DB 配置表；schema v2 | 配置单测通过；`make build`；无配置可启动到 setup |
+| M1 配置层 | `internal/config`、YAML schema、路径与权限、原子写、SIGHUP、首次启动模板；删除 DB 配置表；schema v2 | 配置单测通过；`make build`；无配置启动自动生成模板 |
 | M2 多上游核心 | 上游/顶层本地 key 配置模型、哈希索引、路由、改绑、请求快照字段、分钟聚合上游维度、metrics 按上游、upstream/key API | 路由与存储单测通过；多 key 绑定与运行时改绑行为正确 |
 | M3 计费 | 按上游价格表、价格预设、catalog、pricing API | 计费与预设单测通过；同名模型跨上游不串价 |
-| M4 UI | 全局上游筛选、四页改版、设置四个子页、setup 向导、key 管理、浅色主题与空状态 | 前端单测通过；`make build`；窄屏不溢出 |
+| M4 UI | 全局上游筛选、四页改版、设置四个子页、key 管理、浅色主题与空状态 | 前端单测通过；`make build`；窄屏不溢出 |
 | M5 开源化 | README 双语、截图、LICENSE、CI、goreleaser、Docker、Homebrew、文档 | CI 通过；release 构建通过；Docker 示例可启动 |
 
 每个阶段单独出实现计划；不跨阶段混合未完成的半成品。
@@ -1263,11 +1198,11 @@ Go：
 | UI 重写 YAML 丢失注释 | 接受；固定头注释，文档说明手工编辑在保存后可能被规范化 |
 | 外部编辑与 UI 保存冲突 | v1 最后写入者生效，不实现文件锁；文档要求单实例 |
 | 不迁移旧数据 | 默认路径已变化；旧库/schema 不符时启动失败并明确提示；不写迁移代码 |
-| Docker 下 setup 不可用 | 提供 `llmmeter init`，文档给出 compose 示例 |
+| Docker 下无法从回环浏览器配置 | 挂载并编辑 YAML，提供 `admin_password_hash`；文档给出 compose 示例 |
 | 预设价格过期 | 显示快照日期，只预填不覆盖，用户确认后保存 |
 | 多上游系列过多 | 图表 Top N + 其他，图例可滚动；分钟聚合带 upstream 维度 |
 | 实时指标内存增长 | 上游数量为个人级；环形缓冲按上游维护，删除上游后自然过期 |
-| 按上游价格重复配置 | UI 支持复制价格列表到其他上游；首次 setup 用预设降低摩擦 |
+| 按上游价格重复配置 | UI 支持复制价格列表到其他上游；首次配置用预设降低摩擦 |
 | 改绑 key 误切上游 | 下拉框选择后立即保存并 toast；失败回滚；在途请求保持旧上游；历史记录保留旧上游快照 |
 | 删除上游时 key 悬空 | 服务端强制 `409 upstream_in_use`；UI 先要求转移或删除绑定 key |
 | 功能范围回弹 | 预算、告警、CSV 导出、多用户、模型路由均列为非目标，需新设计文档才能加入 |
@@ -1277,7 +1212,7 @@ Go：
 ### A. 完整 YAML 示例
 
 ```yaml
-# llmmeter configuration. Generated by setup; safe to edit while stopped.
+# llmmeter configuration. Created on first start; safe to edit while stopped.
 version: 1
 
 server:

@@ -7,7 +7,6 @@ it("builds login redirects and ignores auth pages", () => {
   );
   expect(loginPathFor("/", "")).toBe("/login?next=%2F");
   expect(loginPathFor("/login", "?next=%2F")).toBeNull();
-  expect(loginPathFor("/setup", "")).toBeNull();
 });
 
 it("clears the cached authentication flag before redirecting", () => {
@@ -30,6 +29,5 @@ it("keeps next on internal paths", () => {
   expect(safeNext("https://evil.com")).toBe("/");
   expect(safeNext("/\\evil.com")).toBe("/");
   expect(safeNext("/login?next=%2F")).toBe("/");
-  expect(safeNext("/setup")).toBe("/");
   expect(safeNext(null)).toBe("/");
 });

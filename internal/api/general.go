@@ -38,14 +38,10 @@ type generalPatchRequest struct {
 	RetentionDays *int    `json:"retentionDays"`
 }
 
-// patchGeneral validates and writes the reporting settings. Like every other
-// configuration write it is refused before first-run setup.
+// patchGeneral validates and writes the reporting settings.
 func (s *Server) patchGeneral(w http.ResponseWriter, r *http.Request) {
 	if s.configStore == nil {
 		writeInternal(w, errors.New("api: configuration store not configured"))
-		return
-	}
-	if !s.requireConfigSetup(w) {
 		return
 	}
 	var in generalPatchRequest

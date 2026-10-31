@@ -10,13 +10,12 @@ const maxBodyBytes = 1 << 20
 
 // Error codes of the API error envelope (spec §6).
 const (
-	codeValidation    = "validation"
-	codeUnauthorized  = "unauthorized"
-	codeForbidden     = "forbidden"
-	codeNotFound      = "not_found"
-	codeConflict      = "conflict"
-	codeSetupRequired = "setup_required"
-	codeInternal      = "internal"
+	codeValidation   = "validation"
+	codeUnauthorized = "unauthorized"
+	codeForbidden    = "forbidden"
+	codeNotFound     = "not_found"
+	codeConflict     = "conflict"
+	codeInternal     = "internal"
 )
 
 // decodeJSON decodes the request body into v, answering 400 on malformed

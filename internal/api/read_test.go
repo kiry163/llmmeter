@@ -170,14 +170,6 @@ func doDELETE(t *testing.T, srv *httptest.Server, path string) *httptest.Respons
 	return do(t, srv, http.MethodDelete, path, "")
 }
 
-func TestBootstrapAndSetupState(t *testing.T) {
-	env := newConfigEnv(t, "127.0.0.1:8100") // setup not completed
-	rec := doGET(t, env.srv, "/api/bootstrap")
-	if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"needsSetup":true`) {
-		t.Fatalf("bootstrap = %d %s", rec.Code, rec.Body.String())
-	}
-}
-
 func TestOverviewAndRequests(t *testing.T) {
 	env := newReadEnv(t)
 	rec := doGET(t, env.srv, "/api/overview?from=2026-10-29&to=2026-10-29")
@@ -214,7 +206,6 @@ func TestBootstrapShape(t *testing.T) {
 	}
 	var body struct {
 		Version      string `json:"version"`
-		NeedsSetup   bool   `json:"needsSetup"`
 		AuthRequired bool   `json:"authRequired"`
 		Listen       string `json:"listen"`
 		Timezone     string `json:"timezone"`
@@ -223,7 +214,7 @@ func TestBootstrapShape(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 		t.Fatal(err)
 	}
-	if body.Version != "test" || body.NeedsSetup || body.AuthRequired ||
+	if body.Version != "test" || body.AuthRequired ||
 		body.Listen != "127.0.0.1:8100" || body.Timezone != "UTC" ||
 		body.EarliestDay != "2026-10-29" {
 		t.Fatalf("bootstrap = %+v", body)

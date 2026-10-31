@@ -653,7 +653,7 @@ func TestGatewayNoKeysIs401InvalidAPIKey(t *testing.T) {
 	}
 }
 
-func TestGatewayNoUpstreamsIs503SetupRequired(t *testing.T) {
+func TestGatewayNoUpstreamsIs503NotConfigured(t *testing.T) {
 	g, _, _, _ := newTestGatewayWith(t, nil, nil)
 	req := httptest.NewRequest("GET", "/v1/models", nil)
 	rec := httptest.NewRecorder()
@@ -662,7 +662,7 @@ func TestGatewayNoUpstreamsIs503SetupRequired(t *testing.T) {
 		t.Fatalf("status %d body %s", rec.Code, rec.Body.String())
 	}
 	body := decodeGatewayError(t, rec)
-	if body.Error.Code != "setup_required" || body.Error.Message == "" || body.Error.Type == "" {
+	if body.Error.Code != "not_configured" || body.Error.Message != "no upstream configured" || body.Error.Type == "" {
 		t.Fatalf("error = %+v", body.Error)
 	}
 }

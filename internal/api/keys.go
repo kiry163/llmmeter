@@ -139,9 +139,6 @@ func (s *Server) listKeys(w http.ResponseWriter, r *http.Request) {
 // createKey answers POST /api/keys. The plaintext key is generated here and
 // returned exactly once.
 func (s *Server) createKey(w http.ResponseWriter, r *http.Request) {
-	if !s.requireConfigSetup(w) {
-		return
-	}
 	var in keyCreateRequest
 	if !decodeJSON(w, r, &in) {
 		return
@@ -203,9 +200,6 @@ func (s *Server) createKey(w http.ResponseWriter, r *http.Request) {
 // to another upstream. Rebinding takes effect with the next request because the
 // store publishes a fresh snapshot before answering.
 func (s *Server) patchKey(w http.ResponseWriter, r *http.Request) {
-	if !s.requireConfigSetup(w) {
-		return
-	}
 	id := r.PathValue("keyId")
 	var in keyPatchRequest
 	if !decodeJSON(w, r, &in) {
@@ -269,9 +263,6 @@ func (s *Server) patchKey(w http.ResponseWriter, r *http.Request) {
 
 // deleteKey answers DELETE /api/keys/{keyId}.
 func (s *Server) deleteKey(w http.ResponseWriter, r *http.Request) {
-	if !s.requireConfigSetup(w) {
-		return
-	}
 	id := r.PathValue("keyId")
 	err := s.configStore.Update(func(c *config.Config) error {
 		idx := keyIndex(c, id)
@@ -295,9 +286,6 @@ func (s *Server) deleteKey(w http.ResponseWriter, r *http.Request) {
 // rotateKey answers POST /api/keys/{keyId}/rotate. The new plaintext key is
 // returned once and the old value stops working immediately.
 func (s *Server) rotateKey(w http.ResponseWriter, r *http.Request) {
-	if !s.requireConfigSetup(w) {
-		return
-	}
 	id := r.PathValue("keyId")
 	var newKey string
 	err := s.configStore.Update(func(c *config.Config) error {

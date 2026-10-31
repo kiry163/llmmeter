@@ -31,7 +31,6 @@ import { Analysis } from "./pages/Analysis";
 import { Logs } from "./pages/Logs";
 import { Login } from "./pages/Login";
 import { Overview } from "./pages/Overview";
-import { Setup } from "./pages/Setup";
 import { Data } from "./pages/settings/Data";
 import { Gateway } from "./pages/settings/Gateway";
 import { Pricing } from "./pages/settings/Pricing";
@@ -139,13 +138,12 @@ function LocalOnlyGate() {
 }
 
 /**
- * AppGuard enforces the first-run setup and the login requirement before any
- * application route renders.
+ * AppGuard enforces the login requirement before any application route
+ * renders.
  */
 function AppGuard() {
   const location = useLocation();
   const bootstrap = useQuery({ queryKey: ["bootstrap"], queryFn: api.bootstrap });
-  const isSetup = location.pathname === "/setup";
   const isLogin = location.pathname === "/login";
 
   if (bootstrap.isPending) {
@@ -159,10 +157,6 @@ function AppGuard() {
     return <LoadFailure error={bootstrap.error} onRetry={() => void bootstrap.refetch()} />;
   }
 
-  if (bootstrap.data.needsSetup) {
-    return isSetup ? <Outlet /> : <Navigate to="/setup" replace />;
-  }
-  if (isSetup) return <Navigate to="/" replace />;
   if (!bootstrap.data.authRequired) {
     return isLogin ? <Navigate to="/" replace /> : <LocalOnlyGate />;
   }
@@ -208,7 +202,6 @@ export function App() {
           <UnauthorizedRedirect />
           <Routes>
             <Route element={<AppGuard />}>
-              <Route path="setup" element={<Setup />} />
               <Route path="login" element={<Login />} />
               <Route element={<Layout />}>
                 <Route index element={<Overview />} />

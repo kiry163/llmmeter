@@ -11,10 +11,9 @@ import (
 )
 
 // bootstrapResponse is the unauthenticated first-load payload. It carries no
-// secrets: only the state needed to pick between setup, login and the app.
+// secrets: only the state needed to pick between login and the app.
 type bootstrapResponse struct {
 	Version      string `json:"version"`
-	NeedsSetup   bool   `json:"needsSetup"`
 	AuthRequired bool   `json:"authRequired"`
 	Listen       string `json:"listen"`
 	Timezone     string `json:"timezone"`
@@ -27,7 +26,6 @@ func (s *Server) bootstrap(w http.ResponseWriter, _ *http.Request) {
 	snap := s.configSnapshot()
 	writeJSON(w, http.StatusOK, bootstrapResponse{
 		Version:      s.version,
-		NeedsSetup:   snap == nil || len(snap.Config.Upstreams) == 0,
 		AuthRequired: snap != nil && snap.Config.Auth.AdminPasswordHash != "",
 		Listen:       s.effectiveListen(),
 		Timezone:     s.configLocation().String(),
@@ -138,18 +136,6 @@ func (s *Server) earliestDay() string {
 		return ""
 	}
 	return day
-}
-
-// requireConfigSetup answers 409 while the configuration has no upstream,
-// i.e. first-run setup is incomplete. Configuration writes before setup are
-// refused so half-configured instances cannot be exposed.
-func (s *Server) requireConfigSetup(w http.ResponseWriter) bool {
-	snap := s.configSnapshot()
-	if snap == nil || len(snap.Config.Upstreams) == 0 {
-		writeAPIError(w, http.StatusConflict, codeSetupRequired, "setup required")
-		return false
-	}
-	return true
 }
 
 // fileBytes returns the size of a regular file, or 0 when it is missing or not

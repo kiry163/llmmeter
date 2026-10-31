@@ -1,16 +1,19 @@
 package api_test
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"os"
 	"strings"
 	"testing"
 
+	"github.com/kiry163/llmmeter/internal/config"
+	"github.com/kiry163/llmmeter/internal/secure"
 	"github.com/kiry163/llmmeter/internal/store"
 )
 
-func TestBootstrapNeedsSetupReflectsConfig(t *testing.T) {
+func TestBootstrapReflectsConfig(t *testing.T) {
 	env := newConfigEnv(t, "127.0.0.1:8100")
 	rec := doGET(t, env.srv, "/api/bootstrap")
 	if rec.Code != http.StatusOK {
@@ -18,7 +21,6 @@ func TestBootstrapNeedsSetupReflectsConfig(t *testing.T) {
 	}
 	var body struct {
 		Version      string `json:"version"`
-		NeedsSetup   bool   `json:"needsSetup"`
 		AuthRequired bool   `json:"authRequired"`
 		Listen       string `json:"listen"`
 		Timezone     string `json:"timezone"`
@@ -29,7 +31,7 @@ func TestBootstrapNeedsSetupReflectsConfig(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 		t.Fatal(err)
 	}
-	if !body.NeedsSetup || body.AuthRequired {
+	if body.AuthRequired {
 		t.Fatalf("bootstrap = %+v", body)
 	}
 	if body.Version != "test" || body.Listen != "127.0.0.1:8100" || body.Timezone != "UTC" {
@@ -38,39 +40,44 @@ func TestBootstrapNeedsSetupReflectsConfig(t *testing.T) {
 	if body.ConfigPath != env.configPath || body.DBPath != env.dbPath || body.EarliestDay != "" {
 		t.Fatalf("bootstrap paths = %+v", body)
 	}
-
-	addTestUpstream(t, env.config, "up")
-	rec = doGET(t, env.srv, "/api/bootstrap")
-	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
-		t.Fatal(err)
-	}
-	if body.NeedsSetup {
-		t.Fatalf("needsSetup after upstream = %s", rec.Body.String())
-	}
 }
 
-func TestBootstrapHidesSecretsAfterSetup(t *testing.T) {
+func TestBootstrapHidesSecrets(t *testing.T) {
 	env := newConfigEnv(t, "127.0.0.1:8100")
-	rec := doPOST(t, env.srv, "/api/setup", `{
-		"upstreamName":"DeepSeek","baseUrl":"https://api.deepseek.com",
-		"apiKey":"sk-upstream-secret","timezone":"Asia/Shanghai","adminPassword":"hunter22"
-	}`)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("setup = %d %s", rec.Code, rec.Body.String())
+	hash, err := secure.HashPassword("hunter22")
+	if err != nil {
+		t.Fatal(err)
 	}
-	rec = doGET(t, env.srv, "/api/bootstrap")
+	raw, err := secure.RandomSecret()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := env.config.Update(func(c *config.Config) error {
+		c.General.Timezone = "Asia/Shanghai"
+		c.Auth.AdminPasswordHash = hash
+		c.Auth.SessionSecret = base64.StdEncoding.EncodeToString(raw)
+		c.Upstreams = []config.Upstream{{
+			ID: "up", Name: "up", BaseURL: "https://api.example.com", APIKey: "sk-upstream-secret",
+		}}
+		c.GatewayKeys = []config.GatewayKey{{
+			ID: "default", Name: "default", Key: "sk-local-secret-value", UpstreamID: "up",
+		}}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	rec := doGET(t, env.srv, "/api/bootstrap")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("bootstrap = %d %s", rec.Code, rec.Body.String())
 	}
 	var body struct {
-		NeedsSetup   bool   `json:"needsSetup"`
 		AuthRequired bool   `json:"authRequired"`
 		Timezone     string `json:"timezone"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 		t.Fatal(err)
 	}
-	if body.NeedsSetup || !body.AuthRequired || body.Timezone != "Asia/Shanghai" {
+	if !body.AuthRequired || body.Timezone != "Asia/Shanghai" {
 		t.Fatalf("bootstrap = %+v", body)
 	}
 	for _, secret := range []string{"sk-local-", "sk-upstream-secret", "session_secret", "admin_password"} {
@@ -80,14 +87,13 @@ func TestBootstrapHidesSecretsAfterSetup(t *testing.T) {
 	}
 }
 
-func TestGeneralPatchRequiresSetupAndPersists(t *testing.T) {
+func TestGeneralPatchPersistsWithoutUpstreams(t *testing.T) {
 	env := newConfigEnv(t, "127.0.0.1:8100")
 	rec := doPATCH(t, env.srv, "/api/general", `{"timezone":"Asia/Tokyo"}`)
-	if rec.Code != http.StatusConflict {
-		t.Fatalf("pre-setup patch = %d %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("patch general without upstreams = %d %s", rec.Code, rec.Body.String())
 	}
 
-	addTestUpstream(t, env.config, "up")
 	rec = doGET(t, env.srv, "/api/general")
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"retentionDays":90`) {
 		t.Fatalf("get general = %d %s", rec.Code, rec.Body.String())

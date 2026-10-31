@@ -191,14 +191,6 @@ func TestPricingImportSkipsExisting(t *testing.T) {
 	}
 }
 
-func TestPricingWritesRequireSetup(t *testing.T) {
-	env := newConfigEnv(t, "127.0.0.1:8100")
-	rec := doPut(t, env.srv, "/api/upstreams/a/pricing", `{"models":[]}`)
-	assertAPIError(t, rec, http.StatusConflict, "setup_required")
-	rec = doPOST(t, env.srv, "/api/upstreams/a/pricing/import", `{"names":["m"]}`)
-	assertAPIError(t, rec, http.StatusConflict, "setup_required")
-}
-
 func TestPricingGetReturnsConfiguredModelsWithNullInheritance(t *testing.T) {
 	env := newConfigEnv(t, "127.0.0.1:8100")
 	inherit := 2.5

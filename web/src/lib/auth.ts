@@ -17,7 +17,7 @@ export function notifyUnauthorized(error: unknown): void {
  * 401 handler share one rule.
  */
 export function loginPathFor(pathname: string, search: string): string | null {
-  if (pathname === "/login" || pathname === "/setup") return null;
+  if (pathname === "/login") return null;
   return `/login?next=${encodeURIComponent(`${pathname}${search}`)}`;
 }
 
@@ -37,12 +37,7 @@ export function safeNext(raw: string | null): string {
   if (!raw) return "/";
   if (!raw.startsWith("/") || raw.startsWith("//") || raw.startsWith("/\\")) return "/";
   const path = raw.split(/[?#]/)[0];
-  if (
-    path === "/login" ||
-    path === "/setup" ||
-    path.startsWith("/login/") ||
-    path.startsWith("/setup/")
-  ) {
+  if (path === "/login" || path.startsWith("/login/")) {
     return "/";
   }
   return raw;

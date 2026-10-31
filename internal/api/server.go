@@ -108,9 +108,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/live/snapshot", require(s.liveSnapshot))
 	mux.Handle("GET /api/live/stream", require(s.liveStream))
 
-	// Configuration endpoints. Setup and the pre-setup upstream probe are
-	// limited to the local machine instead of requiring a session.
-	mux.Handle("POST /api/setup", s.auth.RequireLoopback(http.HandlerFunc(s.setup)))
+	// Configuration endpoints.
 	mux.Handle("GET /api/upstreams", require(s.listUpstreams))
 	mux.Handle("POST /api/upstreams", require(s.createUpstream))
 	mux.Handle("POST /api/upstreams/probe", require(s.probeUpstream))

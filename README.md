@@ -3,22 +3,21 @@
 本机运行的 OpenAI 兼容透传网关：除下文说明的流式 usage 注入外，所有请求原样转发到唯一的上游，逐条记录 token、花费与上下行字节，并提供一个可查看统计、日志、分析与编辑配置的管理面板。为 omp、codex、OpenAI SDK 这类客户端设计，上游通常是 DeepSeek 等 OpenAI 兼容服务。
 
 - 单二进制内嵌前端与 SQLite，运行时不依赖 Node 或外部数据库。
-- 上游、价格、时区、保留与访问控制保存在 YAML 配置文件（schema v2，默认 `~/.config/llmmeter/config.yaml`）中，重启后以 YAML 为准；首次配置可通过 `/setup` 或 `llmmeter init` 写入。
+- 上游、价格、时区、保留与访问控制保存在 YAML 配置文件（schema v2，默认 `~/.config/llmmeter/config.yaml`）中，重启后以 YAML 为准；首次启动会自动生成带注释的配置模板，之后直接编辑 YAML 或在 WebUI 设置页修改。
 - 纯透传：除给缺少 `stream_options` 的流式 chat 请求注入 `include_usage` 外不改写任何请求，不做协议转换，不估算 token。
 
 ## 构建与运行
 
 ```bash
 make build          # npm ci + 前端构建 + go build -o llmmeter
-./llmmeter init -upstream-name deepseek -upstream-url https://api.deepseek.com -upstream-key sk-…
 ./llmmeter -config ~/.config/llmmeter/config.yaml
 ```
 
-- `init` 可选：交互式首次配置也可以启动后打开 `/setup`。
+- 首次启动时，若配置文件不存在，会在该路径生成带注释的 YAML 模板（0600，目录 0700），然后正常启动。模板默认没有上游和本地 key；在设置页添加第一个上游与 key，或直接编辑 YAML 后重启/重载（`SIGHUP` 或设置页的“重新加载配置”）。
 - `-config` 默认 `$XDG_CONFIG_HOME/llmmeter/config.yaml`（通常是 `~/.config/llmmeter/config.yaml`），文件格式为 YAML schema v2。
 - `-db` 默认取配置里的 `server.database`，未配置时为 `$XDG_CACHE_HOME/llmmeter/llmmeter.db`；`-listen` 的优先级是 `-listen` > `server.listen` > `127.0.0.1:8100`。
 - 首次构建前端需要 Node.js 与 npm；`make web` 只构建前端，`make test` 跑 Go 与前端测试。
-- 打开 <http://127.0.0.1:8100/>；未配置时会跳到 `/setup`。
+- 打开 <http://127.0.0.1:8100/>；没有上游时页面照常打开，设置页可添加第一个上游。
 
 ## 界面与路由
 
@@ -32,16 +31,16 @@ make build          # npm ci + 前端构建 + go build -o llmmeter
 | `/settings` | 设置 / 上游与访问：上游、鉴权、时区、保留天数、管理密码、gateway key 与运行信息。 |
 | `/settings/pricing` | 设置 / 价格：模型目录、费率与峰谷窗口。 |
 | `/settings/data` | 设置 / 数据：数据库路径与体积（含 WAL）、版本、保留天数、有效监听、服务端时区与写入队列。 |
-| `/setup`、`/login` | 首次配置与登录。 |
+| `/login` | 登录。 |
 
 旧路由 `/requests` 重定向到 `/logs`，`/pricing` 重定向到 `/settings/pricing`（保留查询参数）。主题默认跟随系统，可在侧栏或登录页切换并记忆；窄屏下侧栏变为顶部横向导航，日志/价格表改为卡片列表，页面不横向溢出。
 
 ## 首次配置
 
-1. 本机打开 `/setup`，填写上游 `baseUrl`（如 `https://api.deepseek.com`）、上游 API key、时区，可选设置管理密码。
+1. 直接运行 `llmmeter`。若配置文件不存在，程序会生成带注释的模板并启动，默认监听 `127.0.0.1:8100`。
+2. 在设置页添加第一个上游：填写 `baseUrl`（如 `https://api.deepseek.com`）与上游 API key，然后创建或轮换本地 gateway key（`sk-local-…`）。也可以直接编辑 YAML 里的 `upstreams` / `gateway_keys` 后重载。
    **不要带 `/v1`**：客户端请求路径会原样拼在其后，填 `https://api.deepseek.com/v1` 会变成 `/v1/v1/chat/completions`。
-2. 提交后生成 gateway key（`sk-local-…`）。**明文只显示这一次**，请立刻保存；之后可在设置页轮换。
-3. Setup 只接受来自本机的请求；要开放给其他机器，先在本机设置管理密码，再用非回环地址启动（见“认证与远程访问”）。
+3. 要开放给其他机器，先在本机设置管理密码，再用非回环地址启动（见“认证与远程访问”）。没有上游时网关返回 `503 not_configured`，面板配置读写始终可用。
 
 ## 客户端接入
 
@@ -126,7 +125,6 @@ wire_api = "chat"
 - 面板 API 默认只信任回环请求；`-listen` 为非回环地址时，若尚未设置管理密码，启动会直接失败（避免把无鉴权的面板暴露到网络）。
 - 要远程访问：先以 `127.0.0.1:8100` 启动并在面板设置管理密码，再改为 `-listen 0.0.0.0:8100` 重启。
 - 管理会话使用 HttpOnly、SameSite=Strict 的签名 Cookie，有效期 12 小时；修改密码会使旧会话立即失效。
-- 已设置管理密码后，`POST /api/setup` 仍只接受回环 Host，并要求有效管理会话；替换密码还需 `currentPassword` 校验当前密码。
 - 所有非 GET 的 `/api` 写操作要求 `X-Requested-With: llmmeter` 或同 Host 的 `Origin`（CSRF 防护）。
 - 网关请求始终要求 `Authorization: Bearer <gateway key>`；轮换后旧 key 立即失效。
 - 二进制不内置 TLS。对外暴露时建议放在 Caddy/Nginx 后面终止 TLS，并让 llmmeter 继续监听 `127.0.0.1`。反代需关闭 SSE 缓冲（如 `proxy_buffering off`）以保证实时面板正常。
@@ -137,7 +135,7 @@ wire_api = "chat"
 
 | 方法与路径 | 说明 |
 | --- | --- |
-| `GET /api/bootstrap` | 返回 `{version, needsSetup, authRequired, listen, timezone, earliestDay}`；`earliestDay` 为永久聚合中最早有流量的本地日期，用于总览“全部”范围，无流量时为空。 |
+| `GET /api/bootstrap` | 返回 `{version, authRequired, listen, timezone, configPath, dbPath, earliestDay}`；`earliestDay` 为永久聚合中最早有流量的本地日期，用于总览“全部”范围，无流量时为空。 |
 | `GET /api/series?…&interval=auto\|minute\|hour\|day` | 返回非空桶；`auto` 与分析页一致（≤2 天分钟、≤7 天小时、更久天），显式间隔超出上限返回 400；每个点含 `promptTokens`、`completionTokens`、`cacheReadTokens`、`costNanoUsd`、上下行字节。前端负责补齐空桶。 |
 | `GET /api/model-catalog` | 返回 `{fetchedAt, upstream, observed, upstreamError}`：上游可见模型、日志已观测模型与上次拉取时间。`?refresh=1` 跳过缓存强制刷新。上游失败时 HTTP 仍为 200，`upstream` 为空、`fetchedAt` 为 null，`upstreamError` 为脱敏原因（不含 API key）。 |
 | `GET /api/analysis?from=YYYY-MM-DD&to=YYYY-MM-DD&interval=auto` | 一次返回 `range`（含 `interval`、`partial`）、`trend`、`models`、`paths`、`topRequests`、`health`、`cache`。`interval` 可为 `auto`、`minute`、`hour`、`day`；显式间隔超出上限返回 400。 |

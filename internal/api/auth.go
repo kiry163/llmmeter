@@ -49,9 +49,8 @@ const (
 )
 
 // errNoSessionSecret reports that the configuration carries no usable session
-// signing secret, so a session cannot be issued. Startup fills one in when an
-// existing configuration lacks it; setup mode generates one when setup is
-// submitted.
+// signing secret, so a session cannot be issued. Startup generates and
+// persists one when the configuration lacks it.
 var errNoSessionSecret = errors.New("api: session secret not configured")
 
 // Auth enforces the password session policy, loopback-only endpoints and

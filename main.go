@@ -1,14 +1,11 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"encoding/base64"
 	"errors"
 	"flag"
 	"fmt"
-	"io"
-	"io/fs"
 	"log"
 	"net"
 	"net/http"
@@ -48,8 +45,6 @@ func run(args []string) error {
 		case "version":
 			fmt.Println(version)
 			return nil
-		case "init":
-			return runInit(args[1:], os.Stdin, os.Stdout)
 		case "serve":
 			args = args[1:]
 		}
@@ -74,14 +69,19 @@ func runServe(args []string) error {
 	if err != nil {
 		return err
 	}
+	created, err := config.EnsureFile(paths.Config, paths)
+	if err != nil {
+		return err
+	}
+	if created {
+		log.Printf("created configuration template at %s; add upstreams and gateway keys there or in the WebUI", paths.Config)
+	}
 	cfgStore, err := config.OpenStore(paths.Config, config.WithEffectiveDatabase(paths.Database))
 	if err != nil {
 		return err
 	}
-	// An existing configuration without a session secret would accept logins
-	// and then fail to issue sessions. Generate one and persist it. Setup mode
-	// (no configuration file) is left untouched: setup generates the secret
-	// with the rest of the configuration.
+	// A configuration without a session secret would accept logins and then
+	// fail to issue sessions. Generate one and persist it.
 	if err := ensureSessionSecret(cfgStore); err != nil {
 		log.Printf("warning: could not persist a session secret; logins stay unavailable until one is configured: %v", err)
 	}
@@ -132,12 +132,12 @@ func runServe(args []string) error {
 	errc := make(chan error, 1)
 	go func() { errc <- httpSrv.ListenAndServe() }()
 
-	setup := "setup required"
+	state := "not configured: add an upstream in the WebUI or config file"
 	if len(snap.Config.Upstreams) > 0 {
-		setup = "configured"
+		state = "configured"
 	}
 	fmt.Printf("llmmeter %s listening on http://%s (config %s, database %s, %s)\n",
-		version, paths.Listen, paths.Config, paths.Database, setup)
+		version, paths.Listen, paths.Config, paths.Database, state)
 
 	sigCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -164,167 +164,9 @@ func runServe(args []string) error {
 	return errors.Join(shutdownErr, st.Close())
 }
 
-// runInit writes a fresh configuration file without starting the server or
-// creating the database. It refuses to overwrite an existing file and prints
-// the generated gateway key to stdout.
-func runInit(args []string, stdin io.Reader, stdout io.Writer) error {
-	fs := flag.NewFlagSet("llmmeter init", flag.ContinueOnError)
-	configFlag := fs.String("config", "", "configuration file path (default: $XDG_CONFIG_HOME/llmmeter/config.yaml)")
-	listen := fs.String("listen", "", "HTTP listen address (default: 127.0.0.1:8100)")
-	database := fs.String("database", "", "SQLite database path (default: $XDG_CACHE_HOME/llmmeter/llmmeter.db)")
-	timezone := fs.String("timezone", "", "IANA timezone name (default: UTC)")
-	upstreamName := fs.String("upstream-name", "", "upstream display name (required)")
-	upstreamURL := fs.String("upstream-url", "", "upstream base URL (required)")
-	upstreamKey := fs.String("upstream-key", "", "upstream API key (optional)")
-	keyName := fs.String("key-name", "", "local gateway key name (default: default)")
-	passwordStdin := fs.Bool("admin-password-stdin", false, "read the admin password from stdin")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	if fs.NArg() > 0 {
-		return fmt.Errorf("unexpected argument %q (usage: llmmeter init [flags])", fs.Arg(0))
-	}
-
-	name := strings.TrimSpace(*upstreamName)
-	if name == "" {
-		return errors.New("init: -upstream-name is required")
-	}
-	baseURL := strings.TrimSpace(*upstreamURL)
-	if baseURL == "" {
-		return errors.New("init: -upstream-url is required")
-	}
-
-	paths, err := config.ResolvePaths(*configFlag, *database, *listen)
-	if err != nil {
-		return err
-	}
-
-	passwordHash := ""
-	if *passwordStdin {
-		password, err := readPassword(stdin)
-		if err != nil {
-			return err
-		}
-		if password == "" {
-			return errors.New("init: -admin-password-stdin was set but stdin carried no password")
-		}
-		passwordHash, err = secure.HashPassword(password)
-		if err != nil {
-			return err
-		}
-	}
-
-	secret, err := secure.RandomSecret()
-	if err != nil {
-		return err
-	}
-	gatewayKey := secure.NewGatewayKey()
-
-	keyLabel := strings.TrimSpace(*keyName)
-	if keyLabel == "" {
-		keyLabel = "default"
-	}
-	upstreamID := slug(name, "upstream")
-	keyID := slug(keyLabel, "default")
-
-	cfg := config.Default()
-	cfg.Server.Listen = paths.Listen
-	cfg.Server.Database = paths.Database
-	cfg.General.Timezone = strings.TrimSpace(*timezone)
-	cfg.Auth.AdminPasswordHash = passwordHash
-	cfg.Auth.SessionSecret = base64.StdEncoding.EncodeToString(secret)
-	cfg.Upstreams = []config.Upstream{{
-		ID:      upstreamID,
-		Name:    name,
-		BaseURL: baseURL,
-		APIKey:  strings.TrimSpace(*upstreamKey),
-	}}
-	cfg.GatewayKeys = []config.GatewayKey{{
-		ID:         keyID,
-		Name:       keyLabel,
-		Key:        gatewayKey,
-		UpstreamID: upstreamID,
-	}}
-	if err := cfg.Validate(); err != nil {
-		return fmt.Errorf("init: %w", err)
-	}
-
-	if err := writeInitConfig(paths.Config, cfg); err != nil {
-		return err
-	}
-	fmt.Fprintf(stdout, "gateway key: %s\n", gatewayKey)
-	return nil
-}
-
-// writeInitConfig creates path exclusively and fills it with cfg. A file that
-// already exists is never overwritten. The configuration store performs the
-// atomic 0600 write; the exclusive create reserves the path first so two
-// concurrent init runs cannot both succeed.
-func writeInitConfig(path string, cfg *config.Config) error {
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if errors.Is(err, fs.ErrExist) {
-		return fmt.Errorf("init: configuration %s already exists; refusing to overwrite", path)
-	}
-	if err != nil {
-		return fmt.Errorf("init: create %s: %w", path, err)
-	}
-	if err := f.Close(); err != nil {
-		return fmt.Errorf("init: create %s: %w", path, err)
-	}
-
-	st, err := config.OpenStore(path)
-	if err == nil {
-		err = st.Update(func(c *config.Config) error {
-			*c = *cfg
-			return nil
-		})
-	}
-	if err != nil {
-		_ = os.Remove(path)
-		return err
-	}
-	return nil
-}
-
-// readPassword reads one line from r, dropping the trailing newline and a
-// Windows carriage return.
-func readPassword(r io.Reader) (string, error) {
-	line, err := bufio.NewReader(r).ReadString('\n')
-	if err != nil && !errors.Is(err, io.EOF) {
-		return "", fmt.Errorf("init: read admin password: %w", err)
-	}
-	return strings.TrimRight(line, "\r\n"), nil
-}
-
-// slug converts a display name into the identifier shape the configuration
-// requires: lowercase letters, digits and single dashes, at most 32 bytes.
-func slug(name, fallback string) string {
-	var b strings.Builder
-	lastDash := false
-	for _, r := range strings.ToLower(strings.TrimSpace(name)) {
-		if b.Len() >= 32 {
-			break
-		}
-		switch {
-		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
-			b.WriteRune(r)
-			lastDash = false
-		case !lastDash && b.Len() > 0:
-			b.WriteByte('-')
-			lastDash = true
-		}
-	}
-	out := strings.TrimRight(b.String(), "-")
-	if out == "" {
-		return fallback
-	}
-	return out
-}
-
-// ensureSessionSecret writes a generated session secret to an existing
-// configuration that lacks one. It does nothing in setup mode (no config file)
-// or when a secret is already present. The update re-checks the secret under
-// the store lock so a concurrent write is never overwritten.
+// ensureSessionSecret writes a generated session secret to a configuration
+// that lacks one. A present secret is kept. The update re-checks the secret
+// under the store lock so a concurrent write is never overwritten.
 func ensureSessionSecret(cfgStore *config.Store) error {
 	snap := cfgStore.Snapshot()
 	if snap == nil || snap.Config.Auth.SessionSecret != "" || !cfgStore.Writable() {
@@ -385,7 +227,7 @@ func validateStartup(listen string, snap *config.Snapshot) error {
 	if shown == "" {
 		shown = "all interfaces"
 	}
-	return fmt.Errorf("refusing to listen on %s without an admin password: other machines could reach the API; configure a password first (run on 127.0.0.1 and complete setup)", shown)
+	return fmt.Errorf("refusing to listen on %s without an admin password: other machines could reach the API; run on 127.0.0.1 first and set a password, or add auth.admin_password_hash to the config file", shown)
 }
 
 // isLoopbackHost reports whether host only reaches the local machine.

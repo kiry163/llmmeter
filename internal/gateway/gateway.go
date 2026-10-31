@@ -120,7 +120,7 @@ type proxyResult struct {
 func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	snap := g.cfg.Snapshot()
 	if snap == nil || len(snap.Upstreams) == 0 {
-		writeError(w, http.StatusServiceUnavailable, "setup_required")
+		writeError(w, http.StatusServiceUnavailable, "not_configured")
 		return
 	}
 	raw, ok := bearerToken(r.Header.Get("Authorization"))
@@ -481,8 +481,8 @@ func errorDetail(code string) (message, kind string) {
 	switch code {
 	case "invalid_api_key":
 		return "invalid gateway key", "invalid_request_error"
-	case "setup_required":
-		return "gateway is not configured", "server_error"
+	case "not_configured":
+		return "no upstream configured", "server_error"
 	case "upstream_disabled":
 		return "upstream is disabled", "server_error"
 	case "upstream_error":

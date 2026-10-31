@@ -89,9 +89,6 @@ func (s *Server) upstreamPricing(w http.ResponseWriter, r *http.Request) {
 // failure leaves the configuration untouched.
 func (s *Server) replaceUpstreamPricing(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	if !s.requireConfigSetup(w) {
-		return
-	}
 	if _, ok := s.upstreamFromPath(w, r); !ok {
 		return
 	}
@@ -127,9 +124,6 @@ func (s *Server) replaceUpstreamPricing(w http.ResponseWriter, r *http.Request) 
 // adds the named models at zero rates, skipping names that already exist.
 func (s *Server) importUpstreamPricing(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	if !s.requireConfigSetup(w) {
-		return
-	}
 	if _, ok := s.upstreamFromPath(w, r); !ok {
 		return
 	}

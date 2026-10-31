@@ -48,10 +48,10 @@ func WithEffectiveDatabase(db string) Option {
 	}
 }
 
-// OpenStore loads the configuration at path. A missing file is a legal
-// "setup mode" state: the defaults are used, Writable reports false and no
-// file is created until the first successful Update. An existing file that
-// fails to parse or validate makes OpenStore fail.
+// OpenStore loads the configuration at path. A missing file is legal: the
+// defaults are used, Writable reports false and no file is created until the
+// first successful Update. An existing file that fails to parse or validate
+// makes OpenStore fail.
 func OpenStore(path string, opts ...Option) (*Store, error) {
 	if strings.TrimSpace(path) == "" {
 		return nil, errors.New("config: store path must not be empty")
@@ -96,8 +96,8 @@ func (s *Store) Snapshot() *Snapshot {
 	return s.snap.Load()
 }
 
-// Writable reports whether the configuration has been persisted: false in
-// setup mode, true once the file exists or an Update has written it.
+// Writable reports whether the configuration has been persisted: false while
+// the file is missing, true once it exists or an Update has written it.
 func (s *Store) Writable() bool {
 	return s.writable.Load()
 }

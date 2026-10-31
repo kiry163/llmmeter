@@ -10,7 +10,7 @@ export interface AuthLayoutProps {
   children: ReactNode;
 }
 
-/** AuthLayout is the split-screen brand shell shared by login and setup. */
+/** AuthLayout is the split-screen brand shell for the login page. */
 export function AuthLayout({
   eyebrow,
   heading,

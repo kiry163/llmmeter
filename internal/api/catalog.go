@@ -85,7 +85,7 @@ func newCatalog(cs *config.Store, st *store.Store, now func() time.Time) *catalo
 	}
 }
 
-// invalidate drops every cached upstream listing. Setup, upstream and
+// invalidate drops every cached upstream listing. Upstream and
 // configuration-reload handlers call it after the configuration changes.
 func (c *catalog) invalidate() {
 	c.mu.Lock()
