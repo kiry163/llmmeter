@@ -5,7 +5,7 @@ Status: complete.
 ## Commits
 - `ae44f2b` feat: generate config on first start and remove setup flow
 - `72d2f5b` fix: embed generated session secret in first-start template
-- Fix-round commit for absolute DB paths, docs, and dead-code cleanup.
+- `933e983` fix: resolve database paths absolutely and clean up setup remnants
 
 ## What changed
 - `internal/config/template.go`: `EnsureFile(path, Paths)` writes an annotated
