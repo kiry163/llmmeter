@@ -577,7 +577,7 @@
   .summary-item b { font-size: 14px; font-weight: 600; color: var(--fg); letter-spacing: 0; text-transform: none; font-variant-numeric: tabular-nums; }
   .log-card { overflow: hidden; }
   .log-table-wrap { overflow-x: auto; }
-  .log-table { min-width: 860px; }
+  .log-table { min-width: 960px; }
   .log-table th { position: sticky; top: 0; z-index: 2; background: color-mix(in oklab, var(--panel-solid) 96%, transparent); backdrop-filter: blur(6px); }
   .log-table td { padding-top: 9px; padding-bottom: 9px; vertical-align: middle; }
   .log-table tbody tr { cursor: pointer; transition: background-color .13s ease; }
@@ -592,11 +592,6 @@
   .log-token small { display: block; color: var(--faint); font-size: 9.5px; }
   .log-lat { line-height: 1.4; }
   .log-lat small { display: block; color: var(--faint); font-size: 9.5px; }
-  .usage { display: inline-block; margin-left: 5px; font-size: 9px; padding: 1px 4px; border-radius: 3px; }
-  .usage.ok { color: var(--success); background: color-mix(in oklab, var(--success) 12%, transparent); }
-  .usage.warn { color: var(--warning); background: color-mix(in oklab, var(--warning) 13%, transparent); }
-  .usage.err { color: var(--danger); background: color-mix(in oklab, var(--danger) 12%, transparent); }
-  .usage.muted { color: var(--faint); background: var(--line); }
   .unpriced { color: var(--warning); font-size: 9.5px; }
   .log-cards { display: none; }
   .log-card-row { padding: 11px 14px; border-bottom: 1px solid var(--line); cursor: pointer; }
@@ -1212,3 +1207,5 @@
 .window-head .ghost-btn { margin-left: 0; padding: 2px 6px; }
 .window-head .ghost-btn:last-child { margin-left: 2px; }
 .time-range .ui-input { width: 84px; }
+.log-traffic { display: flex; flex-direction: column; gap: 1px; font-size: 9.5px; line-height: 1.35; color: var(--muted); white-space: nowrap; }
+.log-traffic.inline { flex-direction: row; gap: 6px; }

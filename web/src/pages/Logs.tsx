@@ -10,6 +10,7 @@ import { RequestDrawer } from "../components/RequestDrawer";
 import { Spinner } from "../components/ui";
 import { useTimezone } from "../hooks/useTimezone";
 import {
+  formatBytes,
   formatCost,
   formatDuration,
   formatOptionalDuration,
@@ -26,7 +27,7 @@ import {
 import { presetRange } from "../lib/range";
 import { tokensPerSecond } from "../lib/speed";
 import { RANGE_OPTIONS, modelColor, statusTone, type UiRange } from "../lib/ui";
-import { TOO_LARGE_HINT, usageLabel } from "../lib/usage";
+import { usageLabel } from "../lib/usage";
 
 const PAGE_SIZE = 12;
 
@@ -58,15 +59,6 @@ const DEFAULT_FILTERS: LogsFilters = {
   usageStatus: "",
   stream: "all",
   pricing: "all",
-};
-
-const USAGE_CLASS: Record<string, "ok" | "warn" | "err" | "muted"> = {
-  ok: "ok",
-  no_usage: "muted",
-  parse_failed: "warn",
-  too_large: "warn",
-  not_applicable: "muted",
-  error: "err",
 };
 
 function parseLogsFilters(params: URLSearchParams): LogsFilters {
@@ -117,26 +109,6 @@ function serializeLogsFilters(filters: LogsFilters): URLSearchParams {
 function timeLabel(iso: string, timeZone: string | undefined): string {
   // The prototype shows MM-DD HH:mm:ss; formatTime starts with the year.
   return formatTime(iso, timeZone).slice(5);
-}
-
-function UsageBadge({ status }: { status: string }): ReactElement {
-  return (
-    <span
-      className={`usage ${USAGE_CLASS[status] ?? "muted"}`}
-      title={status === "too_large" ? TOO_LARGE_HINT : undefined}
-    >
-      {usageLabel(status)}
-    </span>
-  );
-}
-
-function StatusBadges({ record }: { record: RequestRecord }): ReactElement {
-  return (
-    <>
-      <span className={`status ${statusTone(record.status)}`}>{record.status}</span>
-      <UsageBadge status={record.usageStatus} />
-    </>
-  );
 }
 
 function ModelLabel({ record }: { record: RequestRecord }): ReactElement {
@@ -199,6 +171,26 @@ function LatencyValue({ record }: { record: RequestRecord }): ReactElement {
   );
 }
 
+function TrafficValue({
+  record,
+  inline = false,
+}: {
+  record: RequestRecord;
+  inline?: boolean;
+}): ReactElement {
+  const up = record.reqBodyBytes + record.reqHeaderBytes;
+  const down = record.respBodyBytes + record.respHeaderBytes;
+  return (
+    <span
+      className={`log-traffic${inline ? " inline" : ""}`}
+      title={`上传 ${formatBytes(up)} · 下载 ${formatBytes(down)}`}
+    >
+      <span>↑ {formatBytes(up)}</span>
+      <span>↓ {formatBytes(down)}</span>
+    </span>
+  );
+}
+
 function speedOf(record: RequestRecord): number | null {
   return tokensPerSecond(
     record.completionTokens,
@@ -242,6 +234,9 @@ function LogRow({
       <td>
         <TokenValue record={record} />
       </td>
+      <td>
+        <TrafficValue record={record} />
+      </td>
       <td className="num">
         <CostValue record={record} />
       </td>
@@ -250,7 +245,7 @@ function LogRow({
       </td>
       <td className="num">{formatRate(speedOf(record))}</td>
       <td>
-        <StatusBadges record={record} />
+        <span className={`status ${statusTone(record.status)}`}>{record.status}</span>
       </td>
     </tr>
   );
@@ -286,14 +281,13 @@ function LogCard({
           <b>{formatTokens(record.completionTokens)}</b> tok
         </span>
         <span>缓存 ↓ {formatTokens(record.cacheReadTokens)}</span>
+        <TrafficValue record={record} inline />
         <span>
           首字 {formatOptionalDuration(record.ttftMs)} · 总{" "}
           {formatDuration(record.latencyMs)}
         </span>
         {speed !== null && <span>{formatRate(speed)}</span>}
-        <span>
-          <StatusBadges record={record} />
-        </span>
+        <span className={`status ${statusTone(record.status)}`}>{record.status}</span>
       </div>
     </div>
   );
@@ -622,6 +616,7 @@ export function Logs(): ReactElement {
                     <th>时间</th>
                     <th>模型</th>
                     <th>Token</th>
+                    <th>流量</th>
                     <th className="num">费用</th>
                     <th>耗时</th>
                     <th className="num">速度</th>
