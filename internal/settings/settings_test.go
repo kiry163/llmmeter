@@ -62,7 +62,7 @@ func TestSetupAndSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 	snap := repo.Snapshot()
-	if !snap.SetupDone || snap.GatewayKey != key || len(key) != len("sk-local-")+32 {
+	if !snap.SetupDone || snap.GatewayKey != key || !strings.HasPrefix(key, "sk-local-") {
 		t.Fatalf("bad snapshot %+v key=%q", snap, key)
 	}
 	if snap.Location.String() != "Asia/Shanghai" || snap.RetentionDays != 90 {

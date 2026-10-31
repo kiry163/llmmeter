@@ -6,7 +6,6 @@ import (
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/base64"
-	"encoding/hex"
 	"fmt"
 	"strconv"
 	"strings"
@@ -23,7 +22,7 @@ const (
 	argonKeyLen  uint32 = 32
 
 	gatewayKeyPrefix = "sk-local-"
-	gatewayKeyBytes  = 16
+	gatewayKeyBytes  = 32
 	secretBytes      = 32
 )
 
@@ -104,13 +103,14 @@ func decodePHC(encoded string) (argonParams, []byte, []byte, error) {
 	return p, salt, want, nil
 }
 
-// NewGatewayKey returns a fresh "sk-local-" key with 32 lowercase hex chars.
+// NewGatewayKey returns a fresh "sk-local-" key carrying 32 random bytes
+// encoded as unpadded base64url.
 func NewGatewayKey() string {
 	b := make([]byte, gatewayKeyBytes)
 	if _, err := rand.Read(b); err != nil {
 		panic("secure: crypto/rand unavailable: " + err.Error())
 	}
-	return gatewayKeyPrefix + hex.EncodeToString(b)
+	return gatewayKeyPrefix + base64.RawURLEncoding.EncodeToString(b)
 }
 
 // RandomSecret returns 32 cryptographically random bytes.

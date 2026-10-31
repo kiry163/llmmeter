@@ -1,6 +1,7 @@
 package secure_test
 
 import (
+	"encoding/base64"
 	"strings"
 	"testing"
 
@@ -36,11 +37,22 @@ func TestVerifyPasswordRejectsMalformed(t *testing.T) {
 
 func TestGatewayKeyShape(t *testing.T) {
 	k := secure.NewGatewayKey()
-	if !strings.HasPrefix(k, "sk-local-") || len(k) < 20 {
+	const wantLen = len("sk-local-") + 43 // 32 bytes of unpadded base64url
+	if !strings.HasPrefix(k, "sk-local-") {
 		t.Fatalf("key = %q", k)
 	}
-	if len(k) != len("sk-local-")+32 {
-		t.Fatalf("key length = %d, want %d", len(k), len("sk-local-")+32)
+	if len(k) != wantLen {
+		t.Fatalf("key length = %d, want %d", len(k), wantLen)
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(k, "sk-local-"))
+	if err != nil {
+		t.Fatalf("key suffix is not base64url: %v", err)
+	}
+	if len(raw) != 32 {
+		t.Fatalf("key entropy = %d bytes, want 32", len(raw))
+	}
+	if strings.ContainsAny(k, "+/=") {
+		t.Fatalf("key is not unpadded base64url: %q", k)
 	}
 }
 
