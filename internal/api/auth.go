@@ -49,7 +49,9 @@ const (
 )
 
 // errNoSessionSecret reports that the configuration carries no usable session
-// signing secret, so a session cannot be issued. Normal startup generates one.
+// signing secret, so a session cannot be issued. Startup fills one in when an
+// existing configuration lacks it; setup mode generates one when setup is
+// submitted.
 var errNoSessionSecret = errors.New("api: session secret not configured")
 
 // Auth enforces the password session policy, loopback-only endpoints and
@@ -333,7 +335,7 @@ func (a *Auth) Password(w http.ResponseWriter, r *http.Request) {
 }
 
 // Issue sets a fresh signed session cookie on the response. It fails when the
-// configuration carries no session secret; normal startup generates one.
+// configuration carries no usable session secret.
 func (a *Auth) Issue(w http.ResponseWriter) error {
 	return a.issueSession(w, a.snapshot())
 }

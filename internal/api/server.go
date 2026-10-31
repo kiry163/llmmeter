@@ -78,6 +78,16 @@ func New(cfg Config) *Server {
 	}
 }
 
+// InvalidateCatalog drops cached upstream model listings. The API reload
+// handler and SIGHUP call it after a successful configuration reload, so the
+// next catalog read reflects the new endpoints and keys.
+func (s *Server) InvalidateCatalog() {
+	if s.catalog == nil {
+		return
+	}
+	s.catalog.invalidate()
+}
+
 // Handler returns the HTTP handler with every /api route registered. The whole
 // tree is wrapped in the CSRF check; mutating handlers rely on it for origin
 // enforcement.

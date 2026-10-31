@@ -1,12 +1,16 @@
 package main
 
 import (
+	"encoding/base64"
 	"io"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/kiry163/llmmeter/internal/api"
 	"github.com/kiry163/llmmeter/internal/config"
 	"github.com/kiry163/llmmeter/internal/secure"
 )
@@ -197,5 +201,128 @@ func TestInitHashesAdminPasswordFromStdin(t *testing.T) {
 	}
 	if !secure.VerifyPassword(cfg.Auth.AdminPasswordHash, "hunter22") {
 		t.Fatal("stdin password must be stored as a verifiable hash")
+	}
+}
+
+func TestEnsureSessionSecretFillsExistingConfig(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	seed, err := config.OpenStore(path, config.WithEffectiveDatabase(filepath.Join(t.TempDir(), "llmmeter.db")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := seed.Update(func(c *config.Config) error {
+		c.Auth.SessionSecret = ""
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	st, err := config.OpenStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !st.Writable() {
+		t.Fatal("existing config must be writable")
+	}
+	if err := ensureSessionSecret(st); err != nil {
+		t.Fatalf("ensureSessionSecret: %v", err)
+	}
+
+	secret := st.Snapshot().Config.Auth.SessionSecret
+	raw, err := base64.StdEncoding.DecodeString(secret)
+	if err != nil || len(raw) != 32 {
+		t.Fatalf("session secret = %q, len(decoded)=%d, err=%v; want 32-byte base64", secret, len(raw), err)
+	}
+	// Auth can issue a session signed with the generated secret.
+	a := api.NewAuth(st, "127.0.0.1:8100", time.Now)
+	if err := a.Issue(httptest.NewRecorder()); err != nil {
+		t.Fatalf("Auth cannot use generated secret: %v", err)
+	}
+
+	// The secret is persisted, not just held in memory.
+	reopened, err := config.OpenStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := reopened.Snapshot().Config.Auth.SessionSecret; got != secret {
+		t.Fatalf("persisted secret = %q, want %q", got, secret)
+	}
+}
+
+func TestEnsureSessionSecretKeepsExistingSecret(t *testing.T) {
+	known := base64.StdEncoding.EncodeToString(make([]byte, 32))
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	seed, err := config.OpenStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := seed.Update(func(c *config.Config) error {
+		c.Auth.SessionSecret = known
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	st, err := config.OpenStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureSessionSecret(st); err != nil {
+		t.Fatalf("ensureSessionSecret: %v", err)
+	}
+	if got := st.Snapshot().Config.Auth.SessionSecret; got != known {
+		t.Fatalf("secret = %q, want unchanged %q", got, known)
+	}
+}
+
+func TestEnsureSessionSecretDoesNotWriteInSetupMode(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	st, err := config.OpenStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Writable() {
+		t.Fatal("missing config must be in setup mode")
+	}
+	if err := ensureSessionSecret(st); err != nil {
+		t.Fatalf("ensureSessionSecret: %v", err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("setup mode must not create a config (stat err = %v)", err)
+	}
+	if got := st.Snapshot().Config.Auth.SessionSecret; got != "" {
+		t.Fatalf("setup mode secret = %q, want empty", got)
+	}
+}
+
+func TestEnsureSessionSecretReadOnlyConfig(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	seed, err := config.OpenStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := seed.Update(func(c *config.Config) error {
+		c.Auth.SessionSecret = ""
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	st, err := config.OpenStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Skipf("chmod: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+
+	err = ensureSessionSecret(st)
+	if err == nil {
+		t.Skip("filesystem permissions do not block writes in this environment")
+	}
+	if got := st.Snapshot().Config.Auth.SessionSecret; got != "" {
+		t.Fatalf("failed write must leave the secret empty, got %q", got)
 	}
 }

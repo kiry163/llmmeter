@@ -78,6 +78,13 @@ func runServe(args []string) error {
 	if err != nil {
 		return err
 	}
+	// An existing configuration without a session secret would accept logins
+	// and then fail to issue sessions. Generate one and persist it. Setup mode
+	// (no configuration file) is left untouched: setup generates the secret
+	// with the rest of the configuration.
+	if err := ensureSessionSecret(cfgStore); err != nil {
+		log.Printf("warning: could not persist a session secret; logins stay unavailable until one is configured: %v", err)
+	}
 	snap := cfgStore.Snapshot()
 	if err := validateStartup(paths.Listen, snap); err != nil {
 		return err
@@ -120,7 +127,7 @@ func runServe(args []string) error {
 	}
 
 	go pruneLoop(ctx, cfgStore, st, time.Now)
-	go reloadOnSIGHUP(ctx, cfgStore)
+	go reloadOnSIGHUP(ctx, cfgStore, srv)
 
 	errc := make(chan error, 1)
 	go func() { errc <- httpSrv.ListenAndServe() }()
@@ -314,10 +321,31 @@ func slug(name, fallback string) string {
 	return out
 }
 
+// ensureSessionSecret writes a generated session secret to an existing
+// configuration that lacks one. It does nothing in setup mode (no config file)
+// or when a secret is already present. The update re-checks the secret under
+// the store lock so a concurrent write is never overwritten.
+func ensureSessionSecret(cfgStore *config.Store) error {
+	snap := cfgStore.Snapshot()
+	if snap == nil || snap.Config.Auth.SessionSecret != "" || !cfgStore.Writable() {
+		return nil
+	}
+	secret, err := secure.RandomSecret()
+	if err != nil {
+		return err
+	}
+	return cfgStore.Update(func(c *config.Config) error {
+		if c.Auth.SessionSecret == "" {
+			c.Auth.SessionSecret = base64.StdEncoding.EncodeToString(secret)
+		}
+		return nil
+	})
+}
+
 // reloadOnSIGHUP re-reads the configuration on SIGHUP. A failed reload keeps
 // the previous snapshot and only logs the error. Listen and database changes
 // therefore take effect on the next restart, not in this process.
-func reloadOnSIGHUP(ctx context.Context, cfgStore *config.Store) {
+func reloadOnSIGHUP(ctx context.Context, cfgStore *config.Store, srv *api.Server) {
 	hup := make(chan os.Signal, 1)
 	signal.Notify(hup, syscall.SIGHUP)
 	defer signal.Stop(hup)
@@ -331,6 +359,10 @@ func reloadOnSIGHUP(ctx context.Context, cfgStore *config.Store) {
 				log.Printf("config reload failed, keeping the previous configuration: %v", err)
 				continue
 			}
+			// Upstream endpoints and keys may have changed; the catalog cache
+			// is keyed by those values, but drop it immediately like the API
+			// reload endpoint does.
+			srv.InvalidateCatalog()
 			log.Println("configuration reloaded")
 		}
 	}
