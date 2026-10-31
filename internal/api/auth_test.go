@@ -1,7 +1,7 @@
 package api_test
 
 import (
-	"context"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -11,42 +11,52 @@ import (
 	"time"
 
 	"github.com/kiry163/llmmeter/internal/api"
-	"github.com/kiry163/llmmeter/internal/settings"
-	"github.com/kiry163/llmmeter/internal/store"
+	"github.com/kiry163/llmmeter/internal/config"
+	"github.com/kiry163/llmmeter/internal/secure"
 )
 
-func newTestRepo(t *testing.T) *settings.Repo {
+// newTestStore returns a configuration store backed by a temporary config.yaml.
+// A non-empty pw installs an Argon2id admin password hash; mutate may adjust
+// the configuration before the file is written.
+func newTestStore(t *testing.T, pw string, mutate func(*config.Config)) *config.Store {
 	t.Helper()
-	return newTestRepoWithOpts(t, "")
-}
-
-func newTestRepoWithPassword(t *testing.T, pw string) *settings.Repo {
-	t.Helper()
-	return newTestRepoWithOpts(t, pw)
-}
-
-func newTestRepoWithOpts(t *testing.T, pw string) *settings.Repo {
-	t.Helper()
-	db, err := store.OpenDB(filepath.Join(t.TempDir(), "s.db"))
+	st, err := config.OpenStore(filepath.Join(t.TempDir(), "config.yaml"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { db.Close() })
-	repo, err := settings.Open(db)
-	if err != nil {
-		t.Fatal(err)
+	hash := ""
+	if pw != "" {
+		hash, err = secure.HashPassword(pw)
+		if err != nil {
+			t.Fatal(err)
+		}
 	}
-	if _, err := repo.Setup(context.Background(), settings.SetupInput{
-		Upstream: settings.Upstream{
-			BaseURL: "https://api.example.com",
-			APIKey:  "sk-up",
-		},
-		Timezone:      "UTC",
-		AdminPassword: pw,
+	if err := st.Update(func(c *config.Config) error {
+		c.Auth.AdminPasswordHash = hash
+		c.Auth.SessionSecret = testSecret(t)
+		if mutate != nil {
+			mutate(c)
+		}
+		return nil
 	}); err != nil {
 		t.Fatal(err)
 	}
-	return repo
+	return st
+}
+
+func newTestStoreWithPassword(t *testing.T, pw string) *config.Store {
+	t.Helper()
+	return newTestStore(t, pw, nil)
+}
+
+// testSecret returns a freshly generated base64 session secret.
+func testSecret(t *testing.T) string {
+	t.Helper()
+	raw, err := secure.RandomSecret()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return base64.StdEncoding.EncodeToString(raw)
 }
 
 func jsonReq(body string) *http.Request {
@@ -55,23 +65,31 @@ func jsonReq(body string) *http.Request {
 	return req
 }
 
+// sessionCookie returns the single cookie a successful login sets.
+func sessionCookie(t *testing.T, rec *httptest.ResponseRecorder) *http.Cookie {
+	t.Helper()
+	cookies := rec.Result().Cookies()
+	if len(cookies) != 1 {
+		t.Fatalf("expected one cookie, got %d", len(cookies))
+	}
+	return cookies[0]
+}
+
 func TestLoopbackBypassOnlyWithoutPassword(t *testing.T) {
-	repo := newTestRepo(t) // setup 无密码
-	a := api.NewAuth(repo, time.Now)
+	a := api.NewAuth(newTestStore(t, "", nil), time.Now) // no password
 	req := httptest.NewRequest("GET", "/api/overview", nil)
 	req.RemoteAddr = "127.0.0.1:5000"
 	if !a.Authenticated(req) {
 		t.Fatal("loopback without password must pass")
 	}
 
-	repo2 := newTestRepoWithPassword(t, "hunter22")
-	a2 := api.NewAuth(repo2, time.Now)
+	a2 := api.NewAuth(newTestStoreWithPassword(t, "hunter22"), time.Now)
 	if a2.Authenticated(req) {
 		t.Fatal("password set must require session")
 	}
 	rec := httptest.NewRecorder()
 	a2.Login(rec, jsonReq(`{"password":"hunter22"}`))
-	cookie := rec.Result().Cookies()[0]
+	cookie := sessionCookie(t, rec)
 	req2 := httptest.NewRequest("GET", "/api/overview", nil)
 	req2.AddCookie(cookie)
 	if !a2.Authenticated(req2) {
@@ -79,13 +97,90 @@ func TestLoopbackBypassOnlyWithoutPassword(t *testing.T) {
 	}
 }
 
-func TestPasswordChangeInvalidatesSessions(t *testing.T) {
-	repo := newTestRepoWithPassword(t, "hunter22")
-	a := api.NewAuth(repo, time.Now)
+func TestAuthUsesConfigSessionSecret(t *testing.T) {
+	st := newTestStoreWithPassword(t, "hunter22")
+	a := api.NewAuth(st, time.Now)
+
 	rec := httptest.NewRecorder()
 	a.Login(rec, jsonReq(`{"password":"hunter22"}`))
-	cookie := rec.Result().Cookies()[0]
-	if err := repo.SetPassword(context.Background(), "hunter22", "newpass99"); err != nil {
+	cookie := sessionCookie(t, rec)
+
+	req := httptest.NewRequest("GET", "/api/overview", nil)
+	req.AddCookie(cookie)
+	if !a.Authenticated(req) {
+		t.Fatal("cookie signed with the configured secret must pass")
+	}
+
+	// Rotating only the secret invalidates sessions signed with the old one.
+	if err := st.Update(func(c *config.Config) error {
+		c.Auth.SessionSecret = testSecret(t)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if a.Authenticated(req) {
+		t.Fatal("old cookie must fail after the secret changes")
+	}
+
+	// A fresh login is signed with the new secret.
+	rec = httptest.NewRecorder()
+	a.Login(rec, jsonReq(`{"password":"hunter22"}`))
+	fresh := httptest.NewRequest("GET", "/api/overview", nil)
+	fresh.AddCookie(sessionCookie(t, rec))
+	if !a.Authenticated(fresh) {
+		t.Fatal("new cookie must verify against the new secret")
+	}
+}
+
+func TestAuthLoopbackStillBypassesPassword(t *testing.T) {
+	a := api.NewAuth(newTestStore(t, "", nil), time.Now)
+	h := a.Require(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }))
+
+	req := httptest.NewRequest("GET", "/api/overview", nil)
+	req.RemoteAddr = "127.0.0.1:5000"
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("loopback without a cookie must pass, code=%d", rec.Code)
+	}
+}
+
+func TestAuthEmptySessionSecretRefusesSession(t *testing.T) {
+	st := newTestStoreWithPassword(t, "hunter22")
+	if err := st.Update(func(c *config.Config) error {
+		c.Auth.SessionSecret = ""
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	a := api.NewAuth(st, time.Now)
+
+	rec := httptest.NewRecorder()
+	a.Login(rec, jsonReq(`{"password":"hunter22"}`))
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("missing secret must return 500, code=%d", rec.Code)
+	}
+	if len(rec.Result().Cookies()) != 0 {
+		t.Fatal("missing secret must not issue a cookie")
+	}
+}
+
+func TestPasswordChangeInvalidatesSessions(t *testing.T) {
+	st := newTestStoreWithPassword(t, "hunter22")
+	a := api.NewAuth(st, time.Now)
+	rec := httptest.NewRecorder()
+	a.Login(rec, jsonReq(`{"password":"hunter22"}`))
+	cookie := sessionCookie(t, rec)
+
+	hash, err := secure.HashPassword("newpass99")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Update(func(c *config.Config) error {
+		c.Auth.AdminPasswordHash = hash
+		c.Auth.SessionSecret = testSecret(t)
+		return nil
+	}); err != nil {
 		t.Fatal(err)
 	}
 	req := httptest.NewRequest("GET", "/api/overview", nil)
@@ -95,9 +190,100 @@ func TestPasswordChangeInvalidatesSessions(t *testing.T) {
 	}
 }
 
+func TestAuthPasswordSetChangeClear(t *testing.T) {
+	st := newTestStore(t, "", nil)
+	a := api.NewAuth(st, time.Now)
+
+	// Initial set from a loopback request needs no current password.
+	rec := httptest.NewRecorder()
+	a.Password(rec, jsonReq(`{"current":"","newPassword":"hunter22"}`))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"adminPasswordSet":true`) {
+		t.Fatalf("initial set = %d %s", rec.Code, rec.Body.String())
+	}
+	first := sessionCookie(t, rec)
+	req := httptest.NewRequest("GET", "/api/overview", nil)
+	req.AddCookie(first)
+	if !a.Authenticated(req) {
+		t.Fatal("the request that set the password must stay signed in")
+	}
+
+	// The new password authenticates; a wrong one does not.
+	rec = httptest.NewRecorder()
+	a.Login(rec, jsonReq(`{"password":"hunter22"}`))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("login with the new password = %d %s", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	a.Login(rec, jsonReq(`{"password":"hunter23"}`))
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("login with a wrong password = %d", rec.Code)
+	}
+
+	// A wrong current password and a too-short new one are rejected.
+	rec = httptest.NewRecorder()
+	a.Password(rec, jsonReq(`{"current":"wrong","newPassword":"newpass99"}`))
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), `"current"`) {
+		t.Fatalf("wrong current = %d %s", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	a.Password(rec, jsonReq(`{"current":"hunter22","newPassword":"short"}`))
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), `"newPassword"`) {
+		t.Fatalf("short new password = %d %s", rec.Code, rec.Body.String())
+	}
+
+	// A valid change rotates the secret: the old cookie stops verifying and
+	// the reissued one works.
+	rec = httptest.NewRecorder()
+	a.Password(rec, jsonReq(`{"current":"hunter22","newPassword":"newpass99"}`))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("change = %d %s", rec.Code, rec.Body.String())
+	}
+	if a.Authenticated(req) {
+		t.Fatal("cookie issued before the change must be invalid")
+	}
+	changed := httptest.NewRequest("GET", "/api/overview", nil)
+	changed.AddCookie(sessionCookie(t, rec))
+	if !a.Authenticated(changed) {
+		t.Fatal("reissued cookie must be valid")
+	}
+
+	// Clearing the password removes it, so loopback is trusted again.
+	rec = httptest.NewRecorder()
+	a.Password(rec, jsonReq(`{"current":"newpass99","newPassword":""}`))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"adminPasswordSet":false`) {
+		t.Fatalf("clear = %d %s", rec.Code, rec.Body.String())
+	}
+	cleared := httptest.NewRequest("GET", "/api/overview", nil)
+	cleared.RemoteAddr = "127.0.0.1:5000"
+	if !a.Authenticated(cleared) {
+		t.Fatal("loopback must pass after clearing the password")
+	}
+	rec = httptest.NewRecorder()
+	a.Login(rec, jsonReq(`{"password":"newpass99"}`))
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("cleared password still accepted: %d", rec.Code)
+	}
+}
+
+func TestAuthPasswordClearRejectedOffLoopback(t *testing.T) {
+	st := newTestStore(t, "hunter22", func(c *config.Config) {
+		c.Server.Listen = "0.0.0.0:8100"
+	})
+	a := api.NewAuth(st, time.Now)
+
+	rec := httptest.NewRecorder()
+	a.Password(rec, jsonReq(`{"current":"hunter22","newPassword":""}`))
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), `"newPassword"`) {
+		t.Fatalf("non-loopback clear = %d %s", rec.Code, rec.Body.String())
+	}
+	if st.Snapshot().Config.Auth.AdminPasswordHash == "" {
+		t.Fatal("rejected clear must keep the password")
+	}
+}
+
 func TestCSRFRequiresOriginOrHeader(t *testing.T) {
 	called := false
-	h := api.NewAuth(newTestRepo(t), time.Now).CSRF(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called = true }))
+	h := api.NewAuth(newTestStore(t, "", nil), time.Now).CSRF(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called = true }))
 	req := httptest.NewRequest("POST", "/api/models", nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -114,7 +300,7 @@ func TestCSRFRequiresOriginOrHeader(t *testing.T) {
 
 func TestCSRFSafeMethodsAndOrigin(t *testing.T) {
 	called := 0
-	h := api.NewAuth(newTestRepo(t), time.Now).CSRF(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called++ }))
+	h := api.NewAuth(newTestStore(t, "", nil), time.Now).CSRF(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called++ }))
 
 	for _, method := range []string{"GET", "HEAD", "OPTIONS"} {
 		h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(method, "/api/overview", nil))
@@ -154,7 +340,7 @@ func TestCSRFSafeMethodsAndOrigin(t *testing.T) {
 }
 
 func TestRequireAndRequireLoopback(t *testing.T) {
-	a := api.NewAuth(newTestRepoWithPassword(t, "hunter22"), time.Now)
+	a := api.NewAuth(newTestStoreWithPassword(t, "hunter22"), time.Now)
 	h := a.Require(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }))
 
 	req := httptest.NewRequest("GET", "/api/overview", nil)
@@ -183,7 +369,7 @@ func TestRequireAndRequireLoopback(t *testing.T) {
 }
 
 func TestLoginLogoutAndRateLimit(t *testing.T) {
-	a := api.NewAuth(newTestRepoWithPassword(t, "hunter22"), time.Now)
+	a := api.NewAuth(newTestStoreWithPassword(t, "hunter22"), time.Now)
 
 	// Wrong password.
 	rec := httptest.NewRecorder()
@@ -258,14 +444,13 @@ func TestLoginLogoutAndRateLimit(t *testing.T) {
 }
 
 func TestSessionExpiry(t *testing.T) {
-	repo := newTestRepoWithPassword(t, "hunter22")
 	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 	clock := func() time.Time { return now }
-	a := api.NewAuth(repo, clock)
+	a := api.NewAuth(newTestStoreWithPassword(t, "hunter22"), clock)
 
 	rec := httptest.NewRecorder()
 	a.Login(rec, jsonReq(`{"password":"hunter22"}`))
-	cookie := rec.Result().Cookies()[0]
+	cookie := sessionCookie(t, rec)
 
 	req := httptest.NewRequest("GET", "/api/overview", nil)
 	req.AddCookie(cookie)
@@ -331,7 +516,7 @@ func assertAPIError(t *testing.T, rec *httptest.ResponseRecorder, status int, co
 }
 
 func TestAPIErrorEnvelope(t *testing.T) {
-	a := api.NewAuth(newTestRepoWithPassword(t, "hunter22"), time.Now)
+	a := api.NewAuth(newTestStoreWithPassword(t, "hunter22"), time.Now)
 
 	// 401 from Require.
 	rec := httptest.NewRecorder()

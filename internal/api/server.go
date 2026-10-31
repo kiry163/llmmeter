@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/kiry163/llmmeter/internal/config"
 	"github.com/kiry163/llmmeter/internal/metrics"
 	"github.com/kiry163/llmmeter/internal/settings"
 	"github.com/kiry163/llmmeter/internal/store"
@@ -22,6 +23,11 @@ type Config struct {
 	Store *store.Store
 	Hub   *metrics.Hub
 
+	// ConfigStore holds the YAML configuration and the snapshots that auth and
+	// the migrated handlers read. It will replace Repo once every handler has
+	// moved; a nil store behaves like an unconfigured instance.
+	ConfigStore *config.Store
+
 	// Now is the clock used for date defaults and sessions; nil means
 	// time.Now.
 	Now func() time.Time
@@ -29,15 +35,16 @@ type Config struct {
 
 // Server implements the llmmeter HTTP API.
 type Server struct {
-	version string
-	listen  string
-	dbPath  string
-	repo    *settings.Repo
-	store   *store.Store
-	hub     *metrics.Hub
-	now     func() time.Time
-	auth    *Auth
-	catalog *catalog
+	version     string
+	listen      string
+	dbPath      string
+	repo        *settings.Repo
+	store       *store.Store
+	hub         *metrics.Hub
+	configStore *config.Store
+	now         func() time.Time
+	auth        *Auth
+	catalog     *catalog
 }
 
 // New returns a Server for cfg.
@@ -47,15 +54,16 @@ func New(cfg Config) *Server {
 		now = time.Now
 	}
 	return &Server{
-		version: cfg.Version,
-		listen:  cfg.Listen,
-		dbPath:  cfg.DBPath,
-		repo:    cfg.Repo,
-		store:   cfg.Store,
-		hub:     cfg.Hub,
-		now:     now,
-		auth:    NewAuth(cfg.Repo, now),
-		catalog: newCatalog(cfg.Repo, cfg.Store, now),
+		version:     cfg.Version,
+		listen:      cfg.Listen,
+		dbPath:      cfg.DBPath,
+		repo:        cfg.Repo,
+		store:       cfg.Store,
+		hub:         cfg.Hub,
+		configStore: cfg.ConfigStore,
+		now:         now,
+		auth:        NewAuth(cfg.ConfigStore, now),
+		catalog:     newCatalog(cfg.Repo, cfg.Store, now),
 	}
 }
 
@@ -74,6 +82,7 @@ func (s *Server) Handler() http.Handler {
 
 	// Protected endpoints.
 	require := func(h http.HandlerFunc) http.Handler { return s.auth.Require(h) }
+	mux.Handle("POST /api/auth/password", require(s.auth.Password))
 	mux.Handle("GET /api/overview", require(s.overview))
 	mux.Handle("GET /api/series", require(s.series))
 	mux.Handle("GET /api/breakdown", require(s.breakdown))

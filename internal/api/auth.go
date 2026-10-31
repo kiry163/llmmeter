@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net"
 	"net/http"
 	"net/url"
@@ -15,8 +16,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/kiry163/llmmeter/internal/config"
 	"github.com/kiry163/llmmeter/internal/secure"
-	"github.com/kiry163/llmmeter/internal/settings"
 )
 
 const (
@@ -39,16 +40,23 @@ const (
 	// maxLoginBody caps the login request body.
 	maxLoginBody = 4 << 10
 
-	// epochLen is the number of hex characters of the password hash prefix
+	// epochLen is the number of hex characters of the password hash digest
 	// used to invalidate sessions when the password changes.
 	epochLen = 16
+
+	// minAdminPasswordLen is the shortest accepted admin password.
+	minAdminPasswordLen = 8
 )
+
+// errNoSessionSecret reports that the configuration carries no usable session
+// signing secret, so a session cannot be issued. Normal startup generates one.
+var errNoSessionSecret = errors.New("api: session secret not configured")
 
 // Auth enforces the password session policy, loopback-only endpoints and
 // CSRF protection.
 type Auth struct {
-	repo *settings.Repo
-	now  func() time.Time
+	store *config.Store
+	now   func() time.Time
 
 	mu    sync.Mutex
 	login map[string]*attemptWindow
@@ -65,13 +73,22 @@ type sessionPayload struct {
 	Epoch string `json:"epoch"`
 }
 
-// NewAuth returns an Auth bound to repo. now is the clock used for session
-// expiry and login rate limiting; nil means time.Now.
-func NewAuth(repo *settings.Repo, now func() time.Time) *Auth {
+// NewAuth returns an Auth bound to the configuration store. now is the clock
+// used for session expiry and login rate limiting; nil means time.Now.
+func NewAuth(store *config.Store, now func() time.Time) *Auth {
 	if now == nil {
 		now = time.Now
 	}
-	return &Auth{repo: repo, now: now, login: make(map[string]*attemptWindow)}
+	return &Auth{store: store, now: now, login: make(map[string]*attemptWindow)}
+}
+
+// snapshot returns the current immutable configuration snapshot. A server
+// built without a configuration store behaves like an unconfigured instance.
+func (a *Auth) snapshot() *config.Snapshot {
+	if a.store == nil {
+		return nil
+	}
+	return a.store.Snapshot()
 }
 
 // IsLoopback reports whether the request originates from the local machine.
@@ -112,8 +129,8 @@ func LoopbackListen(addr string) bool {
 // session authentication applies instead.
 func (a *Auth) HostGuard(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		snap := a.repo.Snapshot()
-		if snap == nil || snap.AdminPasswordHash == "" {
+		snap := a.snapshot()
+		if snap == nil || snap.Config.Auth.AdminPasswordHash == "" {
 			host := r.Host
 			if h, _, err := net.SplitHostPort(host); err == nil {
 				host = h
@@ -130,11 +147,11 @@ func (a *Auth) HostGuard(next http.Handler) http.Handler {
 // Authenticated reports whether the request carries a valid session. Without
 // a configured password only loopback requests are trusted.
 func (a *Auth) Authenticated(r *http.Request) bool {
-	snap := a.repo.Snapshot()
+	snap := a.snapshot()
 	if snap == nil {
 		return false
 	}
-	if snap.AdminPasswordHash == "" {
+	if snap.Config.Auth.AdminPasswordHash == "" {
 		return IsLoopback(r)
 	}
 	c, err := r.Cookie(SessionCookie)
@@ -209,13 +226,17 @@ func (a *Auth) Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	snap := a.repo.Snapshot()
-	if snap == nil || snap.AdminPasswordHash == "" || !secure.VerifyPassword(snap.AdminPasswordHash, in.Password) {
+	snap := a.snapshot()
+	if snap == nil || snap.Config.Auth.AdminPasswordHash == "" ||
+		!secure.VerifyPassword(snap.Config.Auth.AdminPasswordHash, in.Password) {
 		writeAPIError(w, http.StatusUnauthorized, "unauthorized", "invalid password")
 		return
 	}
 
-	a.Issue(w)
+	if err := a.issueSession(w, snap); err != nil {
+		writeInternal(w, err)
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]bool{"authenticated": true})
 }
 
@@ -233,20 +254,101 @@ func (a *Auth) Logout(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]bool{"authenticated": false})
 }
 
-// Issue sets a fresh signed session cookie on the response.
-func (a *Auth) Issue(w http.ResponseWriter) {
-	snap := a.repo.Snapshot()
-	if snap == nil || len(snap.SessionSecret) == 0 {
+// Password sets, changes or clears the admin password. An empty newPassword
+// clears it, which is refused while the effective listen address is not
+// loopback. A change verifies current and stores an Argon2id hash; every
+// success rotates the session secret in a single configuration write, so other
+// sessions stop verifying and the current request receives a fresh cookie.
+func (a *Auth) Password(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Current     string `json:"current"`
+		NewPassword string `json:"newPassword"`
+	}
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxLoginBody))
+	if err := dec.Decode(&in); err != nil {
+		writeAPIError(w, http.StatusBadRequest, codeValidation, "invalid request body")
 		return
+	}
+
+	snap := a.snapshot()
+	if snap == nil {
+		writeInternal(w, errNoSessionSecret)
+		return
+	}
+	if hash := snap.Config.Auth.AdminPasswordHash; hash != "" && !secure.VerifyPassword(hash, in.Current) {
+		writeAPIErrorFields(w, http.StatusBadRequest, codeValidation, "invalid password change",
+			map[string]string{"current": "incorrect password"})
+		return
+	}
+
+	next := ""
+	if in.NewPassword != "" {
+		if len(in.NewPassword) < minAdminPasswordLen {
+			writeAPIErrorFields(w, http.StatusBadRequest, codeValidation, "invalid password change",
+				map[string]string{"newPassword": "must be at least 8 characters"})
+			return
+		}
+		hash, err := secure.HashPassword(in.NewPassword)
+		if err != nil {
+			writeInternal(w, err)
+			return
+		}
+		next = hash
+	} else if !LoopbackListen(snap.Config.Server.Listen) {
+		writeAPIErrorFields(w, http.StatusBadRequest, codeValidation, "invalid password change",
+			map[string]string{"newPassword": "must be set when the listen address is not loopback"})
+		return
+	}
+
+	secret, err := secure.RandomSecret()
+	if err != nil {
+		writeInternal(w, err)
+		return
+	}
+	if err := a.store.Update(func(c *config.Config) error {
+		c.Auth.AdminPasswordHash = next
+		c.Auth.SessionSecret = base64.StdEncoding.EncodeToString(secret)
+		return nil
+	}); err != nil {
+		var ve *config.ValidationError
+		if errors.As(err, &ve) {
+			writeAPIErrorFields(w, http.StatusBadRequest, codeValidation, ve.Error(), ve.Fields)
+			return
+		}
+		writeInternal(w, err)
+		return
+	}
+
+	if err := a.Issue(w); err != nil {
+		writeInternal(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"adminPasswordSet": next != ""})
+}
+
+// Issue sets a fresh signed session cookie on the response. It fails when the
+// configuration carries no session secret; normal startup generates one.
+func (a *Auth) Issue(w http.ResponseWriter) error {
+	return a.issueSession(w, a.snapshot())
+}
+
+// issueSession signs a cookie against one immutable snapshot.
+func (a *Auth) issueSession(w http.ResponseWriter, snap *config.Snapshot) error {
+	if snap == nil {
+		return errNoSessionSecret
+	}
+	secret := decodeSessionSecret(snap.Config.Auth.SessionSecret)
+	if len(secret) == 0 {
+		return errNoSessionSecret
 	}
 	payload, err := json.Marshal(sessionPayload{
 		Exp:   a.now().Add(sessionTTL).Unix(),
-		Epoch: epochOf(snap.AdminPasswordHash),
+		Epoch: passwordEpoch(snap.Config.Auth.AdminPasswordHash),
 	})
 	if err != nil {
-		return
+		return err
 	}
-	mac := hmac.New(sha256.New, snap.SessionSecret)
+	mac := hmac.New(sha256.New, secret)
 	mac.Write(payload)
 	token := base64.RawURLEncoding.EncodeToString(payload) + "." +
 		base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
@@ -259,10 +361,19 @@ func (a *Auth) Issue(w http.ResponseWriter) {
 		HttpOnly: true,
 		SameSite: http.SameSiteStrictMode,
 	})
+	return nil
 }
 
-// verifySession checks the HMAC, expiry and password epoch of a cookie value.
-func verifySession(snap *settings.Snapshot, value string, nowUnix int64) bool {
+// verifySession checks the HMAC, expiry and password epoch of a cookie value
+// against one immutable snapshot.
+func verifySession(snap *config.Snapshot, value string, nowUnix int64) bool {
+	if snap == nil {
+		return false
+	}
+	secret := decodeSessionSecret(snap.Config.Auth.SessionSecret)
+	if len(secret) == 0 {
+		return false
+	}
 	enc, sig, ok := strings.Cut(value, ".")
 	if !ok {
 		return false
@@ -275,7 +386,7 @@ func verifySession(snap *settings.Snapshot, value string, nowUnix int64) bool {
 	if err != nil {
 		return false
 	}
-	mac := hmac.New(sha256.New, snap.SessionSecret)
+	mac := hmac.New(sha256.New, secret)
 	mac.Write(payload)
 	if !hmac.Equal(got, mac.Sum(nil)) {
 		return false
@@ -287,17 +398,34 @@ func verifySession(snap *settings.Snapshot, value string, nowUnix int64) bool {
 	if p.Exp <= nowUnix {
 		return false
 	}
-	return subtle.ConstantTimeCompare([]byte(p.Epoch), []byte(epochOf(snap.AdminPasswordHash))) == 1
+	return subtle.ConstantTimeCompare([]byte(p.Epoch), []byte(passwordEpoch(snap.Config.Auth.AdminPasswordHash))) == 1
 }
 
-// epochOf derives the session epoch from a password hash. A password change
-// yields a new hash and therefore a new epoch, invalidating old sessions.
-func epochOf(hash string) string {
+// passwordEpoch derives the session epoch from a password hash. Hashing the
+// hash keeps the epoch opaque while still changing on every password change,
+// which invalidates old sessions even if the secret were not rotated.
+func passwordEpoch(hash string) string {
 	if hash == "" {
 		return ""
 	}
 	sum := sha256.Sum256([]byte(hash))
 	return hex.EncodeToString(sum[:])[:epochLen]
+}
+
+// decodeSessionSecret decodes the base64 session secret. Empty or malformed
+// secrets yield nil, which refuses session issuance and verification.
+func decodeSessionSecret(encoded string) []byte {
+	if encoded == "" {
+		return nil
+	}
+	if raw, err := base64.RawStdEncoding.DecodeString(encoded); err == nil {
+		return raw
+	}
+	raw, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		return nil
+	}
+	return raw
 }
 
 // clientIP extracts the host part of the request's remote address.
