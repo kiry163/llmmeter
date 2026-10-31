@@ -11,3 +11,6 @@ llmmeter
 dev.db
 dev.db-shm
 dev.db-wal
+
+# internal planning workspace
+.superpowers/
