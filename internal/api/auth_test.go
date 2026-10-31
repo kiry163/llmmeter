@@ -283,13 +283,13 @@ func TestAuthPasswordClearRejectedOffLoopback(t *testing.T) {
 func TestCSRFRequiresOriginOrHeader(t *testing.T) {
 	called := false
 	h := api.NewAuth(newTestStore(t, "", nil), "127.0.0.1:8100", time.Now).CSRF(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called = true }))
-	req := httptest.NewRequest("POST", "/api/models", nil)
+	req := httptest.NewRequest("POST", "/api/general", nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	if called || rec.Code != 403 {
 		t.Fatalf("called=%v code=%d", called, rec.Code)
 	}
-	req2 := httptest.NewRequest("POST", "/api/models", nil)
+	req2 := httptest.NewRequest("POST", "/api/general", nil)
 	req2.Header.Set("X-Requested-With", "llmmeter")
 	h.ServeHTTP(httptest.NewRecorder(), req2)
 	if !called {
@@ -309,7 +309,7 @@ func TestCSRFSafeMethodsAndOrigin(t *testing.T) {
 	}
 
 	// Same-origin POST passes; cross-origin and unparsable origins do not.
-	req := httptest.NewRequest("POST", "/api/models", nil)
+	req := httptest.NewRequest("POST", "/api/general", nil)
 	req.Host = "llmmeter.local:8080"
 	req.Header.Set("Origin", "http://llmmeter.local:8080")
 	rec := httptest.NewRecorder()
@@ -319,7 +319,7 @@ func TestCSRFSafeMethodsAndOrigin(t *testing.T) {
 	}
 
 	for _, origin := range []string{"http://evil.example", "null", ":"} {
-		req := httptest.NewRequest("POST", "/api/models", nil)
+		req := httptest.NewRequest("POST", "/api/general", nil)
 		req.Header.Set("Origin", origin)
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, req)
@@ -329,7 +329,7 @@ func TestCSRFSafeMethodsAndOrigin(t *testing.T) {
 	}
 
 	// Wrong header value is not accepted.
-	req = httptest.NewRequest("POST", "/api/models", nil)
+	req = httptest.NewRequest("POST", "/api/general", nil)
 	req.Header.Set("X-Requested-With", "XMLHttpRequest")
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -533,7 +533,7 @@ func TestAPIErrorEnvelope(t *testing.T) {
 
 	// 403 from CSRF.
 	rec = httptest.NewRecorder()
-	req = httptest.NewRequest("POST", "/api/models", nil)
+	req = httptest.NewRequest("POST", "/api/general", nil)
 	req.Header.Set("Origin", "http://evil.example")
 	a.CSRF(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })).ServeHTTP(rec, req)
 	assertAPIError(t, rec, http.StatusForbidden, "forbidden")

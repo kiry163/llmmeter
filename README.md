@@ -3,18 +3,20 @@
 本机运行的 OpenAI 兼容透传网关：除下文说明的流式 usage 注入外，所有请求原样转发到唯一的上游，逐条记录 token、花费与上下行字节，并提供一个可查看统计、日志、分析与编辑配置的管理面板。为 omp、codex、OpenAI SDK 这类客户端设计，上游通常是 DeepSeek 等 OpenAI 兼容服务。
 
 - 单二进制内嵌前端与 SQLite，运行时不依赖 Node 或外部数据库。
-- 上游、价格、时区、保留与访问控制都在面板里配置并即时生效。首次配置也通过 `/setup` 写入 SQLite；没有 YAML 或配置文件，SQLite 是唯一事实来源，重启后以数据库为准。
+- 上游、价格、时区、保留与访问控制保存在 YAML 配置文件（schema v2，默认 `~/.config/llmmeter/config.yaml`）中，重启后以 YAML 为准；首次配置可通过 `/setup` 或 `llmmeter init` 写入。
 - 纯透传：除给缺少 `stream_options` 的流式 chat 请求注入 `include_usage` 外不改写任何请求，不做协议转换，不估算 token。
 
 ## 构建与运行
 
 ```bash
 make build          # npm ci + 前端构建 + go build -o llmmeter
-./llmmeter serve -db llmmeter.db -listen 127.0.0.1:8100
+./llmmeter init -upstream-name deepseek -upstream-url https://api.deepseek.com -upstream-key sk-…
+./llmmeter -config ~/.config/llmmeter/config.yaml
 ```
 
-- `serve` 可省略：`./llmmeter -db ... -listen ...` 等价。
-- `-db` 默认 `llmmeter.db`，`-listen` 默认 `127.0.0.1:8100`。
+- `init` 可选：交互式首次配置也可以启动后打开 `/setup`。
+- `-config` 默认 `$XDG_CONFIG_HOME/llmmeter/config.yaml`（通常是 `~/.config/llmmeter/config.yaml`），文件格式为 YAML schema v2。
+- `-db` 默认取配置里的 `server.database`，未配置时为 `$XDG_CACHE_HOME/llmmeter/llmmeter.db`；`-listen` 默认 `127.0.0.1:8100`。
 - 首次构建前端需要 Node.js 与 npm；`make web` 只构建前端，`make test` 跑 Go 与前端测试。
 - 打开 <http://127.0.0.1:8100/>；未配置时会跳到 `/setup`。
 

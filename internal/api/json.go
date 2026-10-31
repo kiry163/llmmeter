@@ -5,6 +5,9 @@ import (
 	"net/http"
 )
 
+// maxBodyBytes bounds every JSON request body.
+const maxBodyBytes = 1 << 20
+
 // Error codes of the API error envelope (spec §6).
 const (
 	codeValidation    = "validation"
@@ -15,6 +18,17 @@ const (
 	codeSetupRequired = "setup_required"
 	codeInternal      = "internal"
 )
+
+// decodeJSON decodes the request body into v, answering 400 on malformed
+// input.
+func decodeJSON(w http.ResponseWriter, r *http.Request, v any) bool {
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes))
+	if err := dec.Decode(v); err != nil {
+		writeAPIError(w, http.StatusBadRequest, codeValidation, "invalid JSON body")
+		return false
+	}
+	return true
+}
 
 // writeJSON writes v as the JSON response body with the given status.
 func writeJSON(w http.ResponseWriter, status int, v any) {

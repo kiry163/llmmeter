@@ -7,101 +7,18 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/kiry163/llmmeter/internal/api"
 	"github.com/kiry163/llmmeter/internal/config"
-	"github.com/kiry163/llmmeter/internal/metrics"
 	"github.com/kiry163/llmmeter/internal/secure"
-	"github.com/kiry163/llmmeter/internal/settings"
 	"github.com/kiry163/llmmeter/internal/store"
 	"github.com/kiry163/llmmeter/internal/usage"
 )
 
-// apiNow is the fixed clock the API tests run at so date handling is
-// deterministic.
-var apiNow = time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)
-
-// newAPIServer starts the full handler against a temporary database. When
-// seeded it has completed setup (upstream key sk-secret-1234, no admin
-// password so loopback requests stay authenticated) and holds the same two
-// 2026-10-29 requests as store.seedStore.
-func newAPIServer(t *testing.T, seeded bool) *httptest.Server {
-	t.Helper()
-	return newAPIServerWithListen(t, seeded, "127.0.0.1:8100")
-}
-
-// newAPIServerWithListen is newAPIServer with an explicit listen address,
-// which the password-clear rule inspects.
-func newAPIServerWithListen(t *testing.T, seeded bool, listen string) *httptest.Server {
-	t.Helper()
-	ts, _ := newAPIServerStore(t, seeded, listen)
-	return ts
-}
-
-// newAPIServerStore also returns the store so tests can inspect or break the
-// database underneath the handler.
-func newAPIServerStore(t *testing.T, seeded bool, listen string) (*httptest.Server, *store.Store) {
-	t.Helper()
-
-	st, err := store.Open(filepath.Join(t.TempDir(), "api.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { st.Close() })
-
-	repo, err := settings.Open(st.DB())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if seeded {
-		if _, err := repo.Setup(context.Background(), settings.SetupInput{
-			Upstream: settings.Upstream{
-				BaseURL: "https://api.example.com",
-				APIKey:  "sk-secret-1234",
-			},
-			Timezone: "UTC",
-		}); err != nil {
-			t.Fatal(err)
-		}
-		seedAPIData(t, st)
-	}
-
-	now := func() time.Time { return apiNow }
-	hub := metrics.New(st, now)
-	ctx, cancel := context.WithCancel(context.Background())
-	go hub.Run(ctx)
-	t.Cleanup(func() {
-		cancel()
-		hub.Stop()
-	})
-
-	srv := api.New(api.Config{
-		Version: "test",
-		Listen:  listen,
-		DBPath:  "/tmp/llmmeter-test.db",
-		Repo:    repo,
-		Store:   st,
-		Hub:     hub,
-		Now:     now,
-	})
-	ts := httptest.NewServer(srv.Handler())
-	t.Cleanup(ts.Close)
-	return ts, st
-}
-
-// newAPIServerWithSeed is the alias used by the configuration API tests.
-func newAPIServerWithSeed(t *testing.T, seeded bool) *httptest.Server {
-	t.Helper()
-	return newAPIServer(t, seeded)
-}
-
 // newReadEnv starts a handler backed by a real config store with the two
-// upstreams "a" (Alpha) and "b" (Beta), then seeds readData. Unlike the legacy
-// newAPIServer helper it never touches the settings repository.
+// upstreams "a" (Alpha) and "b" (Beta), then seeds readData.
 func newReadEnv(t *testing.T) *configTestEnv {
 	t.Helper()
 	env := newConfigEnv(t, "127.0.0.1:8100")
@@ -180,48 +97,6 @@ func seedReadData(t *testing.T, st *store.Store) {
 		UpstreamID: "a", Model: "other",
 		Requests: 1, Errors: 1, ReqBytes: 30, RespBytes: 60,
 		PromptTokens: 20, LatencySumMS: 250, LatencyMaxMS: 250,
-	})
-	if err := st.Flush(); err != nil {
-		t.Fatal(err)
-	}
-}
-
-// seedAPIData mirrors store.seedStore: one priced deepseek-chat call and one
-// unpriced unknown-model call on 2026-10-29.
-func seedAPIData(t *testing.T, st *store.Store) {
-	t.Helper()
-	base := time.Date(2026, 10, 29, 4, 0, 0, 0, time.UTC)
-	st.EnqueueRecord(store.Record{
-		StartedAt: base, CompletedAt: base.Add(900 * time.Millisecond),
-		LocalDay: "2026-10-29", MinuteOfDay: 720,
-		Path: "/v1/chat/completions", PathClass: "chat",
-		Model: "deepseek-chat", Status: 200, LatencyMS: 120,
-		ReqBodyBytes: 10, RespBodyBytes: 20,
-		Usage:       usage.Usage{PromptTokens: 100, CompletionTokens: 40, CacheReadTokens: 10, TotalTokens: 140},
-		WindowLabel: "base", CostNanoUSD: 1000, Priced: true,
-		UsageStatus: usage.StatusOK,
-	})
-	st.EnqueueMinute(store.MinuteDelta{
-		LocalDay: "2026-10-29", MinuteOfDay: 720, PathClass: "chat", Model: "deepseek-chat",
-		Requests: 1, ReqBytes: 10, RespBytes: 20,
-		PromptTokens: 100, CompletionTokens: 40, CacheReadTokens: 10,
-		CostNanoUSD: 1000, LatencySumMS: 120, LatencyMaxMS: 120,
-	})
-
-	st.EnqueueRecord(store.Record{
-		StartedAt: base.Add(30 * time.Second), CompletedAt: base.Add(31 * time.Second),
-		LocalDay: "2026-10-29", MinuteOfDay: 720,
-		Path: "/v1/chat/completions", PathClass: "chat",
-		Model: "unknown", Status: 200, LatencyMS: 220,
-		ReqBodyBytes: 20, RespBodyBytes: 40,
-		Usage:       usage.Usage{PromptTokens: 20, TotalTokens: 20},
-		WindowLabel: "base", Priced: false,
-		UsageStatus: usage.StatusOK,
-	})
-	st.EnqueueMinute(store.MinuteDelta{
-		LocalDay: "2026-10-29", MinuteOfDay: 720, PathClass: "chat", Model: "unknown",
-		Requests: 1, ReqBytes: 20, RespBytes: 40,
-		PromptTokens: 20, LatencySumMS: 220, LatencyMaxMS: 220,
 	})
 	if err := st.Flush(); err != nil {
 		t.Fatal(err)

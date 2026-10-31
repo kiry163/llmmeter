@@ -19,7 +19,7 @@ import (
 )
 
 // configTestEnv is a server backed by a real temporary config.yaml and
-// database, with no settings repository involved.
+// database.
 type configTestEnv struct {
 	srv        *httptest.Server
 	apiServer  *api.Server

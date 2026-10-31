@@ -1,5 +1,5 @@
 // Package secure holds the password hashing, gateway key and secret generation
-// helpers shared by llmmeter's settings and API layers.
+// helpers shared by llmmeter's configuration and API layers.
 package secure
 
 import (

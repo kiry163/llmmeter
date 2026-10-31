@@ -6,7 +6,6 @@ import (
 
 	"github.com/kiry163/llmmeter/internal/config"
 	"github.com/kiry163/llmmeter/internal/metrics"
-	"github.com/kiry163/llmmeter/internal/settings"
 	"github.com/kiry163/llmmeter/internal/store"
 )
 
@@ -16,19 +15,17 @@ type Config struct {
 	Version string
 	// Listen is the configured listen address reported by /api/bootstrap.
 	Listen string
-	// DBPath is the SQLite file path reported by the settings endpoint.
+	// DBPath is the SQLite file path reported by /api/bootstrap and /api/data.
 	DBPath string
 	// Paths are the resolved configuration file, database and effective
 	// listen address. They are reported by /api/bootstrap and /api/data.
 	Paths config.Paths
 
-	Repo  *settings.Repo
 	Store *store.Store
 	Hub   *metrics.Hub
 
-	// ConfigStore holds the YAML configuration and the snapshots that auth and
-	// the migrated handlers read. It will replace Repo once every handler has
-	// moved; a nil store behaves like an unconfigured instance.
+	// ConfigStore holds the YAML configuration and the snapshots that every
+	// handler reads; a nil store behaves like an unconfigured instance.
 	ConfigStore *config.Store
 
 	// Now is the clock used for date defaults and sessions; nil means
@@ -42,7 +39,6 @@ type Server struct {
 	listen      string
 	dbPath      string
 	paths       config.Paths
-	repo        *settings.Repo
 	store       *store.Store
 	hub         *metrics.Hub
 	configStore *config.Store
@@ -68,7 +64,6 @@ func New(cfg Config) *Server {
 		listen:      cfg.Listen,
 		dbPath:      cfg.DBPath,
 		paths:       cfg.Paths,
-		repo:        cfg.Repo,
 		store:       cfg.Store,
 		hub:         cfg.Hub,
 		configStore: cfg.ConfigStore,
@@ -116,7 +111,6 @@ func (s *Server) Handler() http.Handler {
 	// Configuration endpoints. Setup and the pre-setup upstream probe are
 	// limited to the local machine instead of requiring a session.
 	mux.Handle("POST /api/setup", s.auth.RequireLoopback(http.HandlerFunc(s.setup)))
-	mux.Handle("POST /api/upstream/test", s.upstreamTestRoute(s.upstreamTest))
 	mux.Handle("GET /api/upstreams", require(s.listUpstreams))
 	mux.Handle("POST /api/upstreams", require(s.createUpstream))
 	mux.Handle("POST /api/upstreams/probe", require(s.probeUpstream))
@@ -134,15 +128,6 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("DELETE /api/keys/{keyId}", require(s.deleteKey))
 	mux.Handle("POST /api/keys/{keyId}/rotate", require(s.rotateKey))
 	mux.Handle("GET /api/keys/{keyId}/secret", require(s.keySecret))
-	mux.Handle("GET /api/models", require(s.listModels))
-	mux.Handle("POST /api/models", require(s.createModel))
-	mux.Handle("POST /api/models/import", require(s.importModels))
-	mux.Handle("PATCH /api/models/{id}", require(s.updateModel))
-	mux.Handle("DELETE /api/models/{id}", require(s.deleteModel))
-	mux.Handle("PUT /api/models/{id}/windows", require(s.replaceWindows))
-	mux.Handle("GET /api/settings", require(s.getSettings))
-	mux.Handle("PATCH /api/settings", require(s.patchSettings))
-	mux.Handle("POST /api/gateway-key/rotate", require(s.rotateGatewayKey))
 	mux.Handle("GET /api/general", require(s.getGeneral))
 	mux.Handle("PATCH /api/general", require(s.patchGeneral))
 	mux.Handle("GET /api/data", require(s.dataInfo))
