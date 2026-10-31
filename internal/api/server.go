@@ -57,6 +57,12 @@ func New(cfg Config) *Server {
 	if now == nil {
 		now = time.Now
 	}
+	// Paths carries the effective listen address after flag overrides; the
+	// legacy Listen field is the fallback for tests that only set that.
+	listen := cfg.Listen
+	if cfg.Paths.Listen != "" {
+		listen = cfg.Paths.Listen
+	}
 	return &Server{
 		version:     cfg.Version,
 		listen:      cfg.Listen,
@@ -67,7 +73,7 @@ func New(cfg Config) *Server {
 		hub:         cfg.Hub,
 		configStore: cfg.ConfigStore,
 		now:         now,
-		auth:        NewAuth(cfg.ConfigStore, now),
+		auth:        NewAuth(cfg.ConfigStore, listen, now),
 		catalog:     newCatalog(cfg.ConfigStore, cfg.Store, now),
 	}
 }

@@ -76,14 +76,14 @@ func sessionCookie(t *testing.T, rec *httptest.ResponseRecorder) *http.Cookie {
 }
 
 func TestLoopbackBypassOnlyWithoutPassword(t *testing.T) {
-	a := api.NewAuth(newTestStore(t, "", nil), time.Now) // no password
+	a := api.NewAuth(newTestStore(t, "", nil), "127.0.0.1:8100", time.Now) // no password
 	req := httptest.NewRequest("GET", "/api/overview", nil)
 	req.RemoteAddr = "127.0.0.1:5000"
 	if !a.Authenticated(req) {
 		t.Fatal("loopback without password must pass")
 	}
 
-	a2 := api.NewAuth(newTestStoreWithPassword(t, "hunter22"), time.Now)
+	a2 := api.NewAuth(newTestStoreWithPassword(t, "hunter22"), "127.0.0.1:8100", time.Now)
 	if a2.Authenticated(req) {
 		t.Fatal("password set must require session")
 	}
@@ -99,7 +99,7 @@ func TestLoopbackBypassOnlyWithoutPassword(t *testing.T) {
 
 func TestAuthUsesConfigSessionSecret(t *testing.T) {
 	st := newTestStoreWithPassword(t, "hunter22")
-	a := api.NewAuth(st, time.Now)
+	a := api.NewAuth(st, "127.0.0.1:8100", time.Now)
 
 	rec := httptest.NewRecorder()
 	a.Login(rec, jsonReq(`{"password":"hunter22"}`))
@@ -133,7 +133,7 @@ func TestAuthUsesConfigSessionSecret(t *testing.T) {
 }
 
 func TestAuthLoopbackStillBypassesPassword(t *testing.T) {
-	a := api.NewAuth(newTestStore(t, "", nil), time.Now)
+	a := api.NewAuth(newTestStore(t, "", nil), "127.0.0.1:8100", time.Now)
 	h := a.Require(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }))
 
 	req := httptest.NewRequest("GET", "/api/overview", nil)
@@ -153,7 +153,7 @@ func TestAuthEmptySessionSecretRefusesSession(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	a := api.NewAuth(st, time.Now)
+	a := api.NewAuth(st, "127.0.0.1:8100", time.Now)
 
 	rec := httptest.NewRecorder()
 	a.Login(rec, jsonReq(`{"password":"hunter22"}`))
@@ -167,7 +167,7 @@ func TestAuthEmptySessionSecretRefusesSession(t *testing.T) {
 
 func TestPasswordChangeInvalidatesSessions(t *testing.T) {
 	st := newTestStoreWithPassword(t, "hunter22")
-	a := api.NewAuth(st, time.Now)
+	a := api.NewAuth(st, "127.0.0.1:8100", time.Now)
 	rec := httptest.NewRecorder()
 	a.Login(rec, jsonReq(`{"password":"hunter22"}`))
 	cookie := sessionCookie(t, rec)
@@ -192,7 +192,7 @@ func TestPasswordChangeInvalidatesSessions(t *testing.T) {
 
 func TestAuthPasswordSetChangeClear(t *testing.T) {
 	st := newTestStore(t, "", nil)
-	a := api.NewAuth(st, time.Now)
+	a := api.NewAuth(st, "127.0.0.1:8100", time.Now)
 
 	// Initial set from a loopback request needs no current password.
 	rec := httptest.NewRecorder()
@@ -266,10 +266,9 @@ func TestAuthPasswordSetChangeClear(t *testing.T) {
 }
 
 func TestAuthPasswordClearRejectedOffLoopback(t *testing.T) {
-	st := newTestStore(t, "hunter22", func(c *config.Config) {
-		c.Server.Listen = "0.0.0.0:8100"
-	})
-	a := api.NewAuth(st, time.Now)
+	// The configuration still says loopback; only the effective listen decides.
+	st := newTestStore(t, "hunter22", nil)
+	a := api.NewAuth(st, "0.0.0.0:8100", time.Now)
 
 	rec := httptest.NewRecorder()
 	a.Password(rec, jsonReq(`{"current":"hunter22","newPassword":""}`))
@@ -283,7 +282,7 @@ func TestAuthPasswordClearRejectedOffLoopback(t *testing.T) {
 
 func TestCSRFRequiresOriginOrHeader(t *testing.T) {
 	called := false
-	h := api.NewAuth(newTestStore(t, "", nil), time.Now).CSRF(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called = true }))
+	h := api.NewAuth(newTestStore(t, "", nil), "127.0.0.1:8100", time.Now).CSRF(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called = true }))
 	req := httptest.NewRequest("POST", "/api/models", nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -300,7 +299,7 @@ func TestCSRFRequiresOriginOrHeader(t *testing.T) {
 
 func TestCSRFSafeMethodsAndOrigin(t *testing.T) {
 	called := 0
-	h := api.NewAuth(newTestStore(t, "", nil), time.Now).CSRF(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called++ }))
+	h := api.NewAuth(newTestStore(t, "", nil), "127.0.0.1:8100", time.Now).CSRF(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called++ }))
 
 	for _, method := range []string{"GET", "HEAD", "OPTIONS"} {
 		h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(method, "/api/overview", nil))
@@ -340,7 +339,7 @@ func TestCSRFSafeMethodsAndOrigin(t *testing.T) {
 }
 
 func TestRequireAndRequireLoopback(t *testing.T) {
-	a := api.NewAuth(newTestStoreWithPassword(t, "hunter22"), time.Now)
+	a := api.NewAuth(newTestStoreWithPassword(t, "hunter22"), "127.0.0.1:8100", time.Now)
 	h := a.Require(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }))
 
 	req := httptest.NewRequest("GET", "/api/overview", nil)
@@ -369,7 +368,7 @@ func TestRequireAndRequireLoopback(t *testing.T) {
 }
 
 func TestLoginLogoutAndRateLimit(t *testing.T) {
-	a := api.NewAuth(newTestStoreWithPassword(t, "hunter22"), time.Now)
+	a := api.NewAuth(newTestStoreWithPassword(t, "hunter22"), "127.0.0.1:8100", time.Now)
 
 	// Wrong password.
 	rec := httptest.NewRecorder()
@@ -446,7 +445,7 @@ func TestLoginLogoutAndRateLimit(t *testing.T) {
 func TestSessionExpiry(t *testing.T) {
 	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 	clock := func() time.Time { return now }
-	a := api.NewAuth(newTestStoreWithPassword(t, "hunter22"), clock)
+	a := api.NewAuth(newTestStoreWithPassword(t, "hunter22"), "127.0.0.1:8100", clock)
 
 	rec := httptest.NewRecorder()
 	a.Login(rec, jsonReq(`{"password":"hunter22"}`))
@@ -516,7 +515,7 @@ func assertAPIError(t *testing.T, rec *httptest.ResponseRecorder, status int, co
 }
 
 func TestAPIErrorEnvelope(t *testing.T) {
-	a := api.NewAuth(newTestStoreWithPassword(t, "hunter22"), time.Now)
+	a := api.NewAuth(newTestStoreWithPassword(t, "hunter22"), "127.0.0.1:8100", time.Now)
 
 	// 401 from Require.
 	rec := httptest.NewRecorder()

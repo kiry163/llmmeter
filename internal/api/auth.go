@@ -56,7 +56,11 @@ var errNoSessionSecret = errors.New("api: session secret not configured")
 // CSRF protection.
 type Auth struct {
 	store *config.Store
-	now   func() time.Time
+	// listen is the process's effective listen address, after flag and
+	// configuration resolution. Password-clearing decisions use it instead of
+	// the possibly stale server.listen in the current configuration.
+	listen string
+	now    func() time.Time
 
 	mu    sync.Mutex
 	login map[string]*attemptWindow
@@ -73,13 +77,15 @@ type sessionPayload struct {
 	Epoch string `json:"epoch"`
 }
 
-// NewAuth returns an Auth bound to the configuration store. now is the clock
-// used for session expiry and login rate limiting; nil means time.Now.
-func NewAuth(store *config.Store, now func() time.Time) *Auth {
+// NewAuth returns an Auth bound to the configuration store. effectiveListen is
+// the address the process actually listens on; it decides whether clearing the
+// admin password is safe. now is the clock used for session expiry and login
+// rate limiting; nil means time.Now.
+func NewAuth(store *config.Store, effectiveListen string, now func() time.Time) *Auth {
 	if now == nil {
 		now = time.Now
 	}
-	return &Auth{store: store, now: now, login: make(map[string]*attemptWindow)}
+	return &Auth{store: store, listen: effectiveListen, now: now, login: make(map[string]*attemptWindow)}
 }
 
 // snapshot returns the current immutable configuration snapshot. A server
@@ -294,7 +300,7 @@ func (a *Auth) Password(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		next = hash
-	} else if !LoopbackListen(snap.Config.Server.Listen) {
+	} else if !LoopbackListen(a.listen) {
 		writeAPIErrorFields(w, http.StatusBadRequest, codeValidation, "invalid password change",
 			map[string]string{"newPassword": "must be set when the listen address is not loopback"})
 		return
