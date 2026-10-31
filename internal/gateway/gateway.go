@@ -6,7 +6,6 @@ package gateway
 import (
 	"bytes"
 	"context"
-	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"io"
@@ -16,8 +15,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/kiry163/llmmeter/internal/config"
 	"github.com/kiry163/llmmeter/internal/metrics"
-	"github.com/kiry163/llmmeter/internal/settings"
 	"github.com/kiry163/llmmeter/internal/store"
 	"github.com/kiry163/llmmeter/internal/usage"
 )
@@ -37,8 +36,8 @@ const (
 )
 
 // sharedClient is shared by every Gateway so connections are pooled across
-// settings changes. It deliberately has no Timeout: upstream requests are not
-// cancelled by the gateway once started.
+// configuration changes. It deliberately has no Timeout: upstream requests are
+// not cancelled by the gateway once started.
 var sharedClient = &http.Client{
 	Transport: &http.Transport{
 		Proxy:               http.ProxyFromEnvironment,
@@ -55,20 +54,20 @@ var sharedClient = &http.Client{
 // Gateway forwards requests to the configured upstream and records the
 // accounting of every proxied request.
 type Gateway struct {
-	repo  *settings.Repo
+	cfg   *config.Store
 	store *store.Store
 	hub   *metrics.Hub
 	now   func() time.Time
 }
 
-// New returns a gateway reading configuration from repo and writing records and
+// New returns a gateway reading configuration from cfg and writing records and
 // live observations to st and hub. now is used for every timestamp; nil means
 // time.Now.
-func New(repo *settings.Repo, st *store.Store, hub *metrics.Hub, now func() time.Time) *Gateway {
+func New(cfg *config.Store, st *store.Store, hub *metrics.Hub, now func() time.Time) *Gateway {
 	if now == nil {
 		now = time.Now
 	}
-	return &Gateway{repo: repo, store: st, hub: hub, now: now}
+	return &Gateway{cfg: cfg, store: st, hub: hub, now: now}
 }
 
 // ClassifyPath maps a request path to the class reported in metrics and
@@ -119,20 +118,33 @@ type proxyResult struct {
 // ServeHTTP proxies one request and records its accounting. Requests to a
 // non chat/responses path are forwarded without their body being inspected.
 func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	snap := g.repo.Snapshot()
-	if snap == nil || snap.GatewayKey == "" {
+	snap := g.cfg.Snapshot()
+	if snap == nil || len(snap.Upstreams) == 0 || len(snap.Keys) == 0 {
 		writeError(w, http.StatusServiceUnavailable, "setup_required")
 		return
 	}
-	if !bearerMatches(r.Header.Get("Authorization"), snap.GatewayKey) {
-		writeError(w, http.StatusUnauthorized, "unauthorized")
+	raw, ok := bearerToken(r.Header.Get("Authorization"))
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "invalid_api_key")
+		return
+	}
+	// The binding is captured for the whole request, so a rebind only affects
+	// requests that start after the configuration changes.
+	binding, ok := snap.LookupKey(raw)
+	if !ok || !binding.Enabled {
+		writeError(w, http.StatusUnauthorized, "invalid_api_key")
+		return
+	}
+	upstream := binding.Upstream
+	if upstream == nil || !upstream.Active() {
+		writeError(w, http.StatusServiceUnavailable, "upstream_disabled")
 		return
 	}
 
 	started := g.now()
 	class := ClassifyPath(r.URL.Path)
 	prep := prepareRequest(r, class)
-	inflight := g.hub.Started(class, prep.model)
+	inflight := g.hub.Started(class, binding.UpstreamID, prep.model)
 
 	res := &proxyResult{
 		model:       prep.model,
@@ -144,7 +156,7 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		res.model, res.stream = "", false
 	}
 
-	target := strings.TrimRight(snap.Upstream.BaseURL, "/") + r.URL.Path
+	target := strings.TrimRight(upstream.BaseURL, "/") + r.URL.Path
 	if r.URL.RawQuery != "" {
 		target += "?" + r.URL.RawQuery
 	}
@@ -158,7 +170,7 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		res.status = http.StatusBadGateway
 		res.usageStatus = usage.StatusError
 		res.errText = "invalid upstream URL"
-		g.complete(snap, r, inflight, class, started, g.now(), res)
+		g.complete(snap, binding, r, inflight, class, started, g.now(), res)
 		writeError(w, http.StatusBadGateway, "upstream_error")
 		return
 	}
@@ -169,8 +181,8 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	stripHopByHop(outReq.Header)
 	outReq.Header.Del("Host")
 	outReq.Header.Del("Accept-Encoding")
-	if snap.Upstream.APIKey != "" {
-		outReq.Header.Set("Authorization", "Bearer "+snap.Upstream.APIKey)
+	if upstream.APIKey != "" {
+		outReq.Header.Set("Authorization", "Bearer "+upstream.APIKey)
 	} else {
 		outReq.Header.Del("Authorization")
 	}
@@ -183,7 +195,7 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		res.status = http.StatusBadGateway
 		res.usageStatus = usage.StatusError
 		res.errText = upstreamErrorText(err)
-		g.complete(snap, r, inflight, class, started, g.now(), res)
+		g.complete(snap, binding, r, inflight, class, started, g.now(), res)
 		writeError(w, http.StatusBadGateway, "upstream_error")
 		return
 	}
@@ -273,11 +285,11 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	g.complete(snap, r, inflight, class, started, completed, res)
+	g.complete(snap, binding, r, inflight, class, started, completed, res)
 }
 
 // complete prices the exchange, enqueues its record and feeds the live metrics.
-func (g *Gateway) complete(snap *settings.Snapshot, r *http.Request, inflight *metrics.Inflight, class string, started, completed time.Time, res *proxyResult) {
+func (g *Gateway) complete(snap *config.Snapshot, binding config.KeyBinding, r *http.Request, inflight *metrics.Inflight, class string, started, completed time.Time, res *proxyResult) {
 	loc := snap.Location
 	if loc == nil {
 		loc = time.UTC
@@ -291,6 +303,10 @@ func (g *Gateway) complete(snap *settings.Snapshot, r *http.Request, inflight *m
 		MinuteOfDay:        local.Hour()*60 + local.Minute(),
 		Path:               r.URL.Path,
 		PathClass:          class,
+		UpstreamID:         binding.UpstreamID,
+		UpstreamName:       binding.UpstreamName,
+		KeyID:              binding.KeyID,
+		KeyName:            binding.KeyName,
 		Model:              res.model,
 		UpstreamModel:      res.upstreamModel,
 		Stream:             res.stream,
@@ -312,7 +328,7 @@ func (g *Gateway) complete(snap *settings.Snapshot, r *http.Request, inflight *m
 		if priceModel == "" {
 			priceModel = rec.UpstreamModel
 		}
-		q := snap.Table.Quote(priceModel, completed, loc, rec.Usage)
+		q := binding.Table.Quote(priceModel, completed, loc, rec.Usage)
 		rec.WindowLabel, rec.RatesJSON = q.WindowLabel, q.RatesJSON
 		rec.CostNanoUSD, rec.Priced = q.CostNanoUSD, q.Priced
 	} else {
@@ -325,6 +341,7 @@ func (g *Gateway) complete(snap *settings.Snapshot, r *http.Request, inflight *m
 		CompletedAt:      completed,
 		LocalDay:         rec.LocalDay,
 		MinuteOfDay:      rec.MinuteOfDay,
+		UpstreamID:       binding.UpstreamID,
 		PathClass:        rec.PathClass,
 		Model:            rec.Model,
 		Status:           rec.Status,
@@ -426,14 +443,19 @@ func stripHopByHop(h http.Header) {
 	}
 }
 
-// bearerMatches reports whether the Authorization header carries key, compared
-// in constant time.
-func bearerMatches(header, key string) bool {
+// bearerToken extracts the token from an Authorization header. An absent or
+// empty token is reported as missing; the server-side hash lookup decides
+// whether the token is valid.
+func bearerToken(header string) (string, bool) {
 	const prefix = "Bearer "
 	if !strings.HasPrefix(header, prefix) {
-		return false
+		return "", false
 	}
-	return subtle.ConstantTimeCompare([]byte(header[len(prefix):]), []byte(key)) == 1
+	token := strings.TrimSpace(header[len(prefix):])
+	if token == "" {
+		return "", false
+	}
+	return token, true
 }
 
 // upstreamErrorText describes a failed upstream exchange without leaking the
@@ -442,9 +464,28 @@ func upstreamErrorText(err error) string {
 	return "upstream request failed"
 }
 
-// writeError writes a JSON error body with the given status code.
+// writeError writes an OpenAI-shaped error body with the given status code.
 func writeError(w http.ResponseWriter, status int, code string) {
+	message, kind := errorDetail(code)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	io.WriteString(w, `{"error":"`+code+`"}`)
+	json.NewEncoder(w).Encode(map[string]map[string]string{
+		"error": {"message": message, "type": kind, "code": code},
+	})
+}
+
+// errorDetail returns the client-facing message and OpenAI error type for a
+// gateway error code.
+func errorDetail(code string) (message, kind string) {
+	switch code {
+	case "invalid_api_key":
+		return "invalid gateway key", "invalid_request_error"
+	case "setup_required":
+		return "gateway is not configured", "server_error"
+	case "upstream_disabled":
+		return "upstream is disabled", "server_error"
+	case "upstream_error":
+		return "upstream request failed", "upstream_error"
+	}
+	return code, "server_error"
 }

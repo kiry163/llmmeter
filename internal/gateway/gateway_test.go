@@ -2,6 +2,7 @@ package gateway_test
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -11,9 +12,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kiry163/llmmeter/internal/config"
 	"github.com/kiry163/llmmeter/internal/gateway"
 	"github.com/kiry163/llmmeter/internal/metrics"
-	"github.com/kiry163/llmmeter/internal/settings"
 	"github.com/kiry163/llmmeter/internal/store"
 	"github.com/kiry163/llmmeter/internal/usage"
 )
@@ -40,34 +41,60 @@ func TestRequestHeaderBytesFormula(t *testing.T) {
 	}
 }
 
-// newTestGateway builds a gateway over a temporary database with a priced
-// deepseek-chat model and a frozen clock.
-func newTestGateway(t *testing.T, upstreamURL string) (*gateway.Gateway, *store.Store, *settings.Repo) {
+const testGatewayKey = "sk-local-test-000000000000000000000000000000"
+
+// testClock is the frozen clock shared by the gateway and its metrics hub so
+// every record falls on one reporting day.
+func testClock() time.Time {
+	return time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)
+}
+
+// newTestGatewayWith builds a gateway over a temporary database and config
+// store with the given upstreams and keys.
+func newTestGatewayWith(t *testing.T, upstreams []config.Upstream, keys []config.GatewayKey) (*gateway.Gateway, *store.Store, *config.Store, *metrics.Hub) {
 	t.Helper()
-	ctx := context.Background()
-	st, err := store.Open(filepath.Join(t.TempDir(), "gw.db"))
+	dbPath := filepath.Join(t.TempDir(), "gw.db")
+	st, err := store.Open(dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { st.Close() })
-	repo, err := settings.Open(st.DB())
+	cfg, err := config.OpenStore(filepath.Join(t.TempDir(), "config.yaml"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := repo.Setup(ctx, settings.SetupInput{
-		Upstream: settings.Upstream{BaseURL: upstreamURL, APIKey: "sk-up"},
-		Timezone: "UTC",
+	if err := cfg.Update(func(c *config.Config) error {
+		c.Server.Database = dbPath
+		c.General.Timezone = "UTC"
+		c.Upstreams = upstreams
+		c.GatewayKeys = keys
+		return nil
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := repo.CreateModel(ctx, settings.ModelInput{
-		Name: "deepseek-chat", Input: 0.28, Output: 0.42,
-	}); err != nil {
-		t.Fatal(err)
-	}
-	clock := func() time.Time { return time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC) }
-	hub := metrics.New(st, clock)
-	return gateway.New(repo, st, hub, clock), st, repo
+	hub := metrics.New(st, testClock)
+	return gateway.New(cfg, st, hub, testClock), st, cfg, hub
+}
+
+// newTestGateway builds a gateway over a temporary database with one upstream,
+// one local key, a priced deepseek-chat model and a frozen clock.
+func newTestGateway(t *testing.T, upstreamURL string) (*gateway.Gateway, *store.Store, string) {
+	t.Helper()
+	g, st, _, _ := newTestGatewayWith(t,
+		[]config.Upstream{{
+			ID:      "deepseek",
+			Name:    "DeepSeek",
+			BaseURL: upstreamURL,
+			APIKey:  "sk-up",
+			Models: []config.Model{{
+				Name: "deepseek-chat", Input: 0.28, Output: 0.42,
+			}},
+		}},
+		[]config.GatewayKey{{
+			ID: "local", Name: "Local", Key: testGatewayKey, UpstreamID: "deepseek",
+		}},
+	)
+	return g, st, testGatewayKey
 }
 
 func TestProxyRecordsBytesAndUsage(t *testing.T) {
@@ -82,10 +109,10 @@ func TestProxyRecordsBytesAndUsage(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	g, st, repo := newTestGateway(t, upstream.URL)
+	g, st, gwKey := newTestGateway(t, upstream.URL)
 	req := httptest.NewRequest("POST", "/v1/chat/completions",
 		strings.NewReader(`{"model":"deepseek-chat","messages":[]}`))
-	req.Header.Set("Authorization", "Bearer "+repo.Snapshot().GatewayKey)
+	req.Header.Set("Authorization", "Bearer "+gwKey)
 	rec := httptest.NewRecorder()
 	g.ServeHTTP(rec, req)
 	if rec.Code != 200 {
@@ -131,10 +158,10 @@ func TestStreamUsageAndInjection(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	g, st, repo := newTestGateway(t, upstream.URL)
+	g, st, gwKey := newTestGateway(t, upstream.URL)
 	req := httptest.NewRequest("POST", "/v1/chat/completions",
 		strings.NewReader(`{"model":"deepseek-chat","stream":true}`))
-	req.Header.Set("Authorization", "Bearer "+repo.Snapshot().GatewayKey)
+	req.Header.Set("Authorization", "Bearer "+gwKey)
 	rec := httptest.NewRecorder()
 	g.ServeHTTP(rec, req)
 	st.Flush()
@@ -149,9 +176,9 @@ func TestAllPathsRecorded(t *testing.T) {
 		io.WriteString(w, `{"ok":true}`)
 	}))
 	defer upstream.Close()
-	g, st, repo := newTestGateway(t, upstream.URL)
+	g, st, gwKey := newTestGateway(t, upstream.URL)
 	req := httptest.NewRequest("GET", "/v2/whatever?key=secret", nil)
-	req.Header.Set("Authorization", "Bearer "+repo.Snapshot().GatewayKey)
+	req.Header.Set("Authorization", "Bearer "+gwKey)
 	g.ServeHTTP(httptest.NewRecorder(), req)
 	st.Flush()
 	rows, _ := st.Requests(store.RequestFilter{From: "2026-10-29", To: "2026-10-29", Limit: 10})
@@ -165,9 +192,9 @@ func TestUpstreamErrorRecorded(t *testing.T) {
 		http.Error(w, "boom", 500)
 	}))
 	defer upstream.Close()
-	g, st, repo := newTestGateway(t, upstream.URL)
+	g, st, gwKey := newTestGateway(t, upstream.URL)
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"m"}`))
-	req.Header.Set("Authorization", "Bearer "+repo.Snapshot().GatewayKey)
+	req.Header.Set("Authorization", "Bearer "+gwKey)
 	rec := httptest.NewRecorder()
 	g.ServeHTTP(rec, req)
 	if rec.Code != 500 {
@@ -186,10 +213,10 @@ func TestOversizedRequestMarksTooLarge(t *testing.T) {
 		io.WriteString(w, `{"ok":true}`)
 	}))
 	defer upstream.Close()
-	g, st, repo := newTestGateway(t, upstream.URL)
+	g, st, gwKey := newTestGateway(t, upstream.URL)
 	body := `{"model":"m","pad":"` + strings.Repeat("x", 1<<20) + `"}`
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+repo.Snapshot().GatewayKey)
+	req.Header.Set("Authorization", "Bearer "+gwKey)
 	rec := httptest.NewRecorder()
 	g.ServeHTTP(rec, req)
 	if rec.Code != 200 {
@@ -211,9 +238,9 @@ func TestSSELineOverLimitStillForwards(t *testing.T) {
 		io.WriteString(w, "data: [DONE]\n\n")
 	}))
 	defer upstream.Close()
-	g, st, repo := newTestGateway(t, upstream.URL)
+	g, st, gwKey := newTestGateway(t, upstream.URL)
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"m","stream":true}`))
-	req.Header.Set("Authorization", "Bearer "+repo.Snapshot().GatewayKey)
+	req.Header.Set("Authorization", "Bearer "+gwKey)
 	rec := httptest.NewRecorder()
 	g.ServeHTTP(rec, req)
 	if rec.Body.Len() < 1<<20 {
@@ -239,7 +266,7 @@ func TestDisconnectDrainsUpstreamAndRecordsUsage(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	g, st, repo := newTestGateway(t, upstream.URL)
+	g, st, gwKey := newTestGateway(t, upstream.URL)
 	gwServer := httptest.NewServer(g)
 	defer gwServer.Close()
 
@@ -247,7 +274,7 @@ func TestDisconnectDrainsUpstreamAndRecordsUsage(t *testing.T) {
 	defer cancel()
 	req, _ := http.NewRequestWithContext(ctx, "POST", gwServer.URL+"/v1/chat/completions",
 		strings.NewReader(`{"model":"m","stream":true}`))
-	req.Header.Set("Authorization", "Bearer "+repo.Snapshot().GatewayKey)
+	req.Header.Set("Authorization", "Bearer "+gwKey)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -286,9 +313,9 @@ func TestMalformedUsageMarksParseFailed(t *testing.T) {
 		io.WriteString(w, `{"model":"m","usage":{"prompt_tokens":"ten"}}`)
 	}))
 	defer upstream.Close()
-	g, st, repo := newTestGateway(t, upstream.URL)
+	g, st, gwKey := newTestGateway(t, upstream.URL)
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"m"}`))
-	req.Header.Set("Authorization", "Bearer "+repo.Snapshot().GatewayKey)
+	req.Header.Set("Authorization", "Bearer "+gwKey)
 	g.ServeHTTP(httptest.NewRecorder(), req)
 	st.Flush()
 	rows, _ := st.Requests(store.RequestFilter{From: "2026-10-29", To: "2026-10-29", Limit: 10})
@@ -305,9 +332,9 @@ func TestLargeNonStreamResponseUsageParsed(t *testing.T) {
 		io.WriteString(w, body)
 	}))
 	defer upstream.Close()
-	g, st, repo := newTestGateway(t, upstream.URL)
+	g, st, gwKey := newTestGateway(t, upstream.URL)
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"deepseek-chat"}`))
-	req.Header.Set("Authorization", "Bearer "+repo.Snapshot().GatewayKey)
+	req.Header.Set("Authorization", "Bearer "+gwKey)
 	rec := httptest.NewRecorder()
 	g.ServeHTTP(rec, req)
 	if rec.Body.Len() != len(body) {
@@ -332,9 +359,9 @@ func TestResponseBytesMatchWireBodyWithoutTransparentGzip(t *testing.T) {
 		io.WriteString(w, body)
 	}))
 	defer upstream.Close()
-	g, st, repo := newTestGateway(t, upstream.URL)
+	g, st, gwKey := newTestGateway(t, upstream.URL)
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"deepseek-chat"}`))
-	req.Header.Set("Authorization", "Bearer "+repo.Snapshot().GatewayKey)
+	req.Header.Set("Authorization", "Bearer "+gwKey)
 	req.Header.Set("Accept-Encoding", "gzip")
 	g.ServeHTTP(httptest.NewRecorder(), req)
 	if got := <-acceptEncoding; got != "" {
@@ -357,9 +384,9 @@ func TestLargeNonUsageResponseIsForwardedWithoutUsageTracking(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	g, st, repo := newTestGateway(t, upstream.URL)
+	g, st, gwKey := newTestGateway(t, upstream.URL)
 	req := httptest.NewRequest("POST", "/v1/audio/speech", strings.NewReader(`{"model":"tts"}`))
-	req.Header.Set("Authorization", "Bearer "+repo.Snapshot().GatewayKey)
+	req.Header.Set("Authorization", "Bearer "+gwKey)
 	rec := httptest.NewRecorder()
 	g.ServeHTTP(rec, req)
 	if rec.Code != 200 || rec.Body.Len() != size {
@@ -378,5 +405,316 @@ func TestLargeNonUsageResponseIsForwardedWithoutUsageTracking(t *testing.T) {
 	}
 	if r0.RespBodyBytes != int64(size) || r0.Usage.TotalTokens != 0 {
 		t.Fatalf("bytes=%d usage=%+v", r0.RespBodyBytes, r0.Usage)
+	}
+}
+
+// gatewayErrorBody is the OpenAI-shaped error envelope the gateway returns.
+type gatewayErrorBody struct {
+	Error struct {
+		Message string `json:"message"`
+		Type    string `json:"type"`
+		Code    string `json:"code"`
+	} `json:"error"`
+}
+
+func decodeGatewayError(t *testing.T, rec *httptest.ResponseRecorder) gatewayErrorBody {
+	t.Helper()
+	var body gatewayErrorBody
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("error body %q: %v", rec.Body.String(), err)
+	}
+	return body
+}
+
+func chatModel() []config.Model {
+	return []config.Model{{Name: "deepseek-chat", Input: 1, Output: 2}}
+}
+
+// upstreamWithBody returns a test upstream that answers with body and reports
+// the Authorization header it received on gotAuth.
+func upstreamWithBody(t *testing.T, body string, gotAuth chan<- string) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		if gotAuth != nil {
+			gotAuth <- r.Header.Get("Authorization")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, body)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func TestGatewayRoutesKeyToBoundUpstream(t *testing.T) {
+	a := upstreamWithBody(t, `{"from":"a"}`, nil)
+	b := upstreamWithBody(t, `{"from":"b"}`, nil)
+	keys := []config.GatewayKey{
+		{ID: "key-a", Name: "Key A", Key: "sk-local-key-a-000000000000000000000000", UpstreamID: "a"},
+		{ID: "key-b", Name: "Key B", Key: "sk-local-key-b-000000000000000000000000", UpstreamID: "b"},
+	}
+	g, st, _, hub := newTestGatewayWith(t,
+		[]config.Upstream{
+			{ID: "a", Name: "Upstream A", BaseURL: a.URL, APIKey: "sk-a", Models: chatModel()},
+			{ID: "b", Name: "Upstream B", BaseURL: b.URL, APIKey: "sk-b", Models: chatModel()},
+		}, keys)
+
+	for i, key := range keys {
+		req := httptest.NewRequest("POST", "/v1/chat/completions",
+			strings.NewReader(`{"model":"deepseek-chat"}`))
+		req.Header.Set("Authorization", "Bearer "+key.Key)
+		rec := httptest.NewRecorder()
+		g.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("request %d status %d body %s", i, rec.Code, rec.Body.String())
+		}
+		want := fmt.Sprintf(`{"from":"%s"}`, key.UpstreamID)
+		if rec.Body.String() != want {
+			t.Fatalf("request %d body %q want %q", i, rec.Body.String(), want)
+		}
+	}
+
+	if err := st.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := st.Requests(store.RequestFilter{From: "2026-10-29", To: "2026-10-29", Limit: 10})
+	if err != nil || len(rows) != 2 {
+		t.Fatalf("rows=%v err=%v", rows, err)
+	}
+	byUpstream := make(map[string]store.Record, len(rows))
+	for _, r := range rows {
+		byUpstream[r.UpstreamID] = r
+	}
+	for _, want := range []struct {
+		upstream, upstreamName, keyID, keyName string
+	}{
+		{"a", "Upstream A", "key-a", "Key A"},
+		{"b", "Upstream B", "key-b", "Key B"},
+	} {
+		r, ok := byUpstream[want.upstream]
+		if !ok {
+			t.Fatalf("missing record for upstream %q: %+v", want.upstream, rows)
+		}
+		if r.UpstreamName != want.upstreamName || r.KeyID != want.keyID || r.KeyName != want.keyName {
+			t.Fatalf("record snapshots = %+v", r)
+		}
+	}
+
+	live := hub.Snapshot(time.Minute)
+	for _, id := range []string{"a", "b"} {
+		if live.ByUpstream[id].Requests != 1 {
+			t.Fatalf("metrics for upstream %q = %+v", id, live.ByUpstream[id])
+		}
+	}
+}
+
+func TestGatewayRebindAffectsOnlyNewRequests(t *testing.T) {
+	a := upstreamWithBody(t, `{"from":"a"}`, nil)
+	b := upstreamWithBody(t, `{"from":"b"}`, nil)
+	const key = "sk-local-rebind-000000000000000000000000"
+	g, st, cfg, _ := newTestGatewayWith(t,
+		[]config.Upstream{
+			{ID: "a", Name: "Upstream A", BaseURL: a.URL, APIKey: "sk-a", Models: chatModel()},
+			{ID: "b", Name: "Upstream B", BaseURL: b.URL, APIKey: "sk-b", Models: chatModel()},
+		},
+		[]config.GatewayKey{{ID: "key", Name: "Key", Key: key, UpstreamID: "a"}},
+	)
+
+	send := func() string {
+		req := httptest.NewRequest("POST", "/v1/chat/completions",
+			strings.NewReader(`{"model":"deepseek-chat"}`))
+		req.Header.Set("Authorization", "Bearer "+key)
+		rec := httptest.NewRecorder()
+		g.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status %d body %s", rec.Code, rec.Body.String())
+		}
+		return rec.Body.String()
+	}
+
+	if got := send(); got != `{"from":"a"}` {
+		t.Fatalf("first request body = %q", got)
+	}
+	if err := cfg.Update(func(c *config.Config) error {
+		c.GatewayKeys[0].UpstreamID = "b"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := send(); got != `{"from":"b"}` {
+		t.Fatalf("second request body = %q", got)
+	}
+
+	if err := st.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := st.Requests(store.RequestFilter{From: "2026-10-29", To: "2026-10-29", Limit: 10})
+	if err != nil || len(rows) != 2 {
+		t.Fatalf("rows=%v err=%v", rows, err)
+	}
+	counts := map[string]int{}
+	for _, r := range rows {
+		counts[r.UpstreamID]++
+	}
+	if counts["a"] != 1 || counts["b"] != 1 {
+		t.Fatalf("upstream counts = %v", counts)
+	}
+}
+
+func TestGatewayMissingOrDisabledKeyIs401(t *testing.T) {
+	upstream := upstreamWithBody(t, `{"ok":true}`, nil)
+	disabled := false
+	const (
+		goodKey = "sk-local-good-000000000000000000000000"
+		badKey  = "sk-local-disabled-0000000000000000000000"
+	)
+	g, _, _, _ := newTestGatewayWith(t,
+		[]config.Upstream{{ID: "a", Name: "Upstream A", BaseURL: upstream.URL, Models: chatModel()}},
+		[]config.GatewayKey{
+			{ID: "good", Name: "Good", Key: goodKey, UpstreamID: "a"},
+			{ID: "disabled", Name: "Disabled", Key: badKey, UpstreamID: "a", Enabled: &disabled},
+		},
+	)
+
+	cases := []struct {
+		name   string
+		header string
+	}{
+		{"missing", ""},
+		{"unknown", "Bearer sk-local-unknown-00000000000000000000"},
+		{"disabled", "Bearer " + badKey},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest("POST", "/v1/chat/completions",
+				strings.NewReader(`{"model":"deepseek-chat"}`))
+			if tc.header != "" {
+				req.Header.Set("Authorization", tc.header)
+			}
+			rec := httptest.NewRecorder()
+			g.ServeHTTP(rec, req)
+			if rec.Code != http.StatusUnauthorized {
+				t.Fatalf("status %d body %s", rec.Code, rec.Body.String())
+			}
+			body := decodeGatewayError(t, rec)
+			if body.Error.Code != "invalid_api_key" || body.Error.Type != "invalid_request_error" {
+				t.Fatalf("error = %+v", body.Error)
+			}
+		})
+	}
+}
+
+func TestGatewayDisabledUpstreamIs503(t *testing.T) {
+	upstream := upstreamWithBody(t, `{"ok":true}`, nil)
+	disabled := false
+	g, _, _, _ := newTestGatewayWith(t,
+		[]config.Upstream{{
+			ID: "a", Name: "Upstream A", BaseURL: upstream.URL,
+			Enabled: &disabled, Models: chatModel(),
+		}},
+		[]config.GatewayKey{{ID: "key", Name: "Key", Key: testGatewayKey, UpstreamID: "a"}},
+	)
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions",
+		strings.NewReader(`{"model":"deepseek-chat"}`))
+	req.Header.Set("Authorization", "Bearer "+testGatewayKey)
+	rec := httptest.NewRecorder()
+	g.ServeHTTP(rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status %d body %s", rec.Code, rec.Body.String())
+	}
+	body := decodeGatewayError(t, rec)
+	if body.Error.Code != "upstream_disabled" {
+		t.Fatalf("error = %+v", body.Error)
+	}
+}
+
+func TestGatewayNoUpstreamsIs503SetupRequired(t *testing.T) {
+	g, _, _, _ := newTestGatewayWith(t, nil, nil)
+	req := httptest.NewRequest("GET", "/v1/models", nil)
+	rec := httptest.NewRecorder()
+	g.ServeHTTP(rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status %d body %s", rec.Code, rec.Body.String())
+	}
+	body := decodeGatewayError(t, rec)
+	if body.Error.Code != "setup_required" || body.Error.Message == "" || body.Error.Type == "" {
+		t.Fatalf("error = %+v", body.Error)
+	}
+}
+
+func TestGatewayEmptyUpstreamKeyRemovesAuthorization(t *testing.T) {
+	gotAuth := make(chan string, 1)
+	upstream := upstreamWithBody(t, `{"ok":true}`, gotAuth)
+	g, st, _, _ := newTestGatewayWith(t,
+		[]config.Upstream{{ID: "local", Name: "Ollama", BaseURL: upstream.URL, Models: chatModel()}},
+		[]config.GatewayKey{{ID: "key", Name: "Key", Key: testGatewayKey, UpstreamID: "local"}},
+	)
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions",
+		strings.NewReader(`{"model":"deepseek-chat"}`))
+	req.Header.Set("Authorization", "Bearer "+testGatewayKey)
+	g.ServeHTTP(httptest.NewRecorder(), req)
+	if got := <-gotAuth; got != "" {
+		t.Fatalf("upstream received Authorization %q", got)
+	}
+	st.Flush()
+	rows, _ := st.Requests(store.RequestFilter{From: "2026-10-29", To: "2026-10-29", Limit: 10})
+	if len(rows) != 1 || rows[0].UpstreamID != "local" {
+		t.Fatalf("rows = %+v", rows)
+	}
+}
+
+func TestGatewayPricesWithBoundUpstreamTable(t *testing.T) {
+	const usageBody = `{"model":"deepseek-chat","usage":{"prompt_tokens":1000000,"completion_tokens":0}}`
+	a := upstreamWithBody(t, usageBody, nil)
+	b := upstreamWithBody(t, usageBody, nil)
+	const (
+		keyA = "sk-local-price-a-00000000000000000000000"
+		keyB = "sk-local-price-b-00000000000000000000000"
+	)
+	g, st, _, _ := newTestGatewayWith(t,
+		[]config.Upstream{
+			{ID: "a", Name: "Cheap", BaseURL: a.URL, Models: []config.Model{{Name: "deepseek-chat", Input: 1}}},
+			{ID: "b", Name: "Pricey", BaseURL: b.URL, Models: []config.Model{{Name: "deepseek-chat", Input: 3}}},
+		},
+		[]config.GatewayKey{
+			{ID: "ka", Name: "Key A", Key: keyA, UpstreamID: "a"},
+			{ID: "kb", Name: "Key B", Key: keyB, UpstreamID: "b"},
+		},
+	)
+
+	for _, key := range []string{keyA, keyB} {
+		req := httptest.NewRequest("POST", "/v1/chat/completions",
+			strings.NewReader(`{"model":"deepseek-chat"}`))
+		req.Header.Set("Authorization", "Bearer "+key)
+		rec := httptest.NewRecorder()
+		g.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status %d body %s", rec.Code, rec.Body.String())
+		}
+	}
+
+	if err := st.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := st.Requests(store.RequestFilter{From: "2026-10-29", To: "2026-10-29", Limit: 10})
+	if err != nil || len(rows) != 2 {
+		t.Fatalf("rows=%v err=%v", rows, err)
+	}
+	cost := make(map[string]int64, len(rows))
+	rates := make(map[string]string, len(rows))
+	for _, r := range rows {
+		if !r.Priced {
+			t.Fatalf("record not priced: %+v", r)
+		}
+		cost[r.UpstreamID] = r.CostNanoUSD
+		rates[r.UpstreamID] = r.RatesJSON
+	}
+	if cost["a"] != 1_000_000_000 || cost["b"] != 3_000_000_000 {
+		t.Fatalf("costs = %v", cost)
+	}
+	if rates["a"] == rates["b"] || rates["a"] == "" {
+		t.Fatalf("rates did not follow the bound upstream: %v", rates)
 	}
 }
