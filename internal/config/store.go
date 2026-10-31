@@ -29,13 +29,38 @@ type Store struct {
 const fileHeader = "# llmmeter configuration. This file contains secrets; keep it private.\n" +
 	"# It is rewritten on save, so hand-written comments are not preserved.\n"
 
+// Option configures OpenStore.
+type Option func(*storeOptions)
+
+type storeOptions struct {
+	database string
+}
+
+// WithEffectiveDatabase records db as server.database when OpenStore starts
+// from a missing configuration file. Resolving the database from
+// $XDG_CACHE_HOME and persisting that absolute path is what keeps the first
+// save from materializing the "~/.cache/..." literal, which would shadow the
+// environment on the next start. An existing configuration file always wins
+// and ignores the option. An empty db is ignored.
+func WithEffectiveDatabase(db string) Option {
+	return func(o *storeOptions) {
+		o.database = db
+	}
+}
+
 // OpenStore loads the configuration at path. A missing file is a legal
 // "setup mode" state: the defaults are used, Writable reports false and no
 // file is created until the first successful Update. An existing file that
 // fails to parse or validate makes OpenStore fail.
-func OpenStore(path string) (*Store, error) {
+func OpenStore(path string, opts ...Option) (*Store, error) {
 	if strings.TrimSpace(path) == "" {
 		return nil, errors.New("config: store path must not be empty")
+	}
+	var options storeOptions
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&options)
+		}
 	}
 	if err := ensureDir(filepath.Dir(path)); err != nil {
 		return nil, err
@@ -46,6 +71,11 @@ func OpenStore(path string) (*Store, error) {
 	}
 	if exists {
 		tightenPermissions(path)
+	} else if options.database != "" {
+		cfg.Server.Database = options.database
+		if err := cfg.Validate(); err != nil {
+			return nil, err
+		}
 	}
 	st := &Store{path: path}
 	st.cfg.Store(cfg)

@@ -67,6 +67,61 @@ func TestStoreReloadKeepsOldConfigOnInvalidFile(t *testing.T) {
 	}
 }
 
+func TestStoreReloadKeepsOldConfigWhenFileDeleted(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	st, err := OpenStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Update(func(c *Config) error {
+		c.Upstreams = []Upstream{{ID: "deepseek", Name: "DeepSeek", BaseURL: "https://api.deepseek.com"}}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	before := st.Config()
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Reload(); err == nil {
+		t.Fatal("expected reload error for a missing file")
+	}
+	if !reflect.DeepEqual(st.Config(), before) {
+		t.Fatal("config must not change when the file is gone")
+	}
+}
+
+func TestStoreReloadKeepsOldConfigOnSemanticError(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	st, err := OpenStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Update(func(c *Config) error {
+		c.Upstreams = []Upstream{{ID: "deepseek", Name: "DeepSeek", BaseURL: "https://api.deepseek.com"}}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	before := st.Config()
+	const doc = `version: 1
+server:
+  listen: "127.0.0.1:8100"
+  database: "~/.cache/llmmeter/llmmeter.db"
+general:
+  retention_days: 1
+`
+	if err := os.WriteFile(path, []byte(doc), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Reload(); err == nil {
+		t.Fatal("expected reload error for an invalid retention_days")
+	}
+	if !reflect.DeepEqual(st.Config(), before) {
+		t.Fatal("config must not change on a semantic reload failure")
+	}
+}
+
 func TestOpenStoreMissingFileUsesDefaults(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	st, err := OpenStore(path)
@@ -84,6 +139,67 @@ func TestOpenStoreMissingFileUsesDefaults(t *testing.T) {
 	}
 	if _, err := os.Stat(path); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("config file must not exist yet, err = %v", err)
+	}
+}
+
+func TestOpenStorePersistsResolvedDatabaseOnFirstUpdate(t *testing.T) {
+	cfgHome := t.TempDir()
+	cacheHome := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", cfgHome)
+	t.Setenv("XDG_CACHE_HOME", cacheHome)
+
+	paths, err := ResolvePaths("", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := OpenStore(paths.Config, WithEffectiveDatabase(paths.Database))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := st.Config().Server.Database; got != paths.Database {
+		t.Fatalf("in-memory database = %q, want %q", got, paths.Database)
+	}
+	if err := st.Update(func(c *Config) error {
+		c.Upstreams = []Upstream{{ID: "deepseek", Name: "DeepSeek", BaseURL: "https://api.deepseek.com"}}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := os.ReadFile(paths.Config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), paths.Database) {
+		t.Fatalf("file must persist the resolved database %q, got:\n%s", paths.Database, data)
+	}
+	if strings.Contains(string(data), DefaultDatabase) {
+		t.Fatalf("file must not persist the default literal %q, got:\n%s", DefaultDatabase, data)
+	}
+
+	again, err := ResolvePaths("", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.Database != paths.Database {
+		t.Fatalf("database after restart = %q, want %q", again.Database, paths.Database)
+	}
+}
+
+func TestOpenStoreIgnoresEffectiveDatabaseWhenFileExists(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	fromConfig := filepath.Join(dir, "from-config.db")
+	doc := "version: 1\nserver:\n  listen: 127.0.0.1:8100\n  database: " + fromConfig + "\n"
+	if err := os.WriteFile(path, []byte(doc), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	st, err := OpenStore(path, WithEffectiveDatabase(filepath.Join(dir, "from-flag.db")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := st.Config().Server.Database; got != fromConfig {
+		t.Fatalf("database = %q, want config value %q", got, fromConfig)
 	}
 }
 
