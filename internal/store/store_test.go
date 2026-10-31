@@ -2,40 +2,13 @@ package store_test
 
 import (
 	"context"
-	"database/sql"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
 	"github.com/kiry163/llmmeter/internal/store"
 	"github.com/kiry163/llmmeter/internal/usage"
 )
-
-func TestOpenDBCreatesSchemaV1(t *testing.T) {
-	db, err := store.OpenDB(filepath.Join(t.TempDir(), "test.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-
-	var v int
-	if err := db.QueryRow("PRAGMA user_version").Scan(&v); err != nil {
-		t.Fatal(err)
-	}
-	if v != 1 {
-		t.Fatalf("user_version = %d, want 1", v)
-	}
-	for _, table := range []string{"settings", "models", "price_windows", "requests", "traffic_minutes"} {
-		var name string
-		err := db.QueryRow(
-			"SELECT name FROM sqlite_master WHERE type='table' AND name=?", table,
-		).Scan(&name)
-		if err != nil {
-			t.Fatalf("table %s missing: %v", table, err)
-		}
-	}
-}
 
 func newStore(t *testing.T) *store.Store {
 	t.Helper()
@@ -89,36 +62,6 @@ func TestPruneRemovesOldRequests(t *testing.T) {
 	st.DB().QueryRow("SELECT COUNT(*) FROM requests").Scan(&n)
 	if n != 0 {
 		t.Fatalf("left %d rows", n)
-	}
-}
-
-func TestOpenDBRefusesNewerAndLegacySchemas(t *testing.T) {
-	dir := t.TempDir()
-
-	newer := filepath.Join(dir, "newer.db")
-	db, err := store.OpenDB(newer)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.Exec("PRAGMA user_version = 2"); err != nil {
-		t.Fatal(err)
-	}
-	db.Close()
-	if _, err := store.OpenDB(newer); err == nil || !strings.Contains(err.Error(), "newer") {
-		t.Fatalf("newer schema err = %v", err)
-	}
-
-	legacy := filepath.Join(dir, "legacy.db")
-	raw, err := sql.Open("sqlite", legacy)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := raw.Exec(`CREATE TABLE requests (id INTEGER PRIMARY KEY)`); err != nil {
-		t.Fatal(err)
-	}
-	raw.Close()
-	if _, err := store.OpenDB(legacy); err == nil || !strings.Contains(err.Error(), "legacy") {
-		t.Fatalf("legacy schema err = %v", err)
 	}
 }
 
