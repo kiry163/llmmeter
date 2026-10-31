@@ -73,53 +73,6 @@ func writeRepoError(w http.ResponseWriter, err error) {
 	}
 }
 
-// --- setup -----------------------------------------------------------------
-
-type setupUpstream struct {
-	BaseURL string `json:"baseUrl"`
-	APIKey  string `json:"apiKey"`
-}
-
-type setupRequest struct {
-	Upstream      setupUpstream `json:"upstream"`
-	Timezone      string        `json:"timezone"`
-	AdminPassword string        `json:"adminPassword"`
-}
-
-type gatewayKeyResponse struct {
-	GatewayKey string `json:"gatewayKey"`
-}
-
-// setup performs first-run initialization. It is available only before setup
-// has completed and only from the local machine.
-func (s *Server) setup(w http.ResponseWriter, r *http.Request) {
-	if snap := s.repo.Snapshot(); snap != nil && snap.SetupDone {
-		writeAPIError(w, http.StatusConflict, codeConflict, "setup already completed")
-		return
-	}
-	var in setupRequest
-	if !decodeJSON(w, r, &in) {
-		return
-	}
-	key, err := s.repo.Setup(r.Context(), settings.SetupInput{
-		Upstream: settings.Upstream{
-			BaseURL: in.Upstream.BaseURL,
-			APIKey:  in.Upstream.APIKey,
-		},
-		Timezone:      in.Timezone,
-		AdminPassword: in.AdminPassword,
-	})
-	if err != nil {
-		writeRepoError(w, err)
-		return
-	}
-	s.catalog.invalidate()
-	if in.AdminPassword != "" {
-		s.auth.Issue(w)
-	}
-	writeJSON(w, http.StatusOK, gatewayKeyResponse{GatewayKey: key})
-}
-
 // --- models ----------------------------------------------------------------
 
 type windowJSON struct {

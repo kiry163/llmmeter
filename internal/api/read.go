@@ -36,32 +36,6 @@ const (
 	maxHourIntervalDays   = 90
 )
 
-// bootstrap is the unauthenticated first-load payload.
-type bootstrap struct {
-	Version      string `json:"version"`
-	NeedsSetup   bool   `json:"needsSetup"`
-	AuthRequired bool   `json:"authRequired"`
-	Listen       string `json:"listen"`
-	Timezone     string `json:"timezone"`
-	EarliestDay  string `json:"earliestDay"`
-}
-
-func (s *Server) bootstrap(w http.ResponseWriter, _ *http.Request) {
-	snap := s.repo.Snapshot()
-	earliest, err := s.store.EarliestDay()
-	if err != nil {
-		slog.Error("api: earliest day", "error", sanitizeLogError(err))
-	}
-	writeJSON(w, http.StatusOK, bootstrap{
-		Version:      s.version,
-		NeedsSetup:   snap == nil || !snap.SetupDone,
-		AuthRequired: snap != nil && snap.AdminPasswordHash != "",
-		Listen:       s.listen,
-		Timezone:     s.location().String(),
-		EarliestDay:  earliest,
-	})
-}
-
 // me reports the viewer's authentication state without requiring a session.
 type me struct {
 	AuthRequired  bool `json:"authRequired"`

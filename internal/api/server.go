@@ -18,6 +18,9 @@ type Config struct {
 	Listen string
 	// DBPath is the SQLite file path reported by the settings endpoint.
 	DBPath string
+	// Paths are the resolved configuration file, database and effective
+	// listen address. They are reported by /api/bootstrap and /api/data.
+	Paths config.Paths
 
 	Repo  *settings.Repo
 	Store *store.Store
@@ -38,6 +41,7 @@ type Server struct {
 	version     string
 	listen      string
 	dbPath      string
+	paths       config.Paths
 	repo        *settings.Repo
 	store       *store.Store
 	hub         *metrics.Hub
@@ -57,6 +61,7 @@ func New(cfg Config) *Server {
 		version:     cfg.Version,
 		listen:      cfg.Listen,
 		dbPath:      cfg.DBPath,
+		paths:       cfg.Paths,
 		repo:        cfg.Repo,
 		store:       cfg.Store,
 		hub:         cfg.Hub,
@@ -106,6 +111,10 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/settings", require(s.getSettings))
 	mux.Handle("PATCH /api/settings", require(s.patchSettings))
 	mux.Handle("POST /api/gateway-key/rotate", require(s.rotateGatewayKey))
+	mux.Handle("GET /api/general", require(s.getGeneral))
+	mux.Handle("PATCH /api/general", require(s.patchGeneral))
+	mux.Handle("GET /api/data", require(s.dataInfo))
+	mux.Handle("POST /api/config/reload", require(s.reloadConfig))
 
 	// Unknown /api paths still answer with the JSON error envelope.
 	mux.HandleFunc("/api/", s.notFound)
