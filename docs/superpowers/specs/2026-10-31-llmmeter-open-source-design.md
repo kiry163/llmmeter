@@ -200,11 +200,11 @@ flowchart LR
   - `general.timezone` 使用 `time.Local.String()`（`time.LoadLocation` 可解析）
   - `general.retention_days: 90`
   - `auth.admin_password_hash` 为空；`auth.session_secret` 在生成模板时创建并直接写入（不再依赖启动后的回写）
-  - `upstreams: []`、`gateway_keys: []`，注释说明可在 YAML 或 WebUI 添加第一个上游与本地 key
+  - `upstreams: []`、`gateway_keys: []`，注释说明在 YAML 中添加第一个上游与本地 key
 - 文件已存在时不做任何修改；内容是否合法由加载阶段校验。
 - 模板通过既有原子写落盘，文件 `0600`，新建目录 `0700`。
-- 零上游时服务正常运行：面板可登录、读空配置，并可创建第一个上游/key；网关返回 `503 not_configured`。
-- 上游、key、价格、时区、保留天数可在 WebUI 保存；`listen` 与 `database` 修改后需重启。
+- 零上游时服务正常运行：面板可登录、读空配置，配置写接口不因零上游返回 409；网关返回 `503 not_configured`。
+- 上游、key、价格、时区、保留天数通过编辑 YAML 修改，保存后重载或重启；`listen` 与 `database` 修改后需重启。
 - 第一次保存会用常规序列化重写文件，模板注释不保证保留。
 
 ### 4.6 安全
@@ -1104,9 +1104,11 @@ CREATE TABLE traffic_minutes (
 
 ### 10.4 Docker 与无头部署
 
-- 容器内默认监听 `0.0.0.0:8100` 时，必须提供管理密码，否则启动失败。
-- 没有独立写配置命令：挂载配置目录，首次启动会写入带注释的模板；在宿主编辑 `config/config.yaml`，填写 `auth.admin_password_hash`、`upstreams` 与 `gateway_keys`（或先在回环环境通过 WebUI 配置后复制文件）。
-- 示例 `docker-compose.yml`：
+- 首次启动写入 `/config/config.yaml`；用户编辑该文件添加 `upstreams` 与 `gateway_keys`，然后重启或发送 `SIGHUP`。
+- 数据库固定在 `/data/llmmeter.db`（挂载卷），不随容器重建丢失。
+- 当前构建没有应用内首次密码设置，Docker 示例保持回环监听，不需要管理密码。
+- 若改为非回环监听，必须先在配置中写入 `auth.admin_password_hash`，否则启动失败；当前版本没有在应用内生成该哈希的引导流程。
+- 示例 `docker-compose.yml`（Linux，`network_mode: host` 让容器共享宿主回环）：
 
   ```yaml
   services:
@@ -1115,10 +1117,11 @@ CREATE TABLE traffic_minutes (
       command:
         - -config
         - /config/config.yaml
+        - -db
+        - /data/llmmeter.db
         - -listen
-        - 0.0.0.0:8100
-      ports:
-        - "127.0.0.1:8100:8100"
+        - 127.0.0.1:8100
+      network_mode: host
       volumes:
         - ./config:/config
         - ./data:/data
@@ -1127,8 +1130,8 @@ CREATE TABLE traffic_minutes (
 - 首次使用：
 
   ```bash
-  docker compose run --rm llmmeter   # 生成 config/config.yaml 模板；非回环缺密码时会退出
-  $EDITOR ./config/config.yaml       # 填写 admin_password_hash、upstreams 与 gateway_keys
+  docker compose run --rm llmmeter   # 首次启动写入 /config/config.yaml
+  $EDITOR ./config/config.yaml       # 添加 upstreams 与 gateway_keys
   docker compose up -d
   ```
 

@@ -179,18 +179,6 @@ func (a *Auth) Require(next http.Handler) http.Handler {
 	})
 }
 
-// RequireLoopback rejects requests that did not originate from the local
-// machine with 403.
-func (a *Auth) RequireLoopback(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !IsLoopback(r) {
-			writeAPIError(w, http.StatusForbidden, "forbidden", "loopback required")
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
-}
-
 // CSRF rejects state-changing requests that were not issued by this origin.
 // Safe methods pass; otherwise the request must carry X-Requested-With:
 // llmmeter or a same-host Origin.

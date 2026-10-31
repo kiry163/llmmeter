@@ -17,16 +17,16 @@ import (
 // templateBody is the annotated configuration written on first start. The
 // values are substituted with yamlScalar so unusual paths stay valid YAML.
 // It intentionally has no upstreams or gateway keys: the user adds the first
-// one here or in the WebUI.
+// ones here.
 const templateBody = `# llmmeter configuration. This file contains secrets; keep it private.
 #
 # llmmeter created this file on first start. Add at least one upstream and one
-# gateway key below, or use the WebUI under Settings. Saves from the server
-# rewrite this file, so hand-written comments are not preserved.
+# gateway key below, then restart the server or send SIGHUP. Saves from the
+# server rewrite this file, so hand-written comments are not preserved.
 version: 1
 server:
-  # HTTP listen address. Keep the loopback default unless an admin password is
-  # configured.
+  # HTTP listen address; non-loopback addresses require
+  # auth.admin_password_hash.
   listen: %s
   # SQLite usage database. A relative path resolves against this file's
   # directory.
@@ -46,14 +46,14 @@ auth:
 #     name: My provider
 #     base_url: https://api.example.com
 #     api_key: sk-...
-# Add the first upstream here or in the WebUI.
+# Add the first upstream here.
 upstreams: []
 # Local gateway keys bound to an upstream, for example:
 #   - id: default
 #     name: default
 #     key: sk-local-...
 #     upstream_id: my-provider
-# Add the first key here or in the WebUI.
+# Add the first key here.
 gateway_keys: []
 `
 

@@ -3,7 +3,7 @@
 本机运行的 OpenAI 兼容透传网关：除下文说明的流式 usage 注入外，所有请求原样转发到唯一的上游，逐条记录 token、花费与上下行字节，并提供一个可查看统计、日志、分析与编辑配置的管理面板。为 omp、codex、OpenAI SDK 这类客户端设计，上游通常是 DeepSeek 等 OpenAI 兼容服务。
 
 - 单二进制内嵌前端与 SQLite，运行时不依赖 Node 或外部数据库。
-- 上游、价格、时区、保留与访问控制保存在 YAML 配置文件（schema v2，默认 `~/.config/llmmeter/config.yaml`）中，重启后以 YAML 为准；首次启动会自动生成带注释的配置模板，之后直接编辑 YAML 或在 WebUI 设置页修改。
+- 上游、价格、时区、保留与访问控制保存在 YAML 配置文件（schema v2，默认 `~/.config/llmmeter/config.yaml`）中，重启后以 YAML 为准；首次启动会自动生成带注释的配置模板，之后编辑 YAML 并重载或重启。
 - 纯透传：除给缺少 `stream_options` 的流式 chat 请求注入 `include_usage` 外不改写任何请求，不做协议转换，不估算 token。
 
 ## 构建与运行
@@ -13,11 +13,11 @@ make build          # npm ci + 前端构建 + go build -o llmmeter
 ./llmmeter -config ~/.config/llmmeter/config.yaml
 ```
 
-- 首次启动时，若配置文件不存在，会在该路径生成带注释的 YAML 模板（0600，目录 0700），然后正常启动。模板默认没有上游和本地 key；在设置页添加第一个上游与 key，或直接编辑 YAML 后重启/重载（`SIGHUP` 或设置页的“重新加载配置”）。
+- 首次启动时，若配置文件不存在，会在该路径生成带注释的 YAML 模板（0600，目录 0700），然后正常启动。模板默认没有上游和本地 key；编辑 YAML 添加第一个上游与 key，然后重启或发送 `SIGHUP`。
 - `-config` 默认 `$XDG_CONFIG_HOME/llmmeter/config.yaml`（通常是 `~/.config/llmmeter/config.yaml`），文件格式为 YAML schema v2。
 - `-db` 默认取配置里的 `server.database`，未配置时为 `$XDG_CACHE_HOME/llmmeter/llmmeter.db`；`-listen` 的优先级是 `-listen` > `server.listen` > `127.0.0.1:8100`。
 - 首次构建前端需要 Node.js 与 npm；`make web` 只构建前端，`make test` 跑 Go 与前端测试。
-- 打开 <http://127.0.0.1:8100/>；没有上游时页面照常打开，设置页可添加第一个上游。
+- 打开 <http://127.0.0.1:8100/>；没有上游时页面照常打开，但需先编辑 YAML 添加第一个上游。
 
 ## 界面与路由
 
@@ -38,9 +38,9 @@ make build          # npm ci + 前端构建 + go build -o llmmeter
 ## 首次配置
 
 1. 直接运行 `llmmeter`。若配置文件不存在，程序会生成带注释的模板并启动，默认监听 `127.0.0.1:8100`。
-2. 在设置页添加第一个上游：填写 `baseUrl`（如 `https://api.deepseek.com`）与上游 API key，然后创建或轮换本地 gateway key（`sk-local-…`）。也可以直接编辑 YAML 里的 `upstreams` / `gateway_keys` 后重载。
+2. 编辑 `config.yaml`：在 `upstreams` 添加第一个上游（`id`、`name`、`base_url` 如 `https://api.deepseek.com`、`api_key`），在 `gateway_keys` 添加绑定它的本地 key（`id`、`name`、`key` 为 `sk-local-…`、`upstream_id`）。保存后重启或发送 `SIGHUP`。
    **不要带 `/v1`**：客户端请求路径会原样拼在其后，填 `https://api.deepseek.com/v1` 会变成 `/v1/v1/chat/completions`。
-3. 要开放给其他机器，先在本机设置管理密码，再用非回环地址启动（见“认证与远程访问”）。没有上游时网关返回 `503 not_configured`，面板配置读写始终可用。
+3. 要开放给其他机器，先在配置里设置管理密码哈希，再用非回环地址启动（见“认证与远程访问”）。没有上游时网关返回 `503 not_configured`，面板配置读写始终可用。
 
 ## 客户端接入
 
@@ -144,13 +144,13 @@ wire_api = "chat"
 
 ## 保留、备份与恢复
 
-- 请求明细默认保留 **90 天**，可在设置页调整为 7–3650 天；每天本地时间 03:00 清理过期明细。
+- 请求明细默认保留 **90 天**，可在 `general.retention_days` 调整为 7–3650 天；每天本地时间 03:00 清理过期明细。
 - 按分钟聚合的流量（`traffic_minutes`）**永久保留**：明细被清理后，总览的请求数/token/字节/花费、序列与 breakdown 图表仍有数据；但 priced/unpriced/unmetered 计数与延迟分位数来自明细表，过期后不再可得，请求详情也不可再查。分析页的 Top 榜单、缓存节省金额、健康区块的未计量/未解析/断开/慢请求计数与 P95 同样依赖明细，区间超出保留期时置灰（`range.partial=true`）。
 - 全部数据就在一个 SQLite 文件（默认 `llmmeter.db`）里。备份时停止进程后复制该文件即可；不停机时用 `sqlite3 llmmeter.db ".backup backup.db"`（WAL 模式下不要只拷主文件）。
 
 ## 限制
 
-- 同时只支持一个上游；在设置页修改 base URL/key 会立即对后续请求生效，修改监听地址需重启。
+- 同时只支持一个上游；编辑 YAML 修改 base URL/key 后重载或重启生效，修改监听地址需重启。
 - 不重试、不回退、不多上游负载均衡。
 - 纯透传，不做协议转换（不把 responses 请求翻译成 chat，反之亦然），只在流式 chat 缺少 `stream_options` 时注入 `include_usage`。
 - 网关不设置上游请求超时，也不会在客户端断开后主动取消已开始的上游请求；请求会一直读到上游结束，使用方需自行处理上游长时间无响应的情况。

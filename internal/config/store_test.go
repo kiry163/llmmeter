@@ -579,6 +579,49 @@ server:
 	}
 }
 
+func TestResolvePathsMakesRelativeDatabaseAbsolute(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+
+	cfgPath := filepath.Join(dir, "conf", "config.yaml")
+
+	paths, err := ResolvePaths(cfgPath, "mydata/x.db", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(dir, "mydata", "x.db")
+	if paths.Database != want {
+		t.Fatalf("database = %q, want %q", paths.Database, want)
+	}
+
+	// The generated template must persist the absolute path, so a later start
+	// without -db opens the same database instead of reinterpreting it
+	// relative to the config directory.
+	if _, err := EnsureFile(paths.Config, paths); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Parse(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Server.Database != want {
+		t.Fatalf("template database = %q, want %q", cfg.Server.Database, want)
+	}
+	again, err := ResolvePaths(cfgPath, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.Database != want {
+		t.Fatalf("resolved database after restart = %q, want %q", again.Database, want)
+	}
+}
+
 func TestResolvePathsExpandsTildeDatabase(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

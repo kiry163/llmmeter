@@ -24,8 +24,8 @@ type Paths struct {
 // configuration file is legal and yields the defaults.
 //
 // The database may be written as "~/..." or relative to the configuration
-// file's directory. The configuration and database directories are created
-// with mode 0700 when missing.
+// file's directory; Paths.Database is always absolute. The configuration and
+// database directories are created with mode 0700 when missing.
 func ResolvePaths(configFlag, dbFlag, listenFlag string) (Paths, error) {
 	configPath, err := resolveConfigPath(configFlag)
 	if err != nil {
@@ -53,6 +53,14 @@ func ResolvePaths(configFlag, dbFlag, listenFlag string) (Paths, error) {
 	}
 	if err != nil {
 		return Paths{}, err
+	}
+	// Persist and run with an absolute database path. A relative one would be
+	// interpreted against the working directory now but against the config
+	// directory on the next start (where server.database is relative to the
+	// file), silently opening a different database.
+	db, err = filepath.Abs(db)
+	if err != nil {
+		return Paths{}, fmt.Errorf("config: resolve database path %q: %w", db, err)
 	}
 
 	listen := listenFlag

@@ -338,7 +338,7 @@ func TestCSRFSafeMethodsAndOrigin(t *testing.T) {
 	}
 }
 
-func TestRequireAndRequireLoopback(t *testing.T) {
+func TestRequireRejectsUnauthenticated(t *testing.T) {
 	a := api.NewAuth(newTestStoreWithPassword(t, "hunter22"), "127.0.0.1:8100", time.Now)
 	h := a.Require(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }))
 
@@ -348,22 +348,6 @@ func TestRequireAndRequireLoopback(t *testing.T) {
 	h.ServeHTTP(rec, req)
 	if rec.Code != 401 {
 		t.Fatalf("password set must require session even on loopback, code=%d", rec.Code)
-	}
-
-	lh := a.RequireLoopback(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }))
-	req = httptest.NewRequest("POST", "/api/upstreams", nil)
-	req.RemoteAddr = "192.0.2.7:9999"
-	rec = httptest.NewRecorder()
-	lh.ServeHTTP(rec, req)
-	if rec.Code != 403 {
-		t.Fatalf("non-loopback must be rejected, code=%d", rec.Code)
-	}
-	req = httptest.NewRequest("POST", "/api/upstreams", nil)
-	req.RemoteAddr = "[::1]:9999"
-	rec = httptest.NewRecorder()
-	lh.ServeHTTP(rec, req)
-	if rec.Code != 200 {
-		t.Fatalf("IPv6 loopback must pass, code=%d", rec.Code)
 	}
 }
 
@@ -523,13 +507,6 @@ func TestAPIErrorEnvelope(t *testing.T) {
 	req.RemoteAddr = "127.0.0.1:5000"
 	a.Require(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })).ServeHTTP(rec, req)
 	assertAPIError(t, rec, http.StatusUnauthorized, "unauthorized")
-
-	// 403 from RequireLoopback.
-	rec = httptest.NewRecorder()
-	req = httptest.NewRequest("POST", "/api/upstreams", nil)
-	req.RemoteAddr = "192.0.2.7:9999"
-	a.RequireLoopback(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })).ServeHTTP(rec, req)
-	assertAPIError(t, rec, http.StatusForbidden, "forbidden")
 
 	// 403 from CSRF.
 	rec = httptest.NewRecorder()
