@@ -670,7 +670,7 @@ Expected: FAIL（旧 `New` 只接受 `settings.Repo`）。
 
 - [ ] **Step 3: 实现**
 
-- `ServeHTTP` 开头：`snap := g.store.Snapshot()`；无上游或 key 为空 → `503 setup_required`。
+- `ServeHTTP` 开头：`snap := g.store.Snapshot()`；无上游 → `503 setup_required`；上游存在但 key 索引为空 → 继续走 key 查找，返回 `401 invalid_api_key`。
 - 取 Bearer 原值，`binding, ok := snap.LookupKey(raw)`；`!ok || !binding.Enabled` → `401 invalid_api_key`。
 - `binding.Upstream == nil || !binding.Upstream.Active()` → `503 upstream_disabled`。
 - 目标 URL 用 `binding.Upstream.BaseURL`；上游 key 用 `binding.Upstream.APIKey`。
