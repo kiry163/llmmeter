@@ -16,7 +16,7 @@ make build          # npm ci + 前端构建 + go build -o llmmeter
 
 - `init` 可选：交互式首次配置也可以启动后打开 `/setup`。
 - `-config` 默认 `$XDG_CONFIG_HOME/llmmeter/config.yaml`（通常是 `~/.config/llmmeter/config.yaml`），文件格式为 YAML schema v2。
-- `-db` 默认取配置里的 `server.database`，未配置时为 `$XDG_CACHE_HOME/llmmeter/llmmeter.db`；`-listen` 默认 `127.0.0.1:8100`。
+- `-db` 默认取配置里的 `server.database`，未配置时为 `$XDG_CACHE_HOME/llmmeter/llmmeter.db`；`-listen` 的优先级是 `-listen` > `server.listen` > `127.0.0.1:8100`。
 - 首次构建前端需要 Node.js 与 npm；`make web` 只构建前端，`make test` 跑 Go 与前端测试。
 - 打开 <http://127.0.0.1:8100/>；未配置时会跳到 `/setup`。
 
@@ -45,7 +45,7 @@ make build          # npm ci + 前端构建 + go build -o llmmeter
 
 ## 客户端接入
 
-面板会给出 `base_url` 与 gateway key。网关认证与上游 key 分离：客户端只拿 gateway key，上游 key 保存在 SQLite 中且不再回显。
+面板会给出 `base_url` 与 gateway key。网关认证与上游 key 分离：客户端只拿 gateway key；上游 key 与本地 gateway key 都保存在 `config.yaml`（权限 0600）中。列表接口只返回掩码，只有显式 reveal 接口（`/api/upstreams/{id}/secret`、`/api/keys/{keyId}/secret`）才返回明文。
 
 OpenAI SDK：
 
