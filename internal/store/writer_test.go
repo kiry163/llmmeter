@@ -336,12 +336,14 @@ WITH RECURSIVE seq(n) AS (
 )
 INSERT INTO requests (
   started_at, completed_at, local_day, minute_of_day,
-  path, path_class, stream, status, latency_ms,
+  path, path_class, upstream_id, upstream_name, key_id, key_name,
+  stream, status, latency_ms,
   req_body_bytes, req_header_bytes, resp_body_bytes, resp_header_bytes,
   usage_status
 )
 SELECT '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:01.000Z', '2026-01-01', 60,
-       '/v1/chat/completions', 'chat', 0, 200, 10, 0, 0, 0, 0, 'ok'
+       '/v1/chat/completions', 'chat', 'up', 'Upstream', 'key', 'Key',
+       0, 200, 10, 0, 0, 0, 0, 'ok'
 FROM seq`); err != nil {
 		t.Fatal(err)
 	}

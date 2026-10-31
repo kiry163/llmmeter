@@ -13,23 +13,37 @@ import (
 
 // TrendModel is one model's contribution to a trend bucket.
 type TrendModel struct {
-	Requests, PromptTokens, CompletionTokens int64
-	CostNanoUSD, UpBytes, DownBytes          int64
+	Requests, PromptTokens, CompletionTokens, CacheReadTokens int64
+	CostNanoUSD, UpBytes, DownBytes                           int64
+}
+
+// TrendSeries is one (upstream, model) row of a trend bucket, which is what
+// the analysis series[] entries are built from. Upstreams are never merged:
+// the same model served by two upstreams yields two series entries.
+type TrendSeries struct {
+	UpstreamID, Model string
+	TrendModel
 }
 
 // TrendBucket is one time bucket of the per-model trend query. MinuteOfDay is
-// 0 for day buckets.
+// 0 for day buckets. Series keeps the upstream dimension; ByModel is the
+// legacy per-model view that sums every upstream together and is retained
+// until the API serves series[].
 type TrendBucket struct {
 	Day         string
 	MinuteOfDay int
+	Series      []TrendSeries
 	ByModel     map[string]TrendModel
 }
 
-// TopRequest is one entry of a top-requests ranking. TTFTMS is nil when the
-// request had no time to first token.
+// TopRequest is one entry of a top-requests ranking. The upstream and key
+// names are the snapshots taken when the request started. TTFTMS is nil when
+// the request had no time to first token.
 type TopRequest struct {
 	ID                                              int64
 	StartedAt                                       time.Time
+	UpstreamID, UpstreamName                        string
+	KeyID, KeyName                                  string
 	Model, PathClass                                string
 	Stream                                          bool
 	PromptTokens, CompletionTokens, CacheReadTokens int64
@@ -77,28 +91,28 @@ const (
 
 const (
 	trendModelMinuteSQL = `
-SELECT local_day, minute_of_day, model,
-       SUM(requests), SUM(prompt_tokens), SUM(completion_tokens),
+SELECT local_day, minute_of_day, upstream_id, model,
+       SUM(requests), SUM(prompt_tokens), SUM(completion_tokens), SUM(cache_read_tokens),
        SUM(cost_nano_usd), SUM(req_bytes), SUM(resp_bytes)
 FROM traffic_minutes WHERE local_day BETWEEN ? AND ?
-GROUP BY local_day, minute_of_day, model HAVING SUM(requests) > 0
-ORDER BY local_day, minute_of_day, model`
+GROUP BY local_day, minute_of_day, upstream_id, model HAVING SUM(requests) > 0
+ORDER BY local_day, minute_of_day, upstream_id, model`
 
 	trendModelHourSQL = `
-SELECT local_day, minute_of_day / 60, model,
-       SUM(requests), SUM(prompt_tokens), SUM(completion_tokens),
+SELECT local_day, minute_of_day / 60, upstream_id, model,
+       SUM(requests), SUM(prompt_tokens), SUM(completion_tokens), SUM(cache_read_tokens),
        SUM(cost_nano_usd), SUM(req_bytes), SUM(resp_bytes)
 FROM traffic_minutes WHERE local_day BETWEEN ? AND ?
-GROUP BY local_day, minute_of_day / 60, model HAVING SUM(requests) > 0
-ORDER BY local_day, minute_of_day / 60, model`
+GROUP BY local_day, minute_of_day / 60, upstream_id, model HAVING SUM(requests) > 0
+ORDER BY local_day, minute_of_day / 60, upstream_id, model`
 
 	trendModelDaySQL = `
-SELECT local_day, 0, model,
-       SUM(requests), SUM(prompt_tokens), SUM(completion_tokens),
+SELECT local_day, 0, upstream_id, model,
+       SUM(requests), SUM(prompt_tokens), SUM(completion_tokens), SUM(cache_read_tokens),
        SUM(cost_nano_usd), SUM(req_bytes), SUM(resp_bytes)
 FROM traffic_minutes WHERE local_day BETWEEN ? AND ?
-GROUP BY local_day, model HAVING SUM(requests) > 0
-ORDER BY local_day, model`
+GROUP BY local_day, upstream_id, model HAVING SUM(requests) > 0
+ORDER BY local_day, upstream_id, model`
 )
 
 // TrendByModel returns per-model traffic buckets for the inclusive local_day
@@ -122,13 +136,13 @@ func (s *Store) TrendByModel(ctx context.Context, from, to string, iv Interval) 
 		var (
 			day    string
 			minute int
-			model  string
-			m      TrendModel
+			series TrendSeries
 		)
 		if err := rows.Scan(
-			&day, &minute, &model,
-			&m.Requests, &m.PromptTokens, &m.CompletionTokens,
-			&m.CostNanoUSD, &m.UpBytes, &m.DownBytes,
+			&day, &minute, &series.UpstreamID, &series.Model,
+			&series.Requests, &series.PromptTokens, &series.CompletionTokens,
+			&series.CacheReadTokens, &series.CostNanoUSD,
+			&series.UpBytes, &series.DownBytes,
 		); err != nil {
 			return nil, fmt.Errorf("scan trend bucket: %w", err)
 		}
@@ -139,7 +153,19 @@ func (s *Store) TrendByModel(ctx context.Context, from, to string, iv Interval) 
 			})
 			n++
 		}
-		buckets[n-1].ByModel[model] = m
+		b := &buckets[n-1]
+		b.Series = append(b.Series, series)
+		// The legacy map folds every upstream into the model total; the API
+		// switches to Series, which keeps them apart.
+		total := b.ByModel[series.Model]
+		total.Requests += series.Requests
+		total.PromptTokens += series.PromptTokens
+		total.CompletionTokens += series.CompletionTokens
+		total.CacheReadTokens += series.CacheReadTokens
+		total.CostNanoUSD += series.CostNanoUSD
+		total.UpBytes += series.UpBytes
+		total.DownBytes += series.DownBytes
+		b.ByModel[series.Model] = total
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate trend: %w", err)
@@ -155,7 +181,7 @@ var topRequestColumns = map[string]string{
 }
 
 const topRequestsSQL = `
-SELECT id, started_at, model, path_class, stream,
+SELECT id, started_at, upstream_id, upstream_name, key_id, key_name, model, path_class, stream,
        prompt_tokens, completion_tokens, cache_read_tokens,
        total_tokens, cost_nano_usd, latency_ms, ttft_ms, status, usage_status
 FROM requests WHERE local_day BETWEEN ? AND ? AND status < 400
@@ -192,7 +218,8 @@ func (s *Store) TopRequests(ctx context.Context, from, to, by string, limit int)
 			ttft    sql.NullInt64
 		)
 		if err := rows.Scan(
-			&r.ID, &started, &r.Model, &r.PathClass, &stream,
+			&r.ID, &started, &r.UpstreamID, &r.UpstreamName, &r.KeyID, &r.KeyName,
+			&r.Model, &r.PathClass, &stream,
 			&r.PromptTokens, &r.CompletionTokens, &r.CacheReadTokens,
 			&r.TotalTokens, &r.CostNanoUSD, &r.LatencyMS, &ttft,
 			&r.Status, &r.UsageStatus,

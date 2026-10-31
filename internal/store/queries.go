@@ -49,9 +49,11 @@ type SeriesPoint struct {
 	CostNanoUSD                    int64
 }
 
-// BreakdownRow is one key of the breakdown query.
+// BreakdownRow is one key of the breakdown query. The key is scoped to the
+// upstream, so the same model or path class under two upstreams yields two
+// rows rather than one merged row.
 type BreakdownRow struct {
-	Key                                         string
+	UpstreamID, Key                             string
 	Requests, Errors                            int64
 	UpBytes, DownBytes                          int64
 	PromptTokens, CompletionTokens, CostNanoUSD int64
@@ -63,7 +65,12 @@ type BreakdownRow struct {
 // filter"; From and To are inclusive local_day bounds. StatusClass is one of
 // the 2xx, 4xx or 5xx classes and combines with an exact Status.
 type RequestFilter struct {
-	From, To    string
+	From, To string
+	// UpstreamID and KeyID narrow to one upstream and one gateway key. A key
+	// is only meaningful inside an upstream; the API layer rejects a key
+	// filter without an upstream.
+	UpstreamID  string
+	KeyID       string
 	Model       string
 	PathClass   string
 	Status      *int
@@ -295,26 +302,26 @@ func (s *Store) Series(from, to string, iv Interval) ([]SeriesPoint, error) {
 
 const (
 	breakdownModelSQL = `
-SELECT model, SUM(requests), SUM(errors), SUM(req_bytes), SUM(resp_bytes),
+SELECT upstream_id, model, SUM(requests), SUM(errors), SUM(req_bytes), SUM(resp_bytes),
        SUM(prompt_tokens), SUM(completion_tokens), SUM(cache_read_tokens), SUM(cost_nano_usd)
 FROM traffic_minutes WHERE local_day BETWEEN ? AND ?
-GROUP BY model ORDER BY SUM(cost_nano_usd) DESC, model ASC`
+GROUP BY upstream_id, model ORDER BY SUM(cost_nano_usd) DESC, upstream_id ASC, model ASC`
 
 	breakdownPathClassSQL = `
-SELECT path_class, SUM(requests), SUM(errors), SUM(req_bytes), SUM(resp_bytes),
+SELECT upstream_id, path_class, SUM(requests), SUM(errors), SUM(req_bytes), SUM(resp_bytes),
        SUM(prompt_tokens), SUM(completion_tokens), SUM(cache_read_tokens), SUM(cost_nano_usd)
 FROM traffic_minutes WHERE local_day BETWEEN ? AND ?
-GROUP BY path_class ORDER BY SUM(cost_nano_usd) DESC, path_class ASC`
+GROUP BY upstream_id, path_class ORDER BY SUM(cost_nano_usd) DESC, upstream_id ASC, path_class ASC`
 
 	unpricedByModelSQL = `
-SELECT model, COUNT(*) FROM requests
+SELECT upstream_id, model, COUNT(*) FROM requests
 WHERE local_day BETWEEN ? AND ? AND priced = 0
-GROUP BY model`
+GROUP BY upstream_id, model`
 
 	unpricedByPathClassSQL = `
-SELECT path_class, COUNT(*) FROM requests
+SELECT upstream_id, path_class, COUNT(*) FROM requests
 WHERE local_day BETWEEN ? AND ? AND priced = 0
-GROUP BY path_class`
+GROUP BY upstream_id, path_class`
 )
 
 // Breakdown aggregates the inclusive local_day range by "model" (anything
@@ -335,7 +342,7 @@ func (s *Store) Breakdown(from, to, by string) ([]BreakdownRow, error) {
 	for rows.Next() {
 		var r BreakdownRow
 		if err := rows.Scan(
-			&r.Key, &r.Requests, &r.Errors, &r.UpBytes, &r.DownBytes,
+			&r.UpstreamID, &r.Key, &r.Requests, &r.Errors, &r.UpBytes, &r.DownBytes,
 			&r.PromptTokens, &r.CompletionTokens, &r.CacheReadTokens, &r.CostNanoUSD,
 		); err != nil {
 			return nil, fmt.Errorf("scan breakdown row: %w", err)
@@ -351,24 +358,31 @@ func (s *Store) Breakdown(from, to, by string) ([]BreakdownRow, error) {
 		return nil, err
 	}
 	for i := range out {
-		out[i].Unpriced = unpriced[out[i].Key]
+		out[i].Unpriced = unpriced[unpricedKey{upstream: out[i].UpstreamID, key: out[i].Key}]
 	}
 	return out, nil
 }
 
-// unpricedCounts maps key to the number of unpriced requests in the range.
-func (s *Store) unpricedCounts(q, from, to string) (map[string]int64, error) {
+// unpricedKey identifies one breakdown row for the unpriced counter, which is
+// scoped to an upstream just like the aggregate rows.
+type unpricedKey struct {
+	upstream, key string
+}
+
+// unpricedCounts maps each (upstream, key) pair to the number of unpriced
+// requests in the range.
+func (s *Store) unpricedCounts(q, from, to string) (map[unpricedKey]int64, error) {
 	rows, err := s.db.Query(q, from, to)
 	if err != nil {
 		return nil, fmt.Errorf("unpriced counts: %w", err)
 	}
 	defer rows.Close()
 
-	counts := make(map[string]int64)
+	counts := make(map[unpricedKey]int64)
 	for rows.Next() {
-		var key string
+		var key unpricedKey
 		var n int64
-		if err := rows.Scan(&key, &n); err != nil {
+		if err := rows.Scan(&key.upstream, &key.key, &n); err != nil {
 			return nil, fmt.Errorf("scan unpriced count: %w", err)
 		}
 		counts[key] = n
@@ -382,7 +396,8 @@ func (s *Store) unpricedCounts(q, from, to string) (map[string]int64, error) {
 // selectRecordColumns mirrors the column order of insertRequestSQL with the
 // assigned id in front, so scanRecord can scan rows positionally.
 const selectRecordColumns = `id, started_at, completed_at, local_day, minute_of_day,
-  path, path_class, model, upstream_model, stream, status,
+  path, path_class, upstream_id, upstream_name, key_id, key_name,
+  model, upstream_model, stream, status,
   latency_ms, ttft_ms,
   req_body_bytes, req_header_bytes, resp_body_bytes, resp_header_bytes,
   prompt_tokens, completion_tokens, cache_read_tokens, cache_write_tokens,
@@ -394,8 +409,24 @@ const selectRecordColumns = `id, started_at, completed_at, local_day, minute_of_
 // RequestsSummary from the filter fields, appending cursor when asked. Limit
 // is never part of the filter.
 func requestWhere(f RequestFilter, cursor bool) (string, []any) {
+	// Empty bounds mean "no bound": the detail list is valid without a range.
+	from, to := f.From, f.To
+	if from == "" {
+		from = "0000-01-01"
+	}
+	if to == "" {
+		to = "9999-12-31"
+	}
 	q := " WHERE local_day BETWEEN ? AND ?"
-	args := []any{f.From, f.To}
+	args := []any{from, to}
+	if f.UpstreamID != "" {
+		q += " AND upstream_id = ?"
+		args = append(args, f.UpstreamID)
+	}
+	if f.KeyID != "" {
+		q += " AND key_id = ?"
+		args = append(args, f.KeyID)
+	}
 	if f.Model != "" {
 		q += " AND model = ?"
 		args = append(args, f.Model)
@@ -509,7 +540,8 @@ func scanRecord(sc rowScanner) (Record, error) {
 	)
 	err := sc.Scan(
 		&r.ID, &started, &completed, &r.LocalDay, &r.MinuteOfDay,
-		&r.Path, &r.PathClass, &r.Model, &r.UpstreamModel, &stream, &r.Status,
+		&r.Path, &r.PathClass, &r.UpstreamID, &r.UpstreamName,
+		&r.KeyID, &r.KeyName, &r.Model, &r.UpstreamModel, &stream, &r.Status,
 		&r.LatencyMS, &ttft,
 		&r.ReqBodyBytes, &r.ReqHeaderBytes, &r.RespBodyBytes, &r.RespHeaderBytes,
 		&r.Usage.PromptTokens, &r.Usage.CompletionTokens,

@@ -14,6 +14,8 @@ type Record struct {
 	LocalDay                                                     string
 	MinuteOfDay                                                  int
 	Path, PathClass                                              string
+	UpstreamID, UpstreamName                                     string
+	KeyID, KeyName                                               string
 	Model, UpstreamModel                                         string
 	Stream                                                       bool
 	Status                                                       int
@@ -34,7 +36,7 @@ type Record struct {
 type MinuteDelta struct {
 	LocalDay                         string
 	MinuteOfDay                      int
-	PathClass, Model                 string
+	PathClass, UpstreamID, Model     string
 	Requests, Errors                 int64
 	ReqBytes, RespBytes              int64
 	PromptTokens, CompletionTokens   int64
@@ -62,14 +64,15 @@ func boolInt(b bool) int {
 
 const insertRequestSQL = `INSERT INTO requests (
   started_at, completed_at, local_day, minute_of_day,
-  path, path_class, model, upstream_model, stream, status,
+  path, path_class, upstream_id, upstream_name, key_id, key_name,
+  model, upstream_model, stream, status,
   latency_ms, ttft_ms,
   req_body_bytes, req_header_bytes, resp_body_bytes, resp_header_bytes,
   prompt_tokens, completion_tokens, cache_read_tokens, cache_write_tokens,
   reasoning_tokens, total_tokens,
   window_label, rates_json, cost_nano_usd, priced,
   usage_status, client_disconnected, error
-) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
 
 // insertArgs flattens r into the bind parameters of insertRequestSQL.
 func insertArgs(r *Record) []any {
@@ -80,7 +83,8 @@ func insertArgs(r *Record) []any {
 	return []any{
 		timestampText(r.StartedAt), timestampText(r.CompletedAt),
 		r.LocalDay, r.MinuteOfDay,
-		r.Path, r.PathClass, r.Model, r.UpstreamModel,
+		r.Path, r.PathClass, r.UpstreamID, r.UpstreamName,
+		r.KeyID, r.KeyName, r.Model, r.UpstreamModel,
 		boolInt(r.Stream), r.Status,
 		r.LatencyMS, ttft,
 		r.ReqBodyBytes, r.ReqHeaderBytes, r.RespBodyBytes, r.RespHeaderBytes,
@@ -93,12 +97,12 @@ func insertArgs(r *Record) []any {
 }
 
 const upsertMinuteSQL = `INSERT INTO traffic_minutes (
-  local_day, minute_of_day, path_class, model,
+  local_day, minute_of_day, path_class, upstream_id, model,
   requests, errors, req_bytes, resp_bytes,
   prompt_tokens, completion_tokens, cache_read_tokens, reasoning_tokens,
   cost_nano_usd, latency_sum_ms, latency_max_ms
-) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-ON CONFLICT(local_day, minute_of_day, path_class, model) DO UPDATE SET
+) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+ON CONFLICT(local_day, minute_of_day, path_class, upstream_id, model) DO UPDATE SET
   requests = requests + excluded.requests,
   errors = errors + excluded.errors,
   req_bytes = req_bytes + excluded.req_bytes,
@@ -114,7 +118,7 @@ ON CONFLICT(local_day, minute_of_day, path_class, model) DO UPDATE SET
 // minuteArgs flattens d into the bind parameters of upsertMinuteSQL.
 func minuteArgs(d *MinuteDelta) []any {
 	return []any{
-		d.LocalDay, d.MinuteOfDay, d.PathClass, d.Model,
+		d.LocalDay, d.MinuteOfDay, d.PathClass, d.UpstreamID, d.Model,
 		d.Requests, d.Errors, d.ReqBytes, d.RespBytes,
 		d.PromptTokens, d.CompletionTokens, d.CacheReadTokens, d.ReasoningTokens,
 		d.CostNanoUSD, d.LatencySumMS, d.LatencyMaxMS,

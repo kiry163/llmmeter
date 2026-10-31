@@ -174,3 +174,73 @@ func TestRequestsStreamFilter(t *testing.T) {
 		t.Fatalf("stream=false = %+v", no)
 	}
 }
+
+// TestAnalysisKeepsUpstreamDimension pins that analysis aggregates and top
+// requests keep the upstream (and, for detail rows, key) dimension instead of
+// merging same-named models across upstreams.
+func TestAnalysisKeepsUpstreamDimension(t *testing.T) {
+	st := openTestStore(t)
+	ctx := context.Background()
+	seed := []struct {
+		upstream, upstreamName, key, keyName string
+		cost, cached                         int64
+	}{
+		{"a", "Upstream A", "ka", "Key A", 2000, 10},
+		{"b", "Upstream B", "kb", "Key B", 1000, 5},
+	}
+	for _, s := range seed {
+		r := testRecord()
+		r.UpstreamID, r.UpstreamName = s.upstream, s.upstreamName
+		r.KeyID, r.KeyName = s.key, s.keyName
+		r.Usage = usage.Usage{PromptTokens: 10, CompletionTokens: 5, CacheReadTokens: s.cached, TotalTokens: 15}
+		r.CostNanoUSD, r.Priced = s.cost, true
+		st.EnqueueRecord(r)
+		st.EnqueueMinute(store.MinuteDelta{
+			LocalDay: "2026-10-31", MinuteOfDay: 780, PathClass: "chat",
+			UpstreamID: s.upstream, Model: "m", Requests: 1,
+			PromptTokens: 10, CompletionTokens: 5, CacheReadTokens: s.cached,
+			CostNanoUSD: s.cost, LatencySumMS: 1000, LatencyMaxMS: 1000,
+		})
+	}
+	if err := st.Flush(); err != nil {
+		t.Fatal(err)
+	}
+
+	trend, err := st.TrendByModel(ctx, "2026-10-31", "2026-10-31", store.IntervalDay)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(trend) != 1 || len(trend[0].Series) != 2 {
+		t.Fatalf("trend = %+v", trend)
+	}
+	if trend[0].Series[0].UpstreamID != "a" || trend[0].Series[1].UpstreamID != "b" {
+		t.Fatalf("series upstreams = %+v", trend[0].Series)
+	}
+	if trend[0].Series[0].CacheReadTokens != 10 || trend[0].Series[0].CostNanoUSD != 2000 {
+		t.Fatalf("series[0] = %+v", trend[0].Series[0])
+	}
+	// ByModel is the legacy merged view: both upstreams sum into model "m".
+	if got := trend[0].ByModel["m"]; got.Requests != 2 || got.CostNanoUSD != 3000 {
+		t.Fatalf("legacy by model = %+v", got)
+	}
+
+	rows, err := st.Breakdown("2026-10-31", "2026-10-31", "model")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 2 || rows[0].UpstreamID != "a" || rows[1].UpstreamID != "b" {
+		t.Fatalf("breakdown = %+v", rows)
+	}
+	if rows[0].Key != "m" || rows[0].Requests != 1 || rows[0].UpBytes != 0 {
+		t.Fatalf("breakdown row0 = %+v", rows[0])
+	}
+
+	top, err := st.TopRequests(ctx, "2026-10-31", "2026-10-31", "cost", 10)
+	if err != nil || len(top) != 2 {
+		t.Fatalf("top = %+v err=%v", top, err)
+	}
+	if top[0].UpstreamID != "a" || top[0].UpstreamName != "Upstream A" ||
+		top[0].KeyID != "ka" || top[0].KeyName != "Key A" {
+		t.Fatalf("top[0] = %+v", top[0])
+	}
+}
