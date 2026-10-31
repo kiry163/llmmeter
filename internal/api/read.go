@@ -29,11 +29,6 @@ const (
 	// requestsDefaultLimit and requestsMaxLimit bound the cursor page size.
 	requestsDefaultLimit = 50
 	requestsMaxLimit     = 200
-
-	// maxMinuteIntervalDays and maxHourIntervalDays bound those series
-	// intervals; longer ranges must use day buckets.
-	maxMinuteIntervalDays = 2
-	maxHourIntervalDays   = 90
 )
 
 // me reports the viewer's authentication state without requiring a session.
@@ -189,28 +184,10 @@ func (s *Server) series(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var iv store.Interval
-	switch v := r.URL.Query().Get("interval"); v {
-	case "", "day":
-		iv = store.IntervalDay
-	case "hour":
-		iv = store.IntervalHour
-	case "minute":
-		iv = store.IntervalMinute
-	default:
-		writeAPIError(w, http.StatusBadRequest, codeValidation, "interval must be minute, hour or day")
-		return
-	}
-
-	days := daySpan(from, to)
-	if iv == store.IntervalMinute && days > maxMinuteIntervalDays {
-		writeAPIError(w, http.StatusBadRequest, codeValidation,
-			fmt.Sprintf("interval minute is limited to %d days", maxMinuteIntervalDays))
-		return
-	}
-	if iv == store.IntervalHour && days > maxHourIntervalDays {
-		writeAPIError(w, http.StatusBadRequest, codeValidation,
-			fmt.Sprintf("interval hour is limited to %d days", maxHourIntervalDays))
+	// Series shares the analysis interval resolver so auto and the explicit
+	// minute/hour limits behave identically on both endpoints (spec 8.7).
+	iv, ok := analysisInterval(w, r.URL.Query().Get("interval"), daySpan(from, to))
+	if !ok {
 		return
 	}
 
@@ -664,16 +641,17 @@ func (s *Server) retentionDays() int {
 	return 0
 }
 
-// upstreamDisplayName resolves an upstream's current display name from the
-// configuration snapshot. A deleted upstream falls back to the name stored on
-// the request row when there is one, then to the ID so aggregate rows stay
+// upstreamDisplayName resolves an upstream's display name. Request and top
+// rows carry the name snapshotted when the request started, and that snapshot
+// wins so a rename never relabels history. Aggregate rows have no stored name,
+// so they use the current configured name, then the ID to stay
 // distinguishable.
 func (s *Server) upstreamDisplayName(id, stored string) string {
-	if name := upstreamName(s.configSnapshot(), id); name != "" {
-		return name
-	}
 	if stored != "" {
 		return stored
+	}
+	if name := upstreamName(s.configSnapshot(), id); name != "" {
+		return name
 	}
 	return id
 }

@@ -782,3 +782,77 @@ func TestHostGuardRejectsNonLoopbackHostWithoutPassword(t *testing.T) {
 		t.Fatalf("secured rebound host = %d", resp.StatusCode)
 	}
 }
+
+func TestSeriesAutoInterval(t *testing.T) {
+	env := newReadEnv(t)
+	rec := doGET(t, env.srv, "/api/series?from=2026-10-29&to=2026-10-29&interval=auto")
+	if rec.Code != 200 {
+		t.Fatalf("series auto = %d %s", rec.Code, rec.Body.String())
+	}
+	var series struct {
+		Points []struct {
+			MinuteOfDay int   `json:"minuteOfDay"`
+			Requests    int64 `json:"requests"`
+		} `json:"points"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &series); err != nil {
+		t.Fatal(err)
+	}
+	// A one-day span resolves to minute buckets, matching /api/analysis auto.
+	var total int64
+	for _, p := range series.Points {
+		total += p.Requests
+		if p.MinuteOfDay == 0 {
+			t.Fatalf("auto interval did not use minute buckets: %+v", p)
+		}
+	}
+	if len(series.Points) != 2 || total != 3 {
+		t.Fatalf("series auto points = %+v", series.Points)
+	}
+}
+
+func TestRenameUpstreamPreservesHistory(t *testing.T) {
+	env := newReadEnv(t)
+	if err := env.config.Update(func(c *config.Config) error {
+		for i := range c.Upstreams {
+			if c.Upstreams[i].ID == "b" {
+				c.Upstreams[i].Name = "Beta Renamed"
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Detail rows show the name snapshotted when the request started.
+	rec := doGET(t, env.srv, "/api/requests?from=2026-10-29&to=2026-10-29&upstream=b")
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"upstreamName":"Beta"`) {
+		t.Fatalf("requests = %d %s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "Beta Renamed") {
+		t.Fatalf("request history was relabeled after rename: %s", rec.Body.String())
+	}
+
+	// The analysis top ranking keeps the same snapshot; its aggregate trend
+	// and model rows have no stored name and follow the live configuration.
+	rec = doGET(t, env.srv, "/api/analysis?from=2026-10-29&to=2026-10-29&upstream=b")
+	if rec.Code != 200 {
+		t.Fatalf("analysis = %d %s", rec.Code, rec.Body.String())
+	}
+	var analysis struct {
+		TopRequests json.RawMessage `json:"topRequests"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &analysis); err != nil {
+		t.Fatal(err)
+	}
+	if top := string(analysis.TopRequests); !strings.Contains(top, `"upstreamName":"Beta"`) ||
+		strings.Contains(top, "Beta Renamed") {
+		t.Fatalf("analysis topRequests = %s", top)
+	}
+
+	// Aggregate rows carry no stored name, so they follow the live config.
+	rec = doGET(t, env.srv, "/api/breakdown?from=2026-10-29&to=2026-10-29&by=model&upstream=b")
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"upstreamName":"Beta Renamed"`) {
+		t.Fatalf("breakdown = %d %s", rec.Code, rec.Body.String())
+	}
+}

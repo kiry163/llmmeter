@@ -95,8 +95,15 @@ func MaskBit(wd time.Weekday) uint8 {
 }
 
 // Quote prices u for model at instant at, resolved in loc's wall clock.
-// Unknown models and nil tables report Priced=false.
+// Unknown models and nil tables report Priced=false. The rate snapshot omits
+// the upstream binding; gateway records use QuoteForUpstream.
 func (t *Table) Quote(model string, at time.Time, loc *time.Location, u usage.Usage) Quote {
+	return t.QuoteForUpstream("", model, at, loc, u)
+}
+
+// QuoteForUpstream is Quote bound to the upstream that serves the request, so
+// the rate snapshot names the upstream whose table produced the price.
+func (t *Table) QuoteForUpstream(upstreamID, model string, at time.Time, loc *time.Location, u usage.Usage) Quote {
 	if t == nil {
 		return Quote{WindowLabel: "base"}
 	}
@@ -127,7 +134,7 @@ func (t *Table) Quote(model string, at time.Time, loc *time.Location, u usage.Us
 		Rates:       rates,
 		CostNanoUSD: costNanoUSD(rates, u),
 	}
-	q.RatesJSON = ratesJSON(model, label, rates)
+	q.RatesJSON = ratesJSON(upstreamID, model, label, rates)
 	return q
 }
 
@@ -190,6 +197,7 @@ func tokenCost(tokens int64, rate float64) float64 {
 }
 
 type ratesSnapshot struct {
+	UpstreamID        string          `json:"upstream_id"`
 	Model             string          `json:"model"`
 	Window            string          `json:"window"`
 	InputPerMTok      json.RawMessage `json:"input_per_mtok"`
@@ -199,8 +207,9 @@ type ratesSnapshot struct {
 	ReasoningPerMTok  json.RawMessage `json:"reasoning_per_mtok"`
 }
 
-func ratesJSON(model, window string, r Rates) string {
+func ratesJSON(upstreamID, model, window string, r Rates) string {
 	b, err := json.Marshal(ratesSnapshot{
+		UpstreamID:        upstreamID,
 		Model:             model,
 		Window:            window,
 		InputPerMTok:      rateValue(r.Input),

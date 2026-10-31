@@ -126,6 +126,7 @@ wire_api = "chat"
 - 面板 API 默认只信任回环请求；`-listen` 为非回环地址时，若尚未设置管理密码，启动会直接失败（避免把无鉴权的面板暴露到网络）。
 - 要远程访问：先以 `127.0.0.1:8100` 启动并在面板设置管理密码，再改为 `-listen 0.0.0.0:8100` 重启。
 - 管理会话使用 HttpOnly、SameSite=Strict 的签名 Cookie，有效期 12 小时；修改密码会使旧会话立即失效。
+- 已设置管理密码后，`POST /api/setup` 仍只接受回环 Host，并要求有效管理会话；替换密码还需 `currentPassword` 校验当前密码。
 - 所有非 GET 的 `/api` 写操作要求 `X-Requested-With: llmmeter` 或同 Host 的 `Origin`（CSRF 防护）。
 - 网关请求始终要求 `Authorization: Bearer <gateway key>`；轮换后旧 key 立即失效。
 - 二进制不内置 TLS。对外暴露时建议放在 Caddy/Nginx 后面终止 TLS，并让 llmmeter 继续监听 `127.0.0.1`。反代需关闭 SSE 缓冲（如 `proxy_buffering off`）以保证实时面板正常。
@@ -137,7 +138,7 @@ wire_api = "chat"
 | 方法与路径 | 说明 |
 | --- | --- |
 | `GET /api/bootstrap` | 返回 `{version, needsSetup, authRequired, listen, timezone, earliestDay}`；`earliestDay` 为永久聚合中最早有流量的本地日期，用于总览“全部”范围，无流量时为空。 |
-| `GET /api/series?…&interval=minute\|hour\|day` | 返回非空桶；每个点含 `promptTokens`、`completionTokens`、`cacheReadTokens`、`costNanoUsd`、上下行字节。前端负责补齐空桶。 |
+| `GET /api/series?…&interval=auto\|minute\|hour\|day` | 返回非空桶；`auto` 与分析页一致（≤2 天分钟、≤7 天小时、更久天），显式间隔超出上限返回 400；每个点含 `promptTokens`、`completionTokens`、`cacheReadTokens`、`costNanoUsd`、上下行字节。前端负责补齐空桶。 |
 | `GET /api/model-catalog` | 返回 `{fetchedAt, upstream, observed, upstreamError}`：上游可见模型、日志已观测模型与上次拉取时间。`?refresh=1` 跳过缓存强制刷新。上游失败时 HTTP 仍为 200，`upstream` 为空、`fetchedAt` 为 null，`upstreamError` 为脱敏原因（不含 API key）。 |
 | `GET /api/analysis?from=YYYY-MM-DD&to=YYYY-MM-DD&interval=auto` | 一次返回 `range`（含 `interval`、`partial`）、`trend`、`models`、`paths`、`topRequests`、`health`、`cache`。`interval` 可为 `auto`、`minute`、`hour`、`day`；显式间隔超出上限返回 400。 |
 | `GET /api/requests?…` | 支持 `model`、`pathClass`、`statusClass=2xx\|4xx\|5xx`、`usageStatus`、`stream`、`priced`、`before_id`、`limit`；响应含 `summary:{requests,costNanoUsd,totalTokens,errors}`，汇总覆盖筛选后的全部行并忽略游标/分页。 |

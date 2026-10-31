@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/base64"
 	"errors"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -19,6 +20,11 @@ const maxSlugLen = 32
 // configured between the handler's check and the store lock.
 var errSetupExists = errors.New("api: setup already completed")
 
+// errSetupAuthChanged is returned by the setup mutation when the admin
+// password hash changed after the handler authenticated the request, so a
+// concurrent password change can never be replaced without its current value.
+var errSetupAuthChanged = errors.New("api: admin password changed during setup")
+
 // gatewayKeyResponse is the one shape in which a plaintext gateway key is
 // returned after setup or rotation.
 type gatewayKeyResponse struct {
@@ -28,13 +34,16 @@ type gatewayKeyResponse struct {
 // setupRequest is the first-run payload from spec 8.2. Models use the YAML
 // schema shape so the request can be validated by the configuration rules.
 type setupRequest struct {
-	UpstreamName  string         `json:"upstreamName"`
-	BaseURL       string         `json:"baseUrl"`
-	APIKey        string         `json:"apiKey"`
-	Timezone      string         `json:"timezone"`
-	AdminPassword string         `json:"adminPassword"`
-	KeyName       string         `json:"keyName"`
-	Models        []config.Model `json:"models"`
+	UpstreamName  string `json:"upstreamName"`
+	BaseURL       string `json:"baseUrl"`
+	APIKey        string `json:"apiKey"`
+	Timezone      string `json:"timezone"`
+	AdminPassword string `json:"adminPassword"`
+	// CurrentPassword must verify against an existing admin hash before
+	// setup may replace it; it is ignored on first run.
+	CurrentPassword string         `json:"currentPassword"`
+	KeyName         string         `json:"keyName"`
+	Models          []config.Model `json:"models"`
 }
 
 type setupResponse struct {
@@ -53,6 +62,13 @@ func (s *Server) setup(w http.ResponseWriter, r *http.Request) {
 		writeInternal(w, errors.New("api: configuration store not configured"))
 		return
 	}
+	// Setup is a local recovery operation: it must be driven from a loopback
+	// host even when an admin password is configured, because HostGuard stops
+	// checking the Host header once a password exists.
+	if !loopbackRequestHost(r.Host) {
+		writeAPIError(w, http.StatusForbidden, "forbidden", "loopback host required")
+		return
+	}
 	if snap := s.configSnapshot(); snap != nil && len(snap.Config.Upstreams) > 0 {
 		writeAPIError(w, http.StatusConflict, codeConflict, "setup already completed")
 		return
@@ -61,9 +77,27 @@ func (s *Server) setup(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &in) {
 		return
 	}
-	if fields := s.validateSetup(&in); len(fields) > 0 {
+	existingHash := ""
+	if snap := s.configSnapshot(); snap != nil {
+		existingHash = snap.Config.Auth.AdminPasswordHash
+	}
+	if fields := s.validateSetup(&in, existingHash); len(fields) > 0 {
 		writeAPIErrorFields(w, http.StatusBadRequest, codeValidation, "invalid setup", fields)
 		return
+	}
+	// A configuration that already holds a password may only be completed by
+	// an authenticated admin, and replacing that password needs the current
+	// one, so a proxied loopback request cannot take over the instance.
+	if existingHash != "" {
+		if !s.auth.Authenticated(r) {
+			writeAPIError(w, http.StatusUnauthorized, "unauthorized", "authentication required")
+			return
+		}
+		if in.AdminPassword != "" && !secure.VerifyPassword(existingHash, in.CurrentPassword) {
+			writeAPIErrorFields(w, http.StatusForbidden, "forbidden", "invalid current password",
+				map[string]string{"currentPassword": "incorrect password"})
+			return
+		}
 	}
 
 	passwordHash := ""
@@ -104,6 +138,9 @@ func (s *Server) setup(w http.ResponseWriter, r *http.Request) {
 		if len(c.Upstreams) > 0 {
 			return errSetupExists
 		}
+		if passwordHash != "" && c.Auth.AdminPasswordHash != existingHash {
+			return errSetupAuthChanged
+		}
 		// Record the values this process actually runs with, so validation
 		// checks the same effective listen and the file keeps them across
 		// restarts.
@@ -140,6 +177,8 @@ func (s *Server) setup(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case errors.Is(err, errSetupExists):
 			writeAPIError(w, http.StatusConflict, codeConflict, "setup already completed")
+		case errors.Is(err, errSetupAuthChanged):
+			writeAPIError(w, http.StatusUnauthorized, "unauthorized", "authentication required")
 		case errors.As(err, &ve):
 			writeAPIErrorFields(w, http.StatusBadRequest, codeValidation, "invalid setup", ve.Fields)
 		default:
@@ -165,7 +204,7 @@ func (s *Server) setup(w http.ResponseWriter, r *http.Request) {
 // validateSetup reports body-level field errors with the API field names,
 // before the configuration validator sees the constructed document. Models
 // are validated by config.Validate in the update.
-func (s *Server) validateSetup(in *setupRequest) map[string]string {
+func (s *Server) validateSetup(in *setupRequest, existingHash string) map[string]string {
 	fields := map[string]string{}
 	if strings.TrimSpace(in.UpstreamName) == "" {
 		fields["upstreamName"] = "required"
@@ -178,10 +217,20 @@ func (s *Server) validateSetup(in *setupRequest) map[string]string {
 			fields["timezone"] = "unknown timezone"
 		}
 	}
-	if in.AdminPassword == "" && !LoopbackListen(s.effectiveListen()) {
+	if in.AdminPassword == "" && existingHash == "" && !LoopbackListen(s.effectiveListen()) {
 		fields["adminPassword"] = "required when the listen address is not loopback"
 	}
 	return fields
+}
+
+// loopbackRequestHost reports whether the request Host header names the local
+// machine. Setup uses it independently of HostGuard, which stops checking the
+// Host header once an admin password exists.
+func loopbackRequestHost(host string) bool {
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	return loopbackName(host)
 }
 
 // validSetupURL mirrors the configuration rule: an absolute http(s) URL with

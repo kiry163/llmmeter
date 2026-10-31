@@ -741,4 +741,59 @@ func TestGatewayPricesWithBoundUpstreamTable(t *testing.T) {
 	if rates["a"] == rates["b"] || rates["a"] == "" {
 		t.Fatalf("rates did not follow the bound upstream: %v", rates)
 	}
+	for _, id := range []string{"a", "b"} {
+		var snap struct {
+			UpstreamID string `json:"upstream_id"`
+		}
+		if err := json.Unmarshal([]byte(rates[id]), &snap); err != nil {
+			t.Fatal(err)
+		}
+		if snap.UpstreamID != id {
+			t.Fatalf("rates json for %s = %s", id, rates[id])
+		}
+	}
+}
+
+func TestGatewayFallsBackToUpstreamModel(t *testing.T) {
+	const upstreamBody = `{"model":"deepseek-chat","usage":{"prompt_tokens":1000000,"completion_tokens":0}}`
+	upstream := upstreamWithBody(t, upstreamBody, nil)
+	g, st, _, hub := newTestGatewayWith(t,
+		[]config.Upstream{{ID: "deepseek", Name: "DeepSeek", BaseURL: upstream.URL, Models: chatModel()}},
+		[]config.GatewayKey{{ID: "key", Name: "Key", Key: testGatewayKey, UpstreamID: "deepseek"}},
+	)
+
+	// The request body carries no model; the upstream-reported model must fill
+	// the record so logs, aggregates and live byModel are not empty.
+	req := httptest.NewRequest("POST", "/v1/chat/completions",
+		strings.NewReader(`{"messages":[{"role":"user","content":"hi"}]}`))
+	req.Header.Set("Authorization", "Bearer "+testGatewayKey)
+	rec := httptest.NewRecorder()
+	g.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d body %s", rec.Code, rec.Body.String())
+	}
+	if err := st.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := st.Requests(store.RequestFilter{From: "2026-10-29", To: "2026-10-29", Limit: 10})
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("rows=%v err=%v", rows, err)
+	}
+	if rows[0].Model != "deepseek-chat" || rows[0].UpstreamModel != "deepseek-chat" {
+		t.Fatalf("record models = %+v", rows[0])
+	}
+	if !rows[0].Priced || rows[0].CostNanoUSD == 0 {
+		t.Fatalf("fallback model was not priced: %+v", rows[0])
+	}
+
+	snap := hub.Snapshot(time.Minute)
+	var found bool
+	for _, m := range snap.ByModel {
+		if m.Model == "deepseek-chat" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("live byModel missing fallback model: %+v", snap.ByModel)
+	}
 }

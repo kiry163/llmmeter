@@ -2,7 +2,9 @@ package store_test
 
 import (
 	"context"
+	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -76,4 +78,50 @@ func TestProbeWritable(t *testing.T) {
 	if err := st.ProbeWritable(context.Background()); err == nil {
 		t.Fatal("probe on a closed database succeeded")
 	}
+}
+
+func TestDatabaseFilesAre0600(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("chmod permissions are not meaningful on Windows")
+	}
+	path := filepath.Join(t.TempDir(), "perm.db")
+	st, err := store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	check := func(name string, optional bool) {
+		t.Helper()
+		info, err := os.Stat(name)
+		if err != nil {
+			if optional && os.IsNotExist(err) {
+				return
+			}
+			t.Fatal(err)
+		}
+		if got := info.Mode().Perm(); got != 0o600 {
+			t.Fatalf("%s mode = %o, want 0600", name, got)
+		}
+	}
+	check(path, false)
+
+	// The first write creates the WAL, which must not inherit umask defaults.
+	base := time.Date(2026, 10, 29, 4, 0, 0, 0, time.UTC)
+	st.EnqueueRecord(store.Record{
+		StartedAt: base, CompletedAt: base.Add(time.Second), LocalDay: "2026-10-29",
+		MinuteOfDay: 720, PathClass: "chat", Model: "m", Status: 200,
+		UsageStatus: usage.StatusOK,
+	})
+	if err := st.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	check(path, false)
+	check(path+"-wal", true)
+
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+	// Closing checkpoints and may remove the sidecars; the database file must
+	// still be 0600.
+	check(path, false)
 }

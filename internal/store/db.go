@@ -3,6 +3,7 @@ package store
 import (
 	"database/sql"
 	"fmt"
+	"os"
 
 	_ "modernc.org/sqlite"
 )
@@ -24,7 +25,22 @@ func OpenDB(path string) (*sql.DB, error) {
 		db.Close()
 		return nil, err
 	}
+	secureDBFiles(path)
 	return db, nil
+}
+
+// secureDBFiles enforces 0600 on the database and its WAL/SHM sidecars. SQLite
+// creates them with umask defaults, so this runs after opening and after
+// writes that may recreate a sidecar. It is best-effort: read-only or
+// non-POSIX filesystems keep their own semantics.
+func secureDBFiles(path string) {
+	for _, p := range []string{path, path + "-wal", path + "-shm"} {
+		info, err := os.Stat(p)
+		if err != nil || info.Mode().Perm() == 0o600 {
+			continue
+		}
+		_ = os.Chmod(p, 0o600)
+	}
 }
 
 // ensureSchema inspects PRAGMA user_version before touching any table. Only

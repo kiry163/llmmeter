@@ -324,11 +324,12 @@ func (g *Gateway) complete(snap *config.Snapshot, binding config.KeyBinding, r *
 	}
 
 	if class == classChat || class == classResponses {
-		priceModel := rec.Model
-		if priceModel == "" {
-			priceModel = rec.UpstreamModel
+		// Spec 6.4: a request body without a model falls back to the model the
+		// upstream reported, so logs, pricing and live byModel all see it.
+		if rec.Model == "" {
+			rec.Model = rec.UpstreamModel
 		}
-		q := binding.Table.Quote(priceModel, completed, loc, rec.Usage)
+		q := binding.Table.QuoteForUpstream(binding.UpstreamID, rec.Model, completed, loc, rec.Usage)
 		rec.WindowLabel, rec.RatesJSON = q.WindowLabel, q.RatesJSON
 		rec.CostNanoUSD, rec.Priced = q.CostNanoUSD, q.Priced
 	} else {

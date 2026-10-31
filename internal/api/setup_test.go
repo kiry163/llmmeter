@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
+	"net/http/cookiejar"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -241,7 +242,8 @@ func TestSetupPreservesExistingAdminPasswordAndSecret(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	rec := doPOST(t, env.srv, "/api/setup",
+	client := newSessionClient(t, env.srv, "oldpass1")
+	rec := doAs(t, client, env.srv, "POST", "/api/setup",
 		`{"upstreamName":"DeepSeek","baseUrl":"https://api.deepseek.com"}`)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("setup = %d %s", rec.Code, rec.Body.String())
@@ -282,5 +284,148 @@ func TestSetupPersistsEffectiveServerPaths(t *testing.T) {
 	}
 	if !strings.Contains(raw, "database: "+env.dbPath) {
 		t.Fatalf("config.yaml missing effective database:\n%s", raw)
+	}
+}
+
+// newSessionClient logs in against srv with password and returns a client that
+// replays the session cookie on subsequent requests.
+func newSessionClient(t *testing.T, srv *httptest.Server, password string) *http.Client {
+	t.Helper()
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &http.Client{Jar: jar}
+	rec := doAs(t, client, srv, http.MethodPost, "/api/auth/login", `{"password":"`+password+`"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("login = %d %s", rec.Code, rec.Body.String())
+	}
+	return client
+}
+
+// setupAuthFixture installs an existing admin password and session secret on
+// env, mirroring a configuration that was initialized but has no upstream yet.
+func setupAuthFixture(t *testing.T, env *configTestEnv, password string) string {
+	t.Helper()
+	hash, err := secure.HashPassword(password)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := secure.RandomSecret()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := env.config.Update(func(c *config.Config) error {
+		c.Auth.AdminPasswordHash = hash
+		c.Auth.SessionSecret = base64.StdEncoding.EncodeToString(raw)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return hash
+}
+
+func TestSetupWithExistingPasswordRequiresSession(t *testing.T) {
+	env := newConfigEnv(t, "127.0.0.1:8100")
+	hash := setupAuthFixture(t, env, "oldpass1")
+
+	// A loopback request without a session must not be able to replace the
+	// password or configure an upstream.
+	rec := doPOST(t, env.srv, "/api/setup", `{
+		"upstreamName":"Takeover",
+		"baseUrl":"https://attacker.example.com",
+		"adminPassword":"newpass99",
+		"currentPassword":"oldpass1"
+	}`)
+	if rec.Code != http.StatusUnauthorized && rec.Code != http.StatusForbidden {
+		t.Fatalf("unauthenticated setup = %d %s", rec.Code, rec.Body.String())
+	}
+	snap := env.config.Snapshot().Config
+	if len(snap.Upstreams) != 0 {
+		t.Fatalf("unauthenticated setup wrote upstreams: %+v", snap.Upstreams)
+	}
+	if snap.Auth.AdminPasswordHash != hash || !secure.VerifyPassword(hash, "oldpass1") {
+		t.Fatal("unauthenticated setup changed the admin password hash")
+	}
+}
+
+func TestSetupWithExistingPasswordRequiresCurrentPassword(t *testing.T) {
+	env := newConfigEnv(t, "127.0.0.1:8100")
+	hash := setupAuthFixture(t, env, "oldpass1")
+	client := newSessionClient(t, env.srv, "oldpass1")
+
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{"missing", `{"upstreamName":"DeepSeek","baseUrl":"https://api.deepseek.com","adminPassword":"newpass99"}`},
+		{"wrong", `{"upstreamName":"DeepSeek","baseUrl":"https://api.deepseek.com","adminPassword":"newpass99","currentPassword":"wrongpass"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := doAs(t, client, env.srv, http.MethodPost, "/api/setup", tc.body)
+			if rec.Code != http.StatusForbidden {
+				t.Fatalf("setup = %d %s", rec.Code, rec.Body.String())
+			}
+			snap := env.config.Snapshot().Config
+			if len(snap.Upstreams) != 0 {
+				t.Fatalf("rejected setup wrote upstreams: %+v", snap.Upstreams)
+			}
+			if snap.Auth.AdminPasswordHash != hash {
+				t.Fatal("rejected setup changed the admin password hash")
+			}
+		})
+	}
+}
+
+func TestSetupReplacesPasswordWithSessionAndCurrentPassword(t *testing.T) {
+	env := newConfigEnv(t, "127.0.0.1:8100")
+	setupAuthFixture(t, env, "oldpass1")
+	client := newSessionClient(t, env.srv, "oldpass1")
+
+	rec := doAs(t, client, env.srv, http.MethodPost, "/api/setup", `{
+		"upstreamName":"DeepSeek",
+		"baseUrl":"https://api.deepseek.com",
+		"adminPassword":"newpass99",
+		"currentPassword":"oldpass1"
+	}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("setup = %d %s", rec.Code, rec.Body.String())
+	}
+	snap := env.config.Snapshot().Config
+	if len(snap.Upstreams) != 1 || snap.Upstreams[0].ID != "deepseek" {
+		t.Fatalf("upstreams = %+v", snap.Upstreams)
+	}
+	if !secure.VerifyPassword(snap.Auth.AdminPasswordHash, "newpass99") {
+		t.Fatal("setup did not install the new admin password")
+	}
+	if secure.VerifyPassword(snap.Auth.AdminPasswordHash, "oldpass1") {
+		t.Fatal("old admin password still verifies")
+	}
+}
+
+func TestSetupRejectsNonLoopbackHostWithPassword(t *testing.T) {
+	env := newConfigEnv(t, "127.0.0.1:8100")
+	hash := setupAuthFixture(t, env, "oldpass1")
+	client := newSessionClient(t, env.srv, "oldpass1")
+	login := doAs(t, client, env.srv, http.MethodPost, "/api/auth/login", `{"password":"oldpass1"}`)
+	if login.Code != http.StatusOK {
+		t.Fatalf("login = %d %s", login.Code, login.Body.String())
+	}
+	cookie := sessionCookie(t, login)
+
+	req := httptest.NewRequest(http.MethodPost, "http://rebind.example/api/setup",
+		strings.NewReader(`{"upstreamName":"Remote","baseUrl":"https://remote.example.com"}`))
+	req.RemoteAddr = "127.0.0.1:5000"
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Requested-With", "llmmeter")
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	env.apiServer.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("non-loopback host setup = %d %s", rec.Code, rec.Body.String())
+	}
+	snap := env.config.Snapshot().Config
+	if len(snap.Upstreams) != 0 || snap.Auth.AdminPasswordHash != hash {
+		t.Fatal("non-loopback host setup mutated the configuration")
 	}
 }

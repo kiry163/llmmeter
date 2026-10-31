@@ -1,6 +1,7 @@
 package pricing_test
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -178,9 +179,24 @@ func TestQuoteWindowOverridesAndFallback(t *testing.T) {
 func TestQuoteRatesJSON(t *testing.T) {
 	table := pricing.NewTable([]pricing.Model{{Name: "m", Input: 1, Output: 2}})
 	q := table.Quote("m", time.Now(), time.UTC, usage.Usage{})
-	want := `{"model":"m","window":"base","input_per_mtok":1.000000,"output_per_mtok":2.000000,` +
+	want := `{"upstream_id":"","model":"m","window":"base","input_per_mtok":1.000000,"output_per_mtok":2.000000,` +
 		`"cache_read_per_mtok":0.000000,"cache_write_per_mtok":0.000000,"reasoning_per_mtok":2.000000}`
 	if q.RatesJSON != want {
+		t.Fatalf("rates json = %s", q.RatesJSON)
+	}
+}
+
+func TestQuoteForUpstreamNamesUpstreamInRatesJSON(t *testing.T) {
+	table := pricing.NewTable([]pricing.Model{{Name: "m", Input: 1, Output: 2}})
+	q := table.QuoteForUpstream("deepseek", "m", time.Now(), time.UTC, usage.Usage{})
+	var snap struct {
+		UpstreamID string `json:"upstream_id"`
+		Model      string `json:"model"`
+	}
+	if err := json.Unmarshal([]byte(q.RatesJSON), &snap); err != nil {
+		t.Fatal(err)
+	}
+	if snap.UpstreamID != "deepseek" || snap.Model != "m" {
 		t.Fatalf("rates json = %s", q.RatesJSON)
 	}
 }

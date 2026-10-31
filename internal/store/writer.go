@@ -22,7 +22,9 @@ const (
 // collector. All writes go through one goroutine so inserts are batched and
 // never serialize against each other at the SQLite level.
 type Store struct {
-	db   *sql.DB
+	db *sql.DB
+	// path is retained so sidecar permissions can be re-applied after writes.
+	path string
 	ops  chan op
 	done chan struct{}
 
@@ -44,6 +46,7 @@ func Open(path string) (*Store, error) {
 	}
 	s := &Store{
 		db:   db,
+		path: path,
 		ops:  make(chan op, queueSize),
 		done: make(chan struct{}),
 	}
@@ -131,6 +134,7 @@ func (s *Store) Close() error {
 	// Anything noted after the quit barrier is reported too.
 	lateErr := s.takeErr()
 	_, checkpointErr := s.db.Exec("PRAGMA wal_checkpoint(TRUNCATE)")
+	secureDBFiles(s.path)
 	closeErr := s.db.Close()
 	if checkpointErr != nil {
 		checkpointErr = fmt.Errorf("wal checkpoint: %w", checkpointErr)
@@ -155,6 +159,7 @@ func (s *Store) loop() {
 	flushBatch := func() {
 		s.insertRecords(batch)
 		batch = batch[:0]
+		secureDBFiles(s.path)
 	}
 
 	// pruneCutoff non-empty means a prune is in progress; each call removes
