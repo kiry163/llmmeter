@@ -583,7 +583,7 @@ CREATE TABLE traffic_minutes (
 | GET | `/api/health` | 公开健康检查，含 DB 写探针 |
 | GET | `/api/bootstrap` | 公开启动信息 |
 | GET | `/api/me` | 当前会话 |
-| POST | `/api/setup` | 仅回环；首次写配置 |
+| POST | `/api/setup` | 仅回环 Host/RemoteAddr；首次写配置；已有管理员密码时要求会话 + `currentPassword` |
 | POST | `/api/auth/login` | 登录 |
 | POST | `/api/auth/logout` | 登出 |
 | POST | `/api/auth/password` | 设置/修改/清除管理密码 |
@@ -616,6 +616,7 @@ CREATE TABLE traffic_minutes (
   "apiKey": "sk-...",
   "timezone": "Asia/Shanghai",
   "adminPassword": "",
+  "currentPassword": "",
   "keyName": "默认",
   "models": [
     {"name":"deepseek-chat","input":1.0,"output":4.0,"cacheRead":0.02,"cacheWrite":0,"reasoning":4.0,"windows":[]}
@@ -630,8 +631,9 @@ CREATE TABLE traffic_minutes (
 ```
 
 - 配置已有上游时返回 `409`。
-- 只接受回环来源。
-- `adminPassword` 为空且监听非回环时拒绝。
+- 只接受回环 RemoteAddr，且请求 Host 必须是 `localhost`、`127.0.0.0/8` 或 `[::1]`；反代把 RemoteAddr 变成回环时仍不能绕过 Host 检查。
+- 首次配置（尚无 `admin_password_hash`）：`adminPassword` 为空且监听非回环时拒绝。
+- 已有 `admin_password_hash` 时：必须带有效管理会话；若提供 `adminPassword`，`currentPassword` 必须匹配现有哈希，否则返回 `403`。`adminPassword` 为空时保留现有哈希，不清除认证。
 - `models` 可省略；存在时按 8.5 的价格校验规则验证，并与配置在同一个原子写中落盘。
 
 `POST /api/auth/password`：
