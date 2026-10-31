@@ -1,4 +1,6 @@
-package settings
+// Package secure holds the password hashing, gateway key and secret generation
+// helpers shared by llmmeter's settings and API layers.
+package secure
 
 import (
 	"crypto/rand"
@@ -29,7 +31,7 @@ const (
 func HashPassword(pw string) (string, error) {
 	salt := make([]byte, argonSaltLen)
 	if _, err := rand.Read(salt); err != nil {
-		return "", fmt.Errorf("settings: generate salt: %w", err)
+		return "", fmt.Errorf("secure: generate salt: %w", err)
 	}
 	key := argon2.IDKey([]byte(pw), salt, argonTime, argonMemory, argonThreads, argonKeyLen)
 	return fmt.Sprintf("$argon2id$v=%d$m=%d,t=%d,p=%d$%s$%s",
@@ -60,19 +62,19 @@ func decodePHC(encoded string) (argonParams, []byte, []byte, error) {
 	var p argonParams
 	parts := strings.Split(encoded, "$")
 	if len(parts) != 6 || parts[0] != "" || parts[1] != "argon2id" {
-		return p, nil, nil, fmt.Errorf("settings: unsupported password hash")
+		return p, nil, nil, fmt.Errorf("secure: unsupported password hash")
 	}
 	if parts[2] != "v="+strconv.Itoa(argon2.Version) {
-		return p, nil, nil, fmt.Errorf("settings: unsupported argon2 version")
+		return p, nil, nil, fmt.Errorf("secure: unsupported argon2 version")
 	}
 	for _, f := range strings.Split(parts[3], ",") {
 		k, v, ok := strings.Cut(f, "=")
 		if !ok {
-			return p, nil, nil, fmt.Errorf("settings: malformed argon2 parameters")
+			return p, nil, nil, fmt.Errorf("secure: malformed argon2 parameters")
 		}
 		n, err := strconv.ParseUint(v, 10, 32)
 		if err != nil {
-			return p, nil, nil, fmt.Errorf("settings: malformed argon2 parameter %q", k)
+			return p, nil, nil, fmt.Errorf("secure: malformed argon2 parameter %q", k)
 		}
 		switch k {
 		case "m":
@@ -82,22 +84,22 @@ func decodePHC(encoded string) (argonParams, []byte, []byte, error) {
 		case "p":
 			p.threads = uint8(n)
 		default:
-			return p, nil, nil, fmt.Errorf("settings: unknown argon2 parameter %q", k)
+			return p, nil, nil, fmt.Errorf("secure: unknown argon2 parameter %q", k)
 		}
 	}
 	if p.memory == 0 || p.time == 0 || p.threads == 0 {
-		return p, nil, nil, fmt.Errorf("settings: incomplete argon2 parameters")
+		return p, nil, nil, fmt.Errorf("secure: incomplete argon2 parameters")
 	}
 	salt, err := base64.RawStdEncoding.DecodeString(parts[4])
 	if err != nil {
-		return p, nil, nil, fmt.Errorf("settings: malformed argon2 salt")
+		return p, nil, nil, fmt.Errorf("secure: malformed argon2 salt")
 	}
 	want, err := base64.RawStdEncoding.DecodeString(parts[5])
 	if err != nil {
-		return p, nil, nil, fmt.Errorf("settings: malformed argon2 hash")
+		return p, nil, nil, fmt.Errorf("secure: malformed argon2 hash")
 	}
 	if len(salt) == 0 || len(want) == 0 {
-		return p, nil, nil, fmt.Errorf("settings: empty argon2 salt or hash")
+		return p, nil, nil, fmt.Errorf("secure: empty argon2 salt or hash")
 	}
 	return p, salt, want, nil
 }
@@ -106,7 +108,7 @@ func decodePHC(encoded string) (argonParams, []byte, []byte, error) {
 func NewGatewayKey() string {
 	b := make([]byte, gatewayKeyBytes)
 	if _, err := rand.Read(b); err != nil {
-		panic("settings: crypto/rand unavailable: " + err.Error())
+		panic("secure: crypto/rand unavailable: " + err.Error())
 	}
 	return gatewayKeyPrefix + hex.EncodeToString(b)
 }
@@ -115,7 +117,7 @@ func NewGatewayKey() string {
 func RandomSecret() ([]byte, error) {
 	b := make([]byte, secretBytes)
 	if _, err := rand.Read(b); err != nil {
-		return nil, fmt.Errorf("settings: generate secret: %w", err)
+		return nil, fmt.Errorf("secure: generate secret: %w", err)
 	}
 	return b, nil
 }

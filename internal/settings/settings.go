@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/kiry163/llmmeter/internal/pricing"
+	"github.com/kiry163/llmmeter/internal/secure"
 )
 
 // Settings keys in the settings table.
@@ -248,14 +249,14 @@ func (r *Repo) Setup(ctx context.Context, in SetupInput) (string, error) {
 
 	passwordHash := ""
 	if in.AdminPassword != "" {
-		h, err := HashPassword(in.AdminPassword)
+		h, err := secure.HashPassword(in.AdminPassword)
 		if err != nil {
 			return "", err
 		}
 		passwordHash = h
 	}
-	gatewayKey := NewGatewayKey()
-	secret, err := RandomSecret()
+	gatewayKey := secure.NewGatewayKey()
+	secret, err := secure.RandomSecret()
 	if err != nil {
 		return "", err
 	}
@@ -375,7 +376,7 @@ func (r *Repo) ApplyPatch(ctx context.Context, p Patch, pw *PasswordChange) erro
 		case !pw.Clear && len(pw.New) < minPasswordLen:
 			fields["newPassword"] = fmt.Sprintf("must be at least %d characters", minPasswordLen)
 		}
-		if snap != nil && snap.AdminPasswordHash != "" && !VerifyPassword(snap.AdminPasswordHash, pw.Current) {
+		if snap != nil && snap.AdminPasswordHash != "" && !secure.VerifyPassword(snap.AdminPasswordHash, pw.Current) {
 			fields["currentPassword"] = "incorrect password"
 		}
 	}
@@ -400,7 +401,7 @@ func (r *Repo) ApplyPatch(ctx context.Context, p Patch, pw *PasswordChange) erro
 
 	var passwordHash string
 	if pw != nil && !pw.Clear {
-		hash, err := HashPassword(pw.New)
+		hash, err := secure.HashPassword(pw.New)
 		if err != nil {
 			return err
 		}
@@ -432,7 +433,7 @@ func (r *Repo) ApplyPatch(ctx context.Context, p Patch, pw *PasswordChange) erro
 
 // RotateGatewayKey generates, stores and returns a fresh gateway key.
 func (r *Repo) RotateGatewayKey(ctx context.Context) (string, error) {
-	key := NewGatewayKey()
+	key := secure.NewGatewayKey()
 	if err := r.putSettings(ctx, map[string]string{keyGatewayKey: key}); err != nil {
 		return "", err
 	}

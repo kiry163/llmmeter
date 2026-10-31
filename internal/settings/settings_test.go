@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/kiry163/llmmeter/internal/pricing"
+	"github.com/kiry163/llmmeter/internal/secure"
 	"github.com/kiry163/llmmeter/internal/settings"
 	"github.com/kiry163/llmmeter/internal/store"
 	"github.com/kiry163/llmmeter/internal/usage"
@@ -67,7 +68,7 @@ func TestSetupAndSnapshot(t *testing.T) {
 	if snap.Location.String() != "Asia/Shanghai" || snap.RetentionDays != 90 {
 		t.Fatalf("loc/retention = %v/%d", snap.Location, snap.RetentionDays)
 	}
-	if !settings.VerifyPassword(snap.AdminPasswordHash, "hunter22") {
+	if !secure.VerifyPassword(snap.AdminPasswordHash, "hunter22") {
 		t.Fatal("password verify failed")
 	}
 	if len(snap.SessionSecret) != 32 {
@@ -123,7 +124,7 @@ func TestSetPassword(t *testing.T) {
 	if err := repo.SetPassword(ctx, "ignored", "hunter22"); err != nil {
 		t.Fatalf("set initial password: %v", err)
 	}
-	if !settings.VerifyPassword(repo.Snapshot().AdminPasswordHash, "hunter22") {
+	if !secure.VerifyPassword(repo.Snapshot().AdminPasswordHash, "hunter22") {
 		t.Fatal("password not stored")
 	}
 	if err := repo.SetPassword(ctx, "wrong", "hunter33"); err == nil {
@@ -135,7 +136,7 @@ func TestSetPassword(t *testing.T) {
 	if err := repo.SetPassword(ctx, "hunter22", "hunter33"); err != nil {
 		t.Fatal(err)
 	}
-	if !settings.VerifyPassword(repo.Snapshot().AdminPasswordHash, "hunter33") {
+	if !secure.VerifyPassword(repo.Snapshot().AdminPasswordHash, "hunter33") {
 		t.Fatal("password not rotated")
 	}
 }
@@ -192,7 +193,7 @@ func TestApplyPatchValidatesBeforeWriting(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 	hash := repo.Snapshot().AdminPasswordHash
-	if !settings.VerifyPassword(hash, "hunter22") || settings.VerifyPassword(hash, "newpass123") {
+	if !secure.VerifyPassword(hash, "hunter22") || secure.VerifyPassword(hash, "newpass123") {
 		t.Fatal("failed patch changed the password")
 	}
 
@@ -203,7 +204,7 @@ func TestApplyPatchValidatesBeforeWriting(t *testing.T) {
 		t.Fatal(err)
 	}
 	snap := repo.Snapshot()
-	if snap.RetentionDays != 30 || !settings.VerifyPassword(snap.AdminPasswordHash, "newpass123") {
+	if snap.RetentionDays != 30 || !secure.VerifyPassword(snap.AdminPasswordHash, "newpass123") {
 		t.Fatalf("snapshot = %+v", snap)
 	}
 }

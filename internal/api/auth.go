@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/kiry163/llmmeter/internal/secure"
 	"github.com/kiry163/llmmeter/internal/settings"
 )
 
@@ -209,7 +210,7 @@ func (a *Auth) Login(w http.ResponseWriter, r *http.Request) {
 	}
 
 	snap := a.repo.Snapshot()
-	if snap == nil || snap.AdminPasswordHash == "" || !settings.VerifyPassword(snap.AdminPasswordHash, in.Password) {
+	if snap == nil || snap.AdminPasswordHash == "" || !secure.VerifyPassword(snap.AdminPasswordHash, in.Password) {
 		writeAPIError(w, http.StatusUnauthorized, "unauthorized", "invalid password")
 		return
 	}
