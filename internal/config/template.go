@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -9,6 +10,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/kiry163/llmmeter/internal/secure"
 )
 
 // templateBody is the annotated configuration written on first start. The
@@ -36,8 +39,8 @@ general:
 auth:
   # Argon2id admin password hash. Empty disables login for loopback requests.
   admin_password_hash: ""
-  # Base64 32-byte session signing secret. Generated on first start.
-  session_secret: ""
+  # Base64 32-byte session signing secret, generated for this first start.
+  session_secret: %s
 # OpenAI-compatible upstreams, for example:
 #   - id: my-provider
 #     name: My provider
@@ -55,10 +58,11 @@ gateway_keys: []
 `
 
 // EnsureFile writes the annotated configuration template to path when the
-// file does not exist. It reports whether a file was created. An existing
-// file, including one that is invalid, is left untouched. The parent
-// directory is created with mode 0700 and the file is written atomically with
-// mode 0600.
+// file does not exist. The template includes a freshly generated session
+// secret, so the file is complete before the store loads it. It reports
+// whether a file was created. An existing file, including one that is invalid,
+// is left untouched. The parent directory is created with mode 0700 and the
+// file is written atomically with mode 0600.
 func EnsureFile(path string, p Paths) (bool, error) {
 	if strings.TrimSpace(path) == "" {
 		return false, errors.New("config: file path must not be empty")
@@ -71,10 +75,15 @@ func EnsureFile(path string, p Paths) (bool, error) {
 		return false, fmt.Errorf("config: stat %s: %w", path, err)
 	}
 
+	secret, err := secure.RandomSecret()
+	if err != nil {
+		return false, fmt.Errorf("config: generate session secret: %w", err)
+	}
 	body := fmt.Sprintf(templateBody,
 		yamlScalar(p.Listen),
 		yamlScalar(p.Database),
 		yamlScalar(time.Local.String()),
+		yamlScalar(base64.StdEncoding.EncodeToString(secret)),
 	)
 	if err := writeFileAtomic(path, []byte(body), 0o600); err != nil {
 		return false, err

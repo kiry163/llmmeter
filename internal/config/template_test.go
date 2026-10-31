@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/base64"
 	"os"
 	"path/filepath"
 	"strings"
@@ -60,8 +61,13 @@ func TestEnsureFileCreatesValidTemplate(t *testing.T) {
 	if cfg.General.Timezone != time.Local.String() || cfg.General.RetentionDays != 90 {
 		t.Fatalf("general = %+v", cfg.General)
 	}
-	if cfg.Auth.AdminPasswordHash != "" || cfg.Auth.SessionSecret != "" {
+	if cfg.Auth.AdminPasswordHash != "" {
 		t.Fatalf("auth = %+v", cfg.Auth)
+	}
+	secret, err := base64.StdEncoding.DecodeString(cfg.Auth.SessionSecret)
+	if err != nil || len(secret) != 32 {
+		t.Fatalf("session secret = %q, decoded length = %d, err = %v; want 32-byte base64",
+			cfg.Auth.SessionSecret, len(secret), err)
 	}
 	if len(cfg.Upstreams) != 0 || len(cfg.GatewayKeys) != 0 {
 		t.Fatalf("template must start empty: %+v %+v", cfg.Upstreams, cfg.GatewayKeys)
@@ -70,6 +76,22 @@ func TestEnsureFileCreatesValidTemplate(t *testing.T) {
 		if !strings.Contains(string(data), want) {
 			t.Fatalf("template missing %q:\n%s", want, data)
 		}
+	}
+
+	// Loading the file through the store must not rewrite it, so the
+	// annotated template survives the first start.
+	if _, err := OpenStore(path); err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(data) {
+		t.Fatalf("OpenStore rewrote the template:\n%s", after)
+	}
+	if !strings.Contains(string(after), "generated for this first start") {
+		t.Fatalf("template comments were lost:\n%s", after)
 	}
 }
 

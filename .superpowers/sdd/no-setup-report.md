@@ -36,10 +36,14 @@ Status: complete.
 - `cd web && npm test`: 10 files, 64 tests pass.
 - `make build`: pass (`tsc -b`, Vite build, `go build`).
 
+## Follow-up
+- Fixed the first-start comment loss: `EnsureFile` now generates the session
+  secret itself (`secure.RandomSecret`, base64) and embeds it in the template,
+  so `ensureSessionSecret` is a no-op on the freshly written file and the
+  annotated comments survive. Updated the template test to assert a 32-byte
+  secret and that `OpenStore` does not rewrite the file, plus the spec lines
+  that described an empty template secret.
+
 ## Concerns
-- `ensureSessionSecret` runs immediately after first-start template creation and
-  rewrites the file through the normal serializer, so the template's inline
-  comments are replaced by the standard two-line header on the very first
-  start. The template itself is annotated as required, but it is not preserved.
 - Historical specs under `docs/superpowers/specs/` still mention the old setup
   flow; they are superseded reference material and were left intact.

@@ -161,7 +161,7 @@ flowchart LR
 | `general.timezone` | 必须能被 `time.LoadLocation` 解析 |
 | `general.retention_days` | `7..3650` |
 | `auth.admin_password_hash` | 空，或合法 Argon2id PHC 字符串 |
-| `auth.session_secret` | 空，或 base64 编码的 32 字节；为空时启动生成并尝试写回 |
+| `auth.session_secret` | 空，或 base64 编码的 32 字节；已存在配置为空时启动生成并尝试写回，首次启动模板直接写入生成值 |
 | `upstreams[].id` | 必填，匹配 `[a-z0-9][a-z0-9-]{0,31}`，全局唯一 |
 | `upstreams[].name` | 去空白后非空，最大 100 字符 |
 | `upstreams[].base_url` | 必填，`http`/`https`，含 host；末尾 `/` 归一化去掉 |
@@ -199,7 +199,7 @@ flowchart LR
   - `server.listen`、`server.database` 使用本次解析出的有效值
   - `general.timezone` 使用 `time.Local.String()`（`time.LoadLocation` 可解析）
   - `general.retention_days: 90`
-  - `auth.admin_password_hash`、`auth.session_secret` 为空；启动后 `ensureSessionSecret` 生成并写回 session secret
+  - `auth.admin_password_hash` 为空；`auth.session_secret` 在生成模板时创建并直接写入（不再依赖启动后的回写）
   - `upstreams: []`、`gateway_keys: []`，注释说明可在 YAML 或 WebUI 添加第一个上游与本地 key
 - 文件已存在时不做任何修改；内容是否合法由加载阶段校验。
 - 模板通过既有原子写落盘，文件 `0600`，新建目录 `0700`。
