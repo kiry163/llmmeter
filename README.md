@@ -1,6 +1,6 @@
 # llmmeter
 
-本机运行的 OpenAI 兼容透传网关：除下文说明的流式 usage 注入外，所有请求原样转发到唯一的上游，逐条记录 token、花费与上下行字节，并提供一个可查看统计、日志、分析与编辑配置的管理面板。为 omp、codex、OpenAI SDK 这类客户端设计，上游通常是 DeepSeek 等 OpenAI 兼容服务。
+本机运行的 OpenAI 兼容透传网关：除下文说明的流式 usage 注入外，所有请求原样转发到唯一的上游，逐条记录 token、花费与上下行字节，并提供一个可查看统计、日志与分析的管理面板。为 omp、codex、OpenAI SDK 这类客户端设计，上游通常是 DeepSeek 等 OpenAI 兼容服务。
 
 - 单二进制内嵌前端与 SQLite，运行时不依赖 Node 或外部数据库。
 - 上游、价格、时区、保留与访问控制保存在 YAML 配置文件（schema v2，默认 `~/.config/llmmeter/config.yaml`）中，重启后以 YAML 为准；首次启动会自动生成带注释的配置模板，之后编辑 YAML 并重载或重启。
@@ -35,12 +35,14 @@ make build          # npm ci + 前端构建 + go build -o llmmeter
 
 旧路由 `/requests` 重定向到 `/logs`，`/pricing` 重定向到 `/settings/pricing`（保留查询参数）。主题默认跟随系统，可在侧栏或登录页切换并记忆；窄屏下侧栏变为顶部横向导航，日志/价格表改为卡片列表，页面不横向溢出。
 
+> 当前 SPA 的设置页仍在调用旧接口，写入/编辑功能待 UI 更新；在更新前请直接编辑 YAML 配置。
+
 ## 首次配置
 
 1. 直接运行 `llmmeter`。若配置文件不存在，程序会生成带注释的模板并启动，默认监听 `127.0.0.1:8100`。
 2. 编辑 `config.yaml`：在 `upstreams` 添加第一个上游（`id`、`name`、`base_url` 如 `https://api.deepseek.com`、`api_key`），在 `gateway_keys` 添加绑定它的本地 key（`id`、`name`、`key` 为 `sk-local-…`、`upstream_id`）。保存后重启或发送 `SIGHUP`。
    **不要带 `/v1`**：客户端请求路径会原样拼在其后，填 `https://api.deepseek.com/v1` 会变成 `/v1/v1/chat/completions`。
-3. 要开放给其他机器，先在配置里设置管理密码哈希，再用非回环地址启动（见“认证与远程访问”）。没有上游时网关返回 `503 not_configured`，面板配置读写始终可用。
+3. 要开放给其他机器，先在配置里设置管理密码哈希，再用非回环地址启动（见“认证与远程访问”）。没有上游时网关返回 `503 not_configured`；设置页写入功能待 UI 更新，更新前请编辑 YAML。
 
 ## 客户端接入
 
@@ -123,7 +125,7 @@ wire_api = "chat"
 ## 认证与远程访问
 
 - 面板 API 默认只信任回环请求；`-listen` 为非回环地址时，若尚未设置管理密码，启动会直接失败（避免把无鉴权的面板暴露到网络）。
-- 要远程访问：先以 `127.0.0.1:8100` 启动并在面板设置管理密码，再改为 `-listen 0.0.0.0:8100` 重启。
+- 要远程访问：在 `config.yaml` 的 `auth.admin_password_hash` 写入 Argon2id PHC 哈希，再用非回环地址启动。`POST /api/auth/password` 仍可用于设置/修改密码，但当前没有引导式的应用内首次设置流程。
 - 管理会话使用 HttpOnly、SameSite=Strict 的签名 Cookie，有效期 12 小时；修改密码会使旧会话立即失效。
 - 所有非 GET 的 `/api` 写操作要求 `X-Requested-With: llmmeter` 或同 Host 的 `Origin`（CSRF 防护）。
 - 网关请求始终要求 `Authorization: Bearer <gateway key>`；轮换后旧 key 立即失效。

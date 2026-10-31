@@ -1106,7 +1106,7 @@ CREATE TABLE traffic_minutes (
 
 - 首次启动写入 `/config/config.yaml`；用户编辑该文件添加 `upstreams` 与 `gateway_keys`，然后重启或发送 `SIGHUP`。
 - 数据库固定在 `/data/llmmeter.db`（挂载卷），不随容器重建丢失。
-- 当前构建没有应用内首次密码设置，Docker 示例保持回环监听，不需要管理密码。
+- 没有引导式首次密码流程；`POST /api/auth/password` 仍可设置密码。Docker 示例保持回环监听，不需要管理密码。
 - 若改为非回环监听，必须先在配置中写入 `auth.admin_password_hash`，否则启动失败；当前版本没有在应用内生成该哈希的引导流程。
 - 示例 `docker-compose.yml`（Linux，`network_mode: host` 让容器共享宿主回环）：
 
@@ -1130,7 +1130,7 @@ CREATE TABLE traffic_minutes (
 - 首次使用：
 
   ```bash
-  docker compose run --rm llmmeter   # 首次启动写入 /config/config.yaml
+  docker compose run --rm llmmeter   # 首次启动写入 /config/config.yaml；看到启动日志后 Ctrl-C
   $EDITOR ./config/config.yaml       # 添加 upstreams 与 gateway_keys
   docker compose up -d
   ```

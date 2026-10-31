@@ -48,11 +48,16 @@ Status: complete.
   that described an empty template secret.
 - Fix round 2: `ResolvePaths` now makes `Paths.Database` absolute (with a test
   covering relative `-db`, template persistence, and restart resolution).
-  Removed the remaining false WebUI claims for adding upstreams/keys from the
-  template and README; Docker docs now pin the DB to `/data/llmmeter.db` and
+  Removed false WebUI claims for adding upstreams/keys from the template and
+  README; Docker docs now pin the DB to `/data/llmmeter.db` and
   stay loopback-only until an in-app password setup exists. Removed the unused
   `RequireLoopback` middleware, leftover `.key-box` CSS, and corrected the
   template's listen comment.
+- Final doc/CSS cleanup: startup messages point only at the config file,
+  README marks settings-page writes as pending the UI update and points remote
+  password setup at `auth.admin_password_hash` (with the still-available
+  `POST /api/auth/password`), Docker first-run notes Ctrl-C after the template
+  is written, and unused `.auth-row`/`.auth-previews` styles were removed.
 
 ## Concerns
 - Historical specs under `docs/superpowers/specs/` still mention the old setup

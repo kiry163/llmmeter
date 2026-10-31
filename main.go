@@ -74,7 +74,7 @@ func runServe(args []string) error {
 		return err
 	}
 	if created {
-		log.Printf("created configuration template at %s; add upstreams and gateway keys there or in the WebUI", paths.Config)
+		log.Printf("created configuration template at %s; add upstreams and gateway keys there", paths.Config)
 	}
 	cfgStore, err := config.OpenStore(paths.Config, config.WithEffectiveDatabase(paths.Database))
 	if err != nil {
@@ -132,7 +132,7 @@ func runServe(args []string) error {
 	errc := make(chan error, 1)
 	go func() { errc <- httpSrv.ListenAndServe() }()
 
-	state := "not configured: add an upstream in the WebUI or config file"
+	state := "not configured: add an upstream in the config file"
 	if len(snap.Config.Upstreams) > 0 {
 		state = "configured"
 	}
