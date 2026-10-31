@@ -12,6 +12,7 @@ type Observation struct {
 	CompletedAt                      time.Time
 	LocalDay                         string
 	MinuteOfDay                      int
+	UpstreamID                       string
 	PathClass, Model                 string
 	Status                           int
 	UsageStatus                      string
@@ -24,33 +25,60 @@ type Observation struct {
 
 // Inflight tracks a request from Started until Finished.
 type Inflight struct {
-	id        int64
-	started   time.Time
-	pathClass string
-	model     string
+	id         int64
+	started    time.Time
+	upstreamID string
+	pathClass  string
+	model      string
 }
 
-// Snapshot is the current live view of gateway traffic.
+// Snapshot is the current live view of gateway traffic. Totals cover every
+// upstream; ByUpstream splits the same window per upstream and Spark stays
+// global.
 type Snapshot struct {
-	TS               string         `json:"ts"`
-	WindowS          int            `json:"windowS"`
-	Inflight         int            `json:"inflight"`
-	QPS              float64        `json:"qps"`
-	Errors           int64          `json:"errors"`
-	UpBps            float64        `json:"upBps"`
-	DownBps          float64        `json:"downBps"`
-	LatencyP50MS     *int64         `json:"latencyP50Ms"`
-	LatencyP95MS     *int64         `json:"latencyP95Ms"`
-	ByModel          []ModelRate    `json:"byModel"`
-	Spark            []SparkPoint   `json:"spark"`
-	InflightRequests []InflightInfo `json:"inflightRequests"`
+	TS               string                      `json:"ts"`
+	WindowS          int                         `json:"windowS"`
+	Inflight         int                         `json:"inflight"`
+	QPS              float64                     `json:"qps"`
+	Errors           int64                       `json:"errors"`
+	UpBps            float64                     `json:"upBps"`
+	DownBps          float64                     `json:"downBps"`
+	LatencyP50MS     *int64                      `json:"latencyP50Ms"`
+	LatencyP95MS     *int64                      `json:"latencyP95Ms"`
+	PromptTokens     int64                       `json:"promptTokens"`
+	CacheReadTokens  int64                       `json:"cacheReadTokens"`
+	CacheHitRate     *float64                    `json:"cacheHitRate"`
+	ByModel          []ModelRate                 `json:"byModel"`
+	ByUpstream       map[string]UpstreamSnapshot `json:"byUpstream"`
+	Spark            []SparkPoint                `json:"spark"`
+	InflightRequests []InflightInfo              `json:"inflightRequests"`
 }
 
-// ModelRate is the per-model share of a snapshot window.
+// UpstreamSnapshot is one upstream's share of the live snapshot. Spark uses
+// the same second offsets as Snapshot.Spark so readers can switch between the
+// global and per-upstream view without reconnecting or recomputing positions.
+type UpstreamSnapshot struct {
+	Requests        int64        `json:"requests"`
+	Inflight        int          `json:"inflight"`
+	QPS             float64      `json:"qps"`
+	Errors          int64        `json:"errors"`
+	UpBps           float64      `json:"upBps"`
+	DownBps         float64      `json:"downBps"`
+	LatencyP50MS    *int64       `json:"latencyP50Ms"`
+	LatencyP95MS    *int64       `json:"latencyP95Ms"`
+	PromptTokens    int64        `json:"promptTokens"`
+	CacheReadTokens int64        `json:"cacheReadTokens"`
+	CacheHitRate    *float64     `json:"cacheHitRate"`
+	Spark           []SparkPoint `json:"spark"`
+}
+
+// ModelRate is the per-model share of a snapshot window. UpstreamID keeps
+// same-named models of different upstreams apart.
 type ModelRate struct {
-	Model  string  `json:"model"`
-	QPS    float64 `json:"qps"`
-	Errors int64   `json:"errors"`
+	UpstreamID string  `json:"upstreamId"`
+	Model      string  `json:"model"`
+	QPS        float64 `json:"qps"`
+	Errors     int64   `json:"errors"`
 }
 
 // SparkPoint is one non-empty second of the snapshot window.
@@ -63,9 +91,10 @@ type SparkPoint struct {
 
 // InflightInfo describes one request that has not completed yet.
 type InflightInfo struct {
-	PathClass string `json:"pathClass"`
-	Model     string `json:"model"`
-	ElapsedMS int64  `json:"elapsedMs"`
+	UpstreamID string `json:"upstreamId"`
+	PathClass  string `json:"pathClass"`
+	Model      string `json:"model"`
+	ElapsedMS  int64  `json:"elapsedMs"`
 }
 
 // latencyBoundsMS are the histogram bucket upper bounds in milliseconds; a
@@ -75,7 +104,8 @@ var latencyBoundsMS = [...]int64{50, 100, 200, 400, 800, 1600, 3200, 6400, 12800
 const latencyBuckets = len(latencyBoundsMS)
 
 // Snapshot returns the live metrics for the trailing window. Seconds outside
-// [now-window, now] and stale ring slots are ignored.
+// [now-window, now] and stale ring slots are ignored. Global totals are the
+// sum of the per-upstream rings, so both views always share one window.
 func (h *Hub) Snapshot(window time.Duration) Snapshot {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -89,53 +119,113 @@ func (h *Hub) Snapshot(window time.Duration) Snapshot {
 		windowS = ringSeconds
 	}
 	end := now.Unix()
+	seconds := float64(windowS)
 
-	models := make(map[string]*modelCount)
-	var requests, errors, upBytes, downBytes int64
+	type modelKey struct {
+		upstreamID string
+		model      string
+	}
+	models := make(map[modelKey]*modelCount)
+	byUpstream := make(map[string]UpstreamSnapshot, len(h.rings))
+	var requests, errors, upBytes, downBytes, promptTokens, cacheReadTokens int64
 	var latency [latencyBuckets]int64
-	spark := make([]SparkPoint, 0, windowS)
-	for i := windowS - 1; i >= 0; i-- {
-		sec := end - i
-		s := &h.ring[slotIndex(sec)]
-		point := SparkPoint{OffsetS: int(sec - end)}
-		if s.second == sec {
-			requests += s.requests
-			errors += s.errors
-			upBytes += s.upBytes
-			downBytes += s.downBytes
+	spark := emptySpark(windowS)
+
+	inflightByUpstream := make(map[string]int, len(h.rings))
+	for _, f := range h.inflight {
+		inflightByUpstream[f.upstreamID]++
+	}
+
+	for upstreamID, ring := range h.rings {
+		us := UpstreamSnapshot{Spark: emptySpark(windowS)}
+		var up, down, prompt, cacheRead int64
+		var hist [latencyBuckets]int64
+		for i := int64(0); i < windowS; i++ {
+			sec := end - (windowS - 1 - i)
+			s := &ring[slotIndex(sec)]
+			if s.second != sec {
+				continue
+			}
+			point := &us.Spark[i]
+			point.Requests = s.requests
+			point.UpBytes = s.upBytes
+			point.DownBytes = s.downBytes
+			spark[i].Requests += s.requests
+			spark[i].UpBytes += s.upBytes
+			spark[i].DownBytes += s.downBytes
+			us.Requests += s.requests
+			us.Errors += s.errors
+			up += s.upBytes
+			down += s.downBytes
+			prompt += s.promptTokens
+			cacheRead += s.cacheReadTokens
 			for b := range s.latency {
-				latency[b] += s.latency[b]
+				hist[b] += s.latency[b]
 			}
 			for model, mc := range s.models {
-				acc := models[model]
+				key := modelKey{upstreamID: upstreamID, model: model}
+				acc := models[key]
 				if acc == nil {
 					acc = &modelCount{}
-					models[model] = acc
+					models[key] = acc
 				}
 				acc.requests += mc.requests
 				acc.errors += mc.errors
 			}
-			point.Requests = s.requests
-			point.UpBytes = s.upBytes
-			point.DownBytes = s.downBytes
 		}
-		spark = append(spark, point)
+
+		requests += us.Requests
+		errors += us.Errors
+		upBytes += up
+		downBytes += down
+		promptTokens += prompt
+		cacheReadTokens += cacheRead
+		for b := range hist {
+			latency[b] += hist[b]
+		}
+
+		n := inflightByUpstream[upstreamID]
+		if us.Requests == 0 && n == 0 {
+			// A removed upstream drops out once its slots leave the window.
+			continue
+		}
+		us.Inflight = n
+		us.QPS = float64(us.Requests) / seconds
+		us.UpBps = float64(up) / seconds
+		us.DownBps = float64(down) / seconds
+		us.LatencyP50MS = percentile(hist, 50)
+		us.LatencyP95MS = percentile(hist, 95)
+		us.PromptTokens = prompt
+		us.CacheReadTokens = cacheRead
+		us.CacheHitRate = cacheHitRate(prompt, cacheRead)
+		byUpstream[upstreamID] = us
+	}
+	// An upstream with only in-flight requests is visible before its first
+	// response lands; its traffic totals remain zero.
+	for upstreamID, n := range inflightByUpstream {
+		if _, ok := byUpstream[upstreamID]; ok {
+			continue
+		}
+		byUpstream[upstreamID] = UpstreamSnapshot{Inflight: n, Spark: emptySpark(windowS)}
 	}
 
-	seconds := float64(windowS)
 	byModel := make([]ModelRate, 0, len(models))
-	for model, mc := range models {
+	for key, mc := range models {
 		byModel = append(byModel, ModelRate{
-			Model:  model,
-			QPS:    float64(mc.requests) / seconds,
-			Errors: mc.errors,
+			UpstreamID: key.upstreamID,
+			Model:      key.model,
+			QPS:        float64(mc.requests) / seconds,
+			Errors:     mc.errors,
 		})
 	}
 	sort.Slice(byModel, func(i, j int) bool {
 		if byModel[i].QPS != byModel[j].QPS {
 			return byModel[i].QPS > byModel[j].QPS
 		}
-		return byModel[i].Model < byModel[j].Model
+		if byModel[i].Model != byModel[j].Model {
+			return byModel[i].Model < byModel[j].Model
+		}
+		return byModel[i].UpstreamID < byModel[j].UpstreamID
 	})
 
 	type startedInfo struct {
@@ -149,9 +239,10 @@ func (h *Hub) Snapshot(window time.Duration) Snapshot {
 			elapsed = 0
 		}
 		started = append(started, startedInfo{id: f.id, info: InflightInfo{
-			PathClass: f.pathClass,
-			Model:     f.model,
-			ElapsedMS: elapsed,
+			UpstreamID: f.upstreamID,
+			PathClass:  f.pathClass,
+			Model:      f.model,
+			ElapsedMS:  elapsed,
 		}})
 	}
 	// Oldest first, capped at the earliest maxInflightListed requests.
@@ -174,10 +265,34 @@ func (h *Hub) Snapshot(window time.Duration) Snapshot {
 		DownBps:          float64(downBytes) / seconds,
 		LatencyP50MS:     percentile(latency, 50),
 		LatencyP95MS:     percentile(latency, 95),
+		PromptTokens:     promptTokens,
+		CacheReadTokens:  cacheReadTokens,
+		CacheHitRate:     cacheHitRate(promptTokens, cacheReadTokens),
 		ByModel:          byModel,
+		ByUpstream:       byUpstream,
 		Spark:            spark,
 		InflightRequests: inflightRequests,
 	}
+}
+
+// emptySpark returns one zero point per second of the window, oldest first.
+func emptySpark(windowS int64) []SparkPoint {
+	spark := make([]SparkPoint, windowS)
+	for i := range spark {
+		spark[i].OffsetS = i - int(windowS-1)
+	}
+	return spark
+}
+
+// cacheHitRate returns cacheReadTokens/promptTokens, or nil when the window
+// observed no prompt tokens, so the JSON carries null instead of a divide by
+// zero.
+func cacheHitRate(promptTokens, cacheReadTokens int64) *float64 {
+	if promptTokens <= 0 {
+		return nil
+	}
+	rate := float64(cacheReadTokens) / float64(promptTokens)
+	return &rate
 }
 
 // percentile returns the upper bound of the bucket holding the pct-th

@@ -35,22 +35,30 @@ type modelCount struct {
 	errors   int64
 }
 
-// slot is one second of the ring buffer.
+// slot is one second of one upstream's ring buffer.
 type slot struct {
-	second    int64
-	requests  int64
-	errors    int64
-	upBytes   int64
-	downBytes int64
-	latency   [latencyBuckets]int64
-	models    map[string]*modelCount
+	second          int64
+	requests        int64
+	errors          int64
+	upBytes         int64
+	downBytes       int64
+	promptTokens    int64
+	cacheReadTokens int64
+	latency         [latencyBuckets]int64
+	models          map[string]*modelCount
 }
+
+// upstreamRing is one upstream's second-level ring buffer. Rings are created
+// on the upstream's first response and stay allocated afterwards; a ring with
+// no traffic in the requested window simply drops out of the snapshot.
+type upstreamRing [ringSeconds]slot
 
 // minuteKey identifies one traffic_minutes row.
 type minuteKey struct {
 	localDay  string
 	minute    int
 	pathClass string
+	upstream  string
 	model     string
 }
 
@@ -74,7 +82,7 @@ type Hub struct {
 	now  func() time.Time
 
 	mu       sync.Mutex
-	ring     [ringSeconds]slot
+	rings    map[string]*upstreamRing
 	inflight map[int64]*Inflight
 	nextID   int64
 	minutes  map[minuteKey]*accum
@@ -96,6 +104,7 @@ func New(sink Sink, now func() time.Time) *Hub {
 	return &Hub{
 		sink:     sink,
 		now:      now,
+		rings:    make(map[string]*upstreamRing),
 		inflight: make(map[int64]*Inflight),
 		minutes:  make(map[minuteKey]*accum),
 		subs:     make(map[int64]*subscriber),
@@ -104,11 +113,17 @@ func New(sink Sink, now func() time.Time) *Hub {
 }
 
 // Started registers a request in flight.
-func (h *Hub) Started(pathClass, model string) *Inflight {
+func (h *Hub) Started(pathClass, upstreamID, model string) *Inflight {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.nextID++
-	f := &Inflight{id: h.nextID, started: h.now(), pathClass: pathClass, model: model}
+	f := &Inflight{
+		id:         h.nextID,
+		started:    h.now(),
+		upstreamID: upstreamID,
+		pathClass:  pathClass,
+		model:      model,
+	}
 	h.inflight[f.id] = f
 	return f
 }
@@ -132,8 +147,20 @@ func (h *Hub) recordLocked(o Observation) {
 		failed = 1
 	}
 
-	sec := o.CompletedAt.Unix()
-	s := &h.ring[slotIndex(sec)]
+	completedAt := o.CompletedAt
+	if completedAt.IsZero() {
+		// A caller that omits the timestamp means "now"; never book traffic
+		// into the epoch ring slot.
+		completedAt = h.now()
+	}
+
+	sec := completedAt.Unix()
+	ring := h.rings[o.UpstreamID]
+	if ring == nil {
+		ring = &upstreamRing{}
+		h.rings[o.UpstreamID] = ring
+	}
+	s := &ring[slotIndex(sec)]
 	if s.second != sec {
 		*s = slot{second: sec, models: make(map[string]*modelCount)}
 	}
@@ -141,6 +168,8 @@ func (h *Hub) recordLocked(o Observation) {
 	s.errors += failed
 	s.upBytes += o.ReqBytes
 	s.downBytes += o.RespBytes
+	s.promptTokens += o.PromptTokens
+	s.cacheReadTokens += o.CacheReadTokens
 	s.latency[bucketIndex(o.LatencyMS)]++
 	mc := s.models[o.Model]
 	if mc == nil {
@@ -150,7 +179,13 @@ func (h *Hub) recordLocked(o Observation) {
 	mc.requests++
 	mc.errors += failed
 
-	key := minuteKey{localDay: o.LocalDay, minute: o.MinuteOfDay, pathClass: o.PathClass, model: o.Model}
+	key := minuteKey{
+		localDay:  o.LocalDay,
+		minute:    o.MinuteOfDay,
+		pathClass: o.PathClass,
+		upstream:  o.UpstreamID,
+		model:     o.Model,
+	}
 	a := h.minutes[key]
 	if a == nil {
 		a = &accum{}
@@ -202,6 +237,7 @@ func (h *Hub) flush() {
 			LocalDay:         key.localDay,
 			MinuteOfDay:      key.minute,
 			PathClass:        key.pathClass,
+			UpstreamID:       key.upstream,
 			Model:            key.model,
 			Requests:         a.total.Requests - a.flushed.Requests,
 			Errors:           a.total.Errors - a.flushed.Errors,

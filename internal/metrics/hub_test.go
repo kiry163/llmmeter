@@ -19,10 +19,10 @@ func TestSnapshotQPSAndPercentiles(t *testing.T) {
 	clock := func() time.Time { return now }
 	h := New(&fakeSink{}, clock)
 	for i := range 4 {
-		f := h.Started("chat", "m")
+		f := h.Started("chat", "u", "m")
 		h.Finished(f, Observation{
 			CompletedAt: now.Add(-time.Duration(i) * time.Second),
-			LocalDay:    "2026-10-29", MinuteOfDay: 720, PathClass: "chat", Model: "m",
+			LocalDay:    "2026-10-29", MinuteOfDay: 720, UpstreamID: "u", PathClass: "chat", Model: "m",
 			Status: 200, UsageStatus: usage.StatusOK, ReqBytes: 10, RespBytes: 20,
 			LatencyMS: int64(100 * (i + 1)),
 		})
@@ -43,12 +43,42 @@ func TestMinuteFlushSendsOnlyDelta(t *testing.T) {
 	sink := &fakeSink{}
 	now := time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)
 	h := New(sink, func() time.Time { return now })
-	f := h.Started("chat", "m")
-	h.Finished(f, Observation{CompletedAt: now, LocalDay: "2026-10-29", MinuteOfDay: 720, PathClass: "chat", Model: "m", Status: 200})
+	f := h.Started("chat", "u", "m")
+	h.Finished(f, Observation{CompletedAt: now, LocalDay: "2026-10-29", MinuteOfDay: 720, UpstreamID: "u", PathClass: "chat", Model: "m", Status: 200})
 	h.FlushForTest()
 	h.FlushForTest()
 	if len(sink.deltas) != 1 || sink.deltas[0].Requests != 1 {
 		t.Fatalf("deltas = %+v", sink.deltas)
+	}
+}
+
+func TestMinuteFlushSplitsUpstreams(t *testing.T) {
+	sink := &fakeSink{}
+	now := time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)
+	h := New(sink, func() time.Time { return now })
+	obs := Observation{
+		CompletedAt: now, LocalDay: "2026-10-29", MinuteOfDay: 720,
+		PathClass: "chat", Model: "m", Status: 200,
+		PromptTokens: 10, CacheReadTokens: 2,
+	}
+	for _, upstream := range []string{"a", "b"} {
+		o := obs
+		o.UpstreamID = upstream
+		h.Finished(h.Started("chat", upstream, "m"), o)
+	}
+	h.FlushForTest()
+	if len(sink.deltas) != 2 {
+		t.Fatalf("deltas = %+v", sink.deltas)
+	}
+	got := map[string]store.MinuteDelta{}
+	for _, d := range sink.deltas {
+		got[d.UpstreamID] = d
+	}
+	for _, upstream := range []string{"a", "b"} {
+		d, ok := got[upstream]
+		if !ok || d.Requests != 1 || d.PromptTokens != 10 || d.CacheReadTokens != 2 || d.Model != "m" {
+			t.Fatalf("delta %q = %+v (all = %+v)", upstream, d, sink.deltas)
+		}
 	}
 }
 
@@ -77,7 +107,7 @@ func TestSnapshotErrorsAndInflight(t *testing.T) {
 	h := New(&fakeSink{}, func() time.Time { return now })
 	base := Observation{
 		CompletedAt: now, LocalDay: "2026-10-29", MinuteOfDay: 720,
-		PathClass: "chat", Model: "m", Status: 200, ReqBytes: 5, RespBytes: 6,
+		UpstreamID: "u", PathClass: "chat", Model: "m", Status: 200, ReqBytes: 5, RespBytes: 6,
 	}
 	for _, o := range []Observation{
 		{Status: 500},
@@ -86,7 +116,7 @@ func TestSnapshotErrorsAndInflight(t *testing.T) {
 	} {
 		obs := base
 		obs.Status, obs.UsageStatus = o.Status, o.UsageStatus
-		h.Finished(h.Started("chat", "m"), obs)
+		h.Finished(h.Started("chat", "u", "m"), obs)
 	}
 	s := h.Snapshot(60 * time.Second)
 	if s.Errors != 2 {
@@ -105,7 +135,7 @@ func TestSnapshotErrorsAndInflight(t *testing.T) {
 
 	var inflight []*Inflight
 	for range 25 {
-		inflight = append(inflight, h.Started("chat", "m"))
+		inflight = append(inflight, h.Started("chat", "u", "m"))
 	}
 	s = h.Snapshot(60 * time.Second)
 	if s.Inflight != 25 || len(s.InflightRequests) != 20 {
@@ -119,17 +149,130 @@ func TestSnapshotErrorsAndInflight(t *testing.T) {
 	}
 }
 
+func TestSnapshotSeparatesUpstreams(t *testing.T) {
+	h := New(nil, nil)
+	start := h.Started("a", "chat", "m1")
+	h.Finished(start, Observation{UpstreamID: "a", Model: "m1", Status: 200, UsageStatus: "ok"})
+	start = h.Started("b", "chat", "m2")
+	h.Finished(start, Observation{UpstreamID: "b", Model: "m2", Status: 200, UsageStatus: "ok"})
+	s := h.Snapshot(60 * time.Second)
+	if s.ByUpstream["a"].Requests != 1 || s.ByUpstream["b"].Requests != 1 {
+		t.Fatalf("byUpstream = %+v", s.ByUpstream)
+	}
+}
+
+func TestSnapshotUpstreamStatsAndCacheHit(t *testing.T) {
+	now := time.Date(2026, 10, 29, 12, 0, 30, 0, time.UTC)
+	h := New(&fakeSink{}, func() time.Time { return now })
+	finish := func(upstream, model string, status int, latency, prompt, cache int64) {
+		h.Finished(h.Started("chat", upstream, model), Observation{
+			CompletedAt: now, UpstreamID: upstream, PathClass: "chat", Model: model,
+			Status: status, LatencyMS: latency,
+			PromptTokens: prompt, CacheReadTokens: cache,
+		})
+	}
+	finish("a", "m1", 200, 100, 1000, 250)
+	finish("a", "m1", 200, 300, 1000, 750)
+	finish("b", "m2", 500, 900, 0, 0)
+
+	s := h.Snapshot(60 * time.Second)
+	a := s.ByUpstream["a"]
+	if a.Requests != 2 || a.Errors != 0 || a.QPS != 2.0/60 {
+		t.Fatalf("upstream a = %+v", a)
+	}
+	if a.PromptTokens != 2000 || a.CacheReadTokens != 1000 ||
+		a.CacheHitRate == nil || math.Abs(*a.CacheHitRate-0.5) > 1e-9 {
+		t.Fatalf("upstream a cache = %+v", a)
+	}
+	if a.LatencyP50MS == nil || *a.LatencyP50MS != 100 || a.LatencyP95MS == nil || *a.LatencyP95MS != 400 {
+		t.Fatalf("upstream a latency = %v/%v", a.LatencyP50MS, a.LatencyP95MS)
+	}
+	if len(a.Spark) != 60 || a.Spark[59].OffsetS != 0 || a.Spark[59].Requests != 2 {
+		t.Fatalf("upstream a spark = %+v", a.Spark)
+	}
+	b := s.ByUpstream["b"]
+	if b.Requests != 1 || b.Errors != 1 || b.PromptTokens != 0 || b.CacheHitRate != nil {
+		t.Fatalf("upstream b = %+v", b)
+	}
+	if b.LatencyP95MS == nil || *b.LatencyP95MS != 1600 {
+		t.Fatalf("upstream b latency = %v", b.LatencyP95MS)
+	}
+
+	if s.QPS != 3.0/60 || s.Errors != 1 || s.PromptTokens != 2000 || s.CacheReadTokens != 1000 {
+		t.Fatalf("global snapshot = %+v", s)
+	}
+	if s.CacheHitRate == nil || math.Abs(*s.CacheHitRate-0.5) > 1e-9 {
+		t.Fatalf("global cacheHitRate = %v", s.CacheHitRate)
+	}
+	if sparkRequests(s.Spark) != 3 {
+		t.Fatalf("global spark = %+v", s.Spark)
+	}
+	if len(s.ByModel) != 2 || s.ByModel[0].UpstreamID != "a" || s.ByModel[0].Model != "m1" ||
+		s.ByModel[1].UpstreamID != "b" || s.ByModel[1].Model != "m2" {
+		t.Fatalf("byModel = %+v", s.ByModel)
+	}
+
+	h.Started("chat", "b", "m2")
+	s = h.Snapshot(60 * time.Second)
+	if s.ByUpstream["b"].Inflight != 1 || s.Inflight != 1 {
+		t.Fatalf("inflight byUpstream = %+v", s.ByUpstream["b"])
+	}
+	if len(s.InflightRequests) != 1 || s.InflightRequests[0].UpstreamID != "b" {
+		t.Fatalf("inflightRequests = %+v", s.InflightRequests)
+	}
+}
+
+func TestUpstreamSparkExpiresWithWindow(t *testing.T) {
+	now := time.Date(2026, 10, 29, 12, 1, 0, 0, time.UTC)
+	h := New(&fakeSink{}, func() time.Time { return now })
+	obs := func(upstream string, at time.Time) Observation {
+		return Observation{
+			CompletedAt: at, UpstreamID: upstream,
+			PathClass: "chat", Model: "m", Status: 200,
+		}
+	}
+	h.Finished(h.Started("chat", "a", "m"), obs("a", now.Add(-2*time.Second)))
+	h.Finished(h.Started("chat", "a", "m"), obs("a", now.Add(-61*time.Second)))
+
+	s := h.Snapshot(60 * time.Second)
+	a, ok := s.ByUpstream["a"]
+	if !ok || a.Requests != 1 || len(a.Spark) != 60 {
+		t.Fatalf("upstream a = %+v", a)
+	}
+	if a.Spark[57].OffsetS != s.Spark[57].OffsetS || a.Spark[57].OffsetS != -2 || a.Spark[57].Requests != 1 {
+		t.Fatalf("upstream spark = %+v, global = %+v", a.Spark[57], s.Spark[57])
+	}
+	if _, ok := h.Snapshot(time.Second).ByUpstream["a"]; ok {
+		t.Fatalf("upstream with no traffic in window still listed: %+v", h.Snapshot(time.Second).ByUpstream)
+	}
+}
+
+func TestInflightUpstreamAppearsWithoutTraffic(t *testing.T) {
+	now := time.Date(2026, 10, 29, 12, 0, 30, 0, time.UTC)
+	h := New(&fakeSink{}, func() time.Time { return now })
+	h.Started("chat", "fresh", "m")
+	s := h.Snapshot(60 * time.Second)
+	us, ok := s.ByUpstream["fresh"]
+	if !ok || us.Inflight != 1 || us.Requests != 0 || us.CacheHitRate != nil || len(us.Spark) != 60 {
+		t.Fatalf("byUpstream = %+v", s.ByUpstream)
+	}
+	if len(s.InflightRequests) != 1 || s.InflightRequests[0].UpstreamID != "fresh" ||
+		s.InflightRequests[0].PathClass != "chat" || s.InflightRequests[0].Model != "m" {
+		t.Fatalf("inflightRequests = %+v", s.InflightRequests)
+	}
+}
+
 func TestSnapshotWindowExcludesOldTraffic(t *testing.T) {
 	now := time.Date(2026, 10, 29, 12, 1, 0, 0, time.UTC)
 	h := New(&fakeSink{}, func() time.Time { return now })
-	obs := Observation{LocalDay: "2026-10-29", MinuteOfDay: 720, PathClass: "chat", Model: "m", Status: 200}
+	obs := Observation{LocalDay: "2026-10-29", MinuteOfDay: 720, UpstreamID: "u", PathClass: "chat", Model: "m", Status: 200}
 
 	old := obs
 	old.CompletedAt = now.Add(-61 * time.Second)
-	h.Finished(h.Started("chat", "m"), old)
+	h.Finished(h.Started("chat", "u", "m"), old)
 	fresh := obs
 	fresh.CompletedAt = now.Add(-2 * time.Second)
-	h.Finished(h.Started("chat", "m"), fresh)
+	h.Finished(h.Started("chat", "u", "m"), fresh)
 
 	s := h.Snapshot(60 * time.Second)
 	if s.QPS != 1.0/60 || len(s.Spark) != 60 || sparkRequests(s.Spark) != 1 {
@@ -168,9 +311,9 @@ func TestSparkOnePointPerSecond(t *testing.T) {
 		}
 	}
 
-	h.Finished(h.Started("chat", "m"), Observation{
+	h.Finished(h.Started("chat", "u", "m"), Observation{
 		CompletedAt: now, LocalDay: "2026-10-29", MinuteOfDay: 720,
-		PathClass: "chat", Model: "m", Status: 200, ReqBytes: 3, RespBytes: 4,
+		UpstreamID: "u", PathClass: "chat", Model: "m", Status: 200, ReqBytes: 3, RespBytes: 4,
 	})
 	s = h.Snapshot(60 * time.Second)
 	if len(s.Spark) != 60 || sparkRequests(s.Spark) != 1 {
@@ -184,10 +327,11 @@ func TestSparkOnePointPerSecond(t *testing.T) {
 func TestSnapshotJSONFieldNames(t *testing.T) {
 	now := time.Date(2026, 10, 29, 12, 0, 30, 0, time.UTC)
 	h := New(&fakeSink{}, func() time.Time { return now })
-	h.Finished(h.Started("chat", "m"), Observation{
+	h.Finished(h.Started("chat", "u", "m"), Observation{
 		CompletedAt: now, LocalDay: "2026-10-29", MinuteOfDay: 720,
-		PathClass: "chat", Model: "m", Status: 200, LatencyMS: 120,
+		UpstreamID: "u", PathClass: "chat", Model: "m", Status: 200, LatencyMS: 120,
 	})
+	h.Started("chat", "u", "m")
 	raw, err := json.Marshal(h.Snapshot(60 * time.Second))
 	if err != nil {
 		t.Fatal(err)
@@ -198,11 +342,15 @@ func TestSnapshotJSONFieldNames(t *testing.T) {
 	}
 	for _, key := range []string{
 		"ts", "windowS", "inflight", "qps", "errors", "upBps", "downBps",
-		"latencyP50Ms", "latencyP95Ms", "byModel", "spark", "inflightRequests",
+		"latencyP50Ms", "latencyP95Ms", "promptTokens", "cacheReadTokens",
+		"cacheHitRate", "byModel", "byUpstream", "spark", "inflightRequests",
 	} {
 		if _, ok := got[key]; !ok {
 			t.Fatalf("missing JSON key %q in %s", key, raw)
 		}
+	}
+	if string(got["cacheHitRate"]) != "null" {
+		t.Fatalf("cacheHitRate without prompt tokens = %s", got["cacheHitRate"])
 	}
 	var spark []map[string]json.RawMessage
 	if err := json.Unmarshal(got["spark"], &spark); err != nil {
@@ -220,9 +368,50 @@ func TestSnapshotJSONFieldNames(t *testing.T) {
 	if err := json.Unmarshal(got["byModel"], &models); err != nil {
 		t.Fatal(err)
 	}
-	for _, key := range []string{"model", "qps", "errors"} {
+	for _, key := range []string{"upstreamId", "model", "qps", "errors"} {
 		if _, ok := models[0][key]; !ok {
 			t.Fatalf("missing byModel key %q in %s", key, got["byModel"])
+		}
+	}
+	var upstreams map[string]map[string]json.RawMessage
+	if err := json.Unmarshal(got["byUpstream"], &upstreams); err != nil {
+		t.Fatal(err)
+	}
+	up, ok := upstreams["u"]
+	if !ok {
+		t.Fatalf("missing upstream %q in %s", "u", got["byUpstream"])
+	}
+	for _, key := range []string{
+		"requests", "inflight", "qps", "errors", "upBps", "downBps",
+		"latencyP50Ms", "latencyP95Ms", "promptTokens", "cacheReadTokens",
+		"cacheHitRate", "spark",
+	} {
+		if _, ok := up[key]; !ok {
+			t.Fatalf("missing byUpstream key %q in %s", key, got["byUpstream"])
+		}
+	}
+	var upstreamSpark []map[string]json.RawMessage
+	if err := json.Unmarshal(up["spark"], &upstreamSpark); err != nil {
+		t.Fatal(err)
+	}
+	if len(upstreamSpark) != 60 {
+		t.Fatalf("byUpstream spark = %s", up["spark"])
+	}
+	for _, key := range []string{"offsetS", "requests", "upBytes", "downBytes"} {
+		if _, ok := upstreamSpark[0][key]; !ok {
+			t.Fatalf("missing byUpstream spark key %q in %s", key, up["spark"])
+		}
+	}
+	var inflight []map[string]json.RawMessage
+	if err := json.Unmarshal(got["inflightRequests"], &inflight); err != nil {
+		t.Fatal(err)
+	}
+	if len(inflight) != 1 {
+		t.Fatalf("inflightRequests = %s", got["inflightRequests"])
+	}
+	for _, key := range []string{"upstreamId", "pathClass", "model", "elapsedMs"} {
+		if _, ok := inflight[0][key]; !ok {
+			t.Fatalf("missing inflightRequests key %q in %s", key, got["inflightRequests"])
 		}
 	}
 	if string(got["ts"]) != `"2026-10-29T12:00:30Z"` {
@@ -236,16 +425,16 @@ func TestMinuteAccumulatorSumsAndPrunes(t *testing.T) {
 	h := New(sink, func() time.Time { return now })
 	obs := Observation{
 		CompletedAt: now, LocalDay: "2026-10-29", MinuteOfDay: 720,
-		PathClass: "chat", Model: "m", Status: 200,
+		UpstreamID: "u", PathClass: "chat", Model: "m", Status: 200,
 		ReqBytes: 10, RespBytes: 20, PromptTokens: 3, CompletionTokens: 4,
 		CacheReadTokens: 5, ReasoningTokens: 6, CostNanoUSD: 7, LatencyMS: 120,
 	}
-	h.Finished(h.Started("chat", "m"), obs)
+	h.Finished(h.Started("chat", "u", "m"), obs)
 	obs.CompletedAt = now.Add(30 * time.Second)
 	obs.LatencyMS = 300
 	obs.Status = 502
 	obs.Model = "m2"
-	h.Finished(h.Started("chat", "m2"), obs)
+	h.Finished(h.Started("chat", "u", "m2"), obs)
 
 	h.FlushForTest()
 	if len(sink.deltas) != 2 {
@@ -266,8 +455,8 @@ func TestMinuteAccumulatorSumsAndPrunes(t *testing.T) {
 	}
 
 	now = now.Add(3 * time.Minute)
-	h.Finished(h.Started("chat", "m"), Observation{
-		CompletedAt: now, LocalDay: "2026-10-29", MinuteOfDay: 723, PathClass: "chat", Model: "m", Status: 200,
+	h.Finished(h.Started("chat", "u", "m"), Observation{
+		CompletedAt: now, LocalDay: "2026-10-29", MinuteOfDay: 723, UpstreamID: "u", PathClass: "chat", Model: "m", Status: 200,
 	})
 	h.FlushForTest()
 	h.mu.Lock()
@@ -282,9 +471,9 @@ func TestPendingDeltaSurvivesRetention(t *testing.T) {
 	sink := &fakeSink{}
 	now := time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)
 	h := New(sink, func() time.Time { return now })
-	h.Finished(h.Started("chat", "m"), Observation{
+	h.Finished(h.Started("chat", "u", "m"), Observation{
 		CompletedAt: now, LocalDay: "2026-10-29", MinuteOfDay: 720,
-		PathClass: "chat", Model: "m", Status: 200, ReqBytes: 9,
+		UpstreamID: "u", PathClass: "chat", Model: "m", Status: 200, ReqBytes: 9,
 	})
 	now = now.Add(3 * time.Minute)
 	h.FlushForTest()
@@ -307,9 +496,9 @@ func TestStopFlushesRemainingDeltas(t *testing.T) {
 	sink := &fakeSink{}
 	now := time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)
 	h := New(sink, func() time.Time { return now })
-	h.Finished(h.Started("chat", "m"), Observation{
+	h.Finished(h.Started("chat", "u", "m"), Observation{
 		CompletedAt: now, LocalDay: "2026-10-29", MinuteOfDay: 720,
-		PathClass: "chat", Model: "m", Status: 200,
+		UpstreamID: "u", PathClass: "chat", Model: "m", Status: 200,
 	})
 	h.Stop()
 	h.Stop()
