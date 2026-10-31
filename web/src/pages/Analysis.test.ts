@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
-import type { AnalysisTrendBucket } from "../api/types";
+import type { TrendBucket } from "../lib/analysis";
 import { buildTrendOption } from "./Analysis";
 
-function bucket(day: string, models: string[]): AnalysisTrendBucket {
+function bucket(day: string, models: string[]): TrendBucket {
   return {
     day,
     minuteOfDay: 0,
@@ -13,6 +13,7 @@ function bucket(day: string, models: string[]): AnalysisTrendBucket {
           requests: 1,
           promptTokens: 0,
           completionTokens: 0,
+          cacheReadTokens: 0,
           costNanoUsd: 1,
           upBytes: 0,
           downBytes: 0,

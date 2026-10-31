@@ -1,3 +1,5 @@
+import { resolveTimezone } from "./settings";
+
 const byteUnits = ["B", "KiB", "MiB", "GiB", "TiB"] as const;
 
 /** formatBytes renders a byte count with binary units and one decimal. */
@@ -102,7 +104,7 @@ export function formatTime(iso: string, tz?: string): string {
   const date = new Date(iso);
   if (Number.isNaN(date.getTime())) return iso;
   const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone: tz,
+    timeZone: resolveTimezone(tz),
     year: "numeric",
     month: "2-digit",
     day: "2-digit",

@@ -1,119 +1,103 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactElement } from "react";
 import { ApiError, api } from "../../api/client";
 import type {
-  CatalogObserved,
-  CatalogModel,
-  ImportedModel,
-  Model,
   ModelCatalog,
-  ModelInput,
-  Window,
-  WindowInput,
+  PricingModel,
+  PricingWindow,
+  Upstream,
 } from "../../api/types";
-import { ErrorBanner } from "../../components/ErrorBanner";
-import { Button, Field, Input, Spinner, useToast, ErrorText } from "../../components/ui";
-import { useTimezone } from "../../hooks/useTimezone";
+import { Badge, Button, ErrorText, Input, Select, Spinner, useToast } from "../../components/ui";
 import { formatTime } from "../../lib/format";
-import {
-  WEEKDAY_LABELS,
-  describeWindow,
-  formatMinute,
-  isZeroPriced,
-  parseRateInput,
-  parseTimeInput,
-  validateModel,
-  validateWindows,
-} from "../../lib/pricing";
-import type { FormErrors } from "../../lib/pricing";
 
-/** FIELD_LABELS turns API validation keys into visible field names. */
-const FIELD_LABELS: Record<string, string> = {
-  name: "模型名称",
-  inputPerMTok: "输入价",
-  outputPerMTok: "输出价",
-  cacheReadPerMTok: "缓存读价",
-  cacheWritePerMTok: "缓存写价",
-  reasoningPerMTok: "推理价",
-  windows: "时段窗口",
-  names: "模型名单",
+const DAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"] as const;
+const DAY_LABELS: Record<string, string> = {
+  mon: "一",
+  tue: "二",
+  wed: "三",
+  thu: "四",
+  fri: "五",
+  sat: "六",
+  sun: "日",
 };
 
-const SOURCE_LABELS = {
-  configured: "已配置",
-  upstream: "上游",
-  observed: "已观测",
-} as const;
-
-/** IMPORT_BATCH_SIZE is the API's per-request import cap. */
-const IMPORT_BATCH_SIZE = 100;
-
-interface CatalogRow {
-  name: string;
-  configured: Model | null;
-  upstream: CatalogModel | null;
-  observed: CatalogObserved | null;
+interface RateDraft {
+  input: string;
+  output: string;
+  cacheRead: string;
+  cacheWrite: string;
+  reasoning: string;
 }
 
-/** mergeRows unions configured, upstream and observed models by name. */
-function mergeRows(models: readonly Model[], catalog: ModelCatalog | undefined): CatalogRow[] {
-  const rows = new Map<string, CatalogRow>();
-  const ensure = (name: string): CatalogRow => {
-    const existing = rows.get(name);
-    if (existing) return existing;
-    const row: CatalogRow = { name, configured: null, upstream: null, observed: null };
-    rows.set(name, row);
-    return row;
-  };
-  for (const model of models) ensure(model.name).configured = model;
-  for (const upstream of catalog?.upstream ?? []) ensure(upstream.id).upstream = upstream;
-  for (const observed of catalog?.observed ?? []) ensure(observed.model).observed = observed;
-  return [...rows.values()].sort((left, right) => left.name.localeCompare(right.name));
-}
-
-interface WindowDraft {
+interface WindowDraft extends RateDraft {
   key: number;
   label: string;
-  daysMask: number;
+  days: string[];
   start: string;
   end: string;
-  input: string;
-  output: string;
-  cacheRead: string;
-  cacheWrite: string;
-  reasoning: string;
 }
 
-interface FormState {
+interface ModelDraft extends RateDraft {
+  key: number;
   name: string;
-  input: string;
-  output: string;
-  cacheRead: string;
-  cacheWrite: string;
-  reasoning: string;
   windows: WindowDraft[];
+  open: boolean;
 }
 
-const EMPTY_FORM: FormState = {
-  name: "",
-  input: "",
-  output: "",
-  cacheRead: "",
-  cacheWrite: "",
-  reasoning: "",
-  windows: [],
-};
+let nextKey = 1;
 
-let nextWindowKey = 1;
+function blankRate(): RateDraft {
+  return { input: "", output: "", cacheRead: "0", cacheWrite: "0", reasoning: "" };
+}
 
-/** WEEKDAY_MASK starts new windows on Monday–Friday. */
-const WEEKDAY_MASK = 0b0011111;
+function rateText(value: number | null | undefined): string {
+  return value == null ? "" : String(value);
+}
+
+function fromWindow(window: PricingWindow): WindowDraft {
+  return {
+    key: nextKey++,
+    label: window.label,
+    days: [...window.days],
+    start: window.start,
+    end: window.end,
+    input: rateText(window.input),
+    output: rateText(window.output),
+    cacheRead: rateText(window.cacheRead),
+    cacheWrite: rateText(window.cacheWrite),
+    reasoning: rateText(window.reasoning),
+  };
+}
+
+function fromModel(model: PricingModel): ModelDraft {
+  return {
+    key: nextKey++,
+    name: model.name,
+    input: rateText(model.input),
+    output: rateText(model.output),
+    cacheRead: rateText(model.cacheRead),
+    cacheWrite: rateText(model.cacheWrite),
+    reasoning: rateText(model.reasoning),
+    open: false,
+    windows: model.windows.map(fromWindow),
+  };
+}
+
+function blankModel(): ModelDraft {
+  return {
+    key: nextKey++,
+    name: "",
+    ...blankRate(),
+    open: false,
+    windows: [],
+  };
+}
 
 function blankWindow(): WindowDraft {
   return {
-    key: nextWindowKey++,
-    label: "",
-    daysMask: WEEKDAY_MASK,
+    key: nextKey++,
+    label: "高峰",
+    days: ["mon", "tue", "wed", "thu", "fri"],
     start: "00:00",
     end: "08:00",
     input: "",
@@ -124,945 +108,553 @@ function blankWindow(): WindowDraft {
   };
 }
 
-function rateText(value: number | null): string {
-  return value == null ? "" : String(value);
+/** parseRate accepts a non-negative finite rate; blank means undefined. */
+function parseRate(raw: string): number | undefined {
+  const value = Number(raw.trim());
+  return raw.trim() !== "" && Number.isFinite(value) && value >= 0 ? value : undefined;
 }
 
-function draftFromWindow(window: Window): WindowDraft {
-  return {
-    key: nextWindowKey++,
-    label: window.label,
-    daysMask: window.daysMask,
-    start: formatMinute(window.startMinute),
-    end: formatMinute(window.endMinute),
-    input: rateText(window.inputPerMTok),
-    output: rateText(window.outputPerMTok),
-    cacheRead: rateText(window.cacheReadPerMTok),
-    cacheWrite: rateText(window.cacheWritePerMTok),
-    reasoning: rateText(window.reasoningPerMTok),
-  };
+interface OptionalRate {
+  ok: boolean;
+  value: number | null;
 }
 
-function formFromModel(model: Model): FormState {
-  return {
-    name: model.name,
-    input: String(model.inputPerMTok),
-    output: String(model.outputPerMTok),
-    cacheRead: String(model.cacheReadPerMTok),
-    cacheWrite: String(model.cacheWritePerMTok),
-    reasoning: rateText(model.reasoningPerMTok),
-    windows: model.windows.map(draftFromWindow),
-  };
+function parseOptionalRate(raw: string): OptionalRate {
+  if (raw.trim() === "") return { ok: true, value: null };
+  const value = parseRate(raw);
+  return value === undefined ? { ok: false, value: null } : { ok: true, value };
 }
 
-function requiredRate(raw: string): number {
-  return parseRateInput(raw, { required: true }) ?? Number.NaN;
-}
-
-function optionalRate(raw: string): number {
-  return parseRateInput(raw, { required: false }) ?? Number.NaN;
-}
-
-/** windowRate keeps blank overrides as inherit (null) and flags bad numbers. */
-function windowRate(raw: string): number | null {
-  if (raw.trim() === "") return null;
-  return parseRateInput(raw, { required: false }) ?? Number.NaN;
-}
-
-function buildPayload(form: FormState): { model: ModelInput; windows: WindowInput[] } {
-  return {
-    model: {
-      name: form.name.trim(),
-      inputPerMTok: requiredRate(form.input),
-      outputPerMTok: requiredRate(form.output),
-      cacheReadPerMTok: requiredRate(form.cacheRead),
-      cacheWritePerMTok: optionalRate(form.cacheWrite),
-      reasoningPerMTok: form.reasoning.trim() === "" ? null : optionalRate(form.reasoning),
-    },
-    windows: form.windows.map((draft) => ({
-      label: draft.label.trim(),
-      daysMask: draft.daysMask,
-      startMinute: parseTimeInput(draft.start),
-      endMinute: parseTimeInput(draft.end),
-      inputPerMTok: windowRate(draft.input),
-      outputPerMTok: windowRate(draft.output),
-      cacheReadPerMTok: windowRate(draft.cacheRead),
-      cacheWritePerMTok: windowRate(draft.cacheWrite),
-      reasoningPerMTok: windowRate(draft.reasoning),
-    })),
-  };
-}
-
-/** baseRateErrors describes required blanks and bad optional rate text. */
-function baseRateErrors(form: FormState): FormErrors {
-  const errors: FormErrors = {};
-  const required = [
-    ["input", "inputPerMTok"],
-    ["output", "outputPerMTok"],
-    ["cacheRead", "cacheReadPerMTok"],
-  ] as const;
-  for (const [field, key] of required) {
-    if (form[field].trim() === "") errors[key] = "请填写";
-    else if (parseRateInput(form[field], { required: true }) == null) {
-      errors[key] = "需为不小于 0 的数字";
-    }
+function pricingError(error: unknown, fallback: string): string {
+  if (error instanceof ApiError) {
+    const first = Object.entries(error.fields)[0];
+    if (first) return `${first[0]}：${first[1]}`;
+    return error.message;
   }
-  const optional = [
-    ["cacheWrite", "cacheWritePerMTok"],
-    ["reasoning", "reasoningPerMTok"],
-  ] as const;
-  for (const [field, key] of optional) {
-    if (form[field].trim() !== "" && parseRateInput(form[field], { required: false }) == null) {
-      errors[key] = "需为不小于 0 的数字";
-    }
+  return error instanceof Error ? error.message : fallback;
+}
+
+function buildModel(draft: ModelDraft): PricingModel | null {
+  const input = parseRate(draft.input);
+  const output = parseRate(draft.output);
+  if (draft.name.trim() === "" || input === undefined || output === undefined) return null;
+  const cacheRead = parseOptionalRate(draft.cacheRead);
+  const cacheWrite = parseOptionalRate(draft.cacheWrite);
+  const reasoning = parseOptionalRate(draft.reasoning);
+  if (!cacheRead.ok || !cacheWrite.ok || !reasoning.ok) return null;
+  const windows: PricingWindow[] = [];
+  for (const window of draft.windows) {
+    const rates = [
+      parseOptionalRate(window.input),
+      parseOptionalRate(window.output),
+      parseOptionalRate(window.cacheRead),
+      parseOptionalRate(window.cacheWrite),
+      parseOptionalRate(window.reasoning),
+    ];
+    if (rates.some((rate) => !rate.ok)) return null;
+    windows.push({
+      label: window.label.trim(),
+      days: window.days,
+      start: window.start,
+      end: window.end,
+      input: rates[0].value,
+      output: rates[1].value,
+      cacheRead: rates[2].value,
+      cacheWrite: rates[3].value,
+      reasoning: rates[4].value,
+    });
   }
-  return errors;
+  return {
+    name: draft.name.trim(),
+    input,
+    output,
+    cacheRead: cacheRead.value ?? 0,
+    cacheWrite: cacheWrite.value ?? 0,
+    reasoning: reasoning.value,
+    windows,
+  };
 }
 
-/** displayRate renders a per-million-token price compactly. */
-function displayRate(value: number | null): string {
-  if (value == null) return "—";
-  if (value === 0) return "$0";
-  return `$${value < 1 ? value.toFixed(3) : value.toFixed(2)}`;
-}
-
-function windowSummary(model: Model): string {
-  return model.windows.length > 0 ? `${model.windows.length} 个峰谷窗口` : "基础费率";
-}
-
-function sourceBadges(row: CatalogRow): ReactNode {
+function windowInvalid(window: WindowDraft): boolean {
   return (
-    <>
-      {row.configured && <span className="source configured">{SOURCE_LABELS.configured}</span>}
-      {row.upstream && <span className="source upstream">{SOURCE_LABELS.upstream}</span>}
-      {row.observed && (
-        <span
-          className="source observed"
-          title={`日志观测到 ${row.observed.requests} 次请求`}
-        >
-          {SOURCE_LABELS.observed}
-        </span>
-      )}
-    </>
+    window.label.trim() === "" ||
+    window.days.length === 0 ||
+    !/^([01]\d|2[0-3]):[0-5]\d$/.test(window.start) ||
+    !/^([01]\d|2[0-3]):[0-5]\d$/.test(window.end) ||
+    window.start === window.end
   );
 }
 
-function statusPill(row: CatalogRow): ReactNode {
-  if (row.configured == null) return <span className="usage muted">未配置</span>;
-  if (isZeroPriced(row.configured)) return <span className="usage warn">0 价（待填）</span>;
-  return <span className="usage ok">已定价</span>;
-}
-
-function WindowEditor({
-  index,
+function RateInputs({
   draft,
-  errors,
-  canMoveUp,
-  canMoveDown,
   onChange,
-  onRemove,
-  onMove,
+  optional = false,
 }: {
-  index: number;
-  draft: WindowDraft;
-  errors: FormErrors;
-  canMoveUp: boolean;
-  canMoveDown: boolean;
-  onChange: (patch: Partial<WindowDraft>) => void;
-  onRemove: () => void;
-  onMove: (delta: number) => void;
-}) {
-  const prefix = `${index}.`;
+  draft: RateDraft;
+  onChange: (patch: Partial<RateDraft>) => void;
+  optional?: boolean;
+}): ReactElement {
   return (
-    <div className="window-box">
-      <div className="window-row">
-        <span>
-          <b>窗口 {index + 1}</b>
-          {draft.label.trim() !== "" ? ` · ${draft.label}` : ""}
-        </span>
-        <span className="pricing-actions">
-          <Button variant="secondary" disabled={!canMoveUp} onClick={() => onMove(-1)}>
-            上移
-          </Button>
-          <Button variant="secondary" disabled={!canMoveDown} onClick={() => onMove(1)}>
-            下移
-          </Button>
-          <Button variant="secondary" onClick={onRemove}>
-            移除
-          </Button>
-        </span>
-      </div>
-
-      <div className="model-grid">
-        <div className="span-2">
-          <Field label="窗口名称" error={errors[`${prefix}label`]}>
-            <Input
-              value={draft.label}
-              placeholder="例如 高峰时段"
-              onChange={(event) => onChange({ label: event.target.value })}
-            />
-          </Field>
-        </div>
-        <div className="span-2">
-          <span className="form-field">
-            <span>生效星期</span>
-            <span className="day-chips" role="group" aria-label="生效星期">
-              {WEEKDAY_LABELS.map((label, dayIndex) => {
-                const selected = (draft.daysMask & (1 << dayIndex)) !== 0;
-                return (
-                  <button
-                    key={label}
-                    type="button"
-                    className={`day-chip${selected ? " on" : ""}`}
-                    aria-pressed={selected}
-                    onClick={() => onChange({ daysMask: draft.daysMask ^ (1 << dayIndex) })}
-                  >
-                    {label}
-                  </button>
-                );
-              })}
-            </span>
-            {errors[`${prefix}daysMask`] && (
-              <small className="form-error" role="alert">
-                {errors[`${prefix}daysMask`]}
-              </small>
-            )}
-          </span>
-        </div>
-        <Field label="开始" error={errors[`${prefix}startMinute`]}>
-          <Input
-            type="time"
-            value={draft.start}
-            onChange={(event) => onChange({ start: event.target.value })}
-          />
-        </Field>
-        <Field label="结束" error={errors[`${prefix}endMinute`]}>
-          <Input
-            type="time"
-            value={draft.end}
-            onChange={(event) => onChange({ end: event.target.value })}
-          />
-        </Field>
-      </div>
-
-      <div className="win-form-grid">
-        <Field label="输入价" hint="留空继承" error={errors[`${prefix}inputPerMTok`]}>
-          <Input
-            inputMode="decimal"
-            value={draft.input}
-            placeholder="继承"
-            onChange={(event) => onChange({ input: event.target.value })}
-          />
-        </Field>
-        <Field label="输出价" hint="留空继承" error={errors[`${prefix}outputPerMTok`]}>
-          <Input
-            inputMode="decimal"
-            value={draft.output}
-            placeholder="继承"
-            onChange={(event) => onChange({ output: event.target.value })}
-          />
-        </Field>
-        <Field label="缓存读价" hint="留空继承" error={errors[`${prefix}cacheReadPerMTok`]}>
-          <Input
-            inputMode="decimal"
-            value={draft.cacheRead}
-            placeholder="继承"
-            onChange={(event) => onChange({ cacheRead: event.target.value })}
-          />
-        </Field>
-        <Field label="缓存写价" hint="留空继承" error={errors[`${prefix}cacheWritePerMTok`]}>
-          <Input
-            inputMode="decimal"
-            value={draft.cacheWrite}
-            placeholder="继承"
-            onChange={(event) => onChange({ cacheWrite: event.target.value })}
-          />
-        </Field>
-      </div>
-      <div className="win-form-grid">
-        <Field label="推理价" hint="留空继承输出" error={errors[`${prefix}reasoningPerMTok`]}>
-          <Input
-            inputMode="decimal"
-            value={draft.reasoning}
-            placeholder="继承"
-            onChange={(event) => onChange({ reasoning: event.target.value })}
-          />
-        </Field>
-      </div>
-      <div className="pricing-rates">结束早于开始时按跨夜处理，星期按开始日计算。</div>
+    <div className="rate-grid">
+      <label>
+        <span>输入</span>
+        <Input
+          inputMode="decimal"
+          value={draft.input}
+          placeholder={optional ? "继承" : "0"}
+          onChange={(event) => onChange({ input: event.target.value })}
+        />
+      </label>
+      <label>
+        <span>输出</span>
+        <Input
+          inputMode="decimal"
+          value={draft.output}
+          placeholder={optional ? "继承" : "0"}
+          onChange={(event) => onChange({ output: event.target.value })}
+        />
+      </label>
+      <label>
+        <span>缓存读</span>
+        <Input
+          inputMode="decimal"
+          value={draft.cacheRead}
+          placeholder={optional ? "继承" : "0"}
+          onChange={(event) => onChange({ cacheRead: event.target.value })}
+        />
+      </label>
+      <label>
+        <span>缓存写</span>
+        <Input
+          inputMode="decimal"
+          value={draft.cacheWrite}
+          placeholder={optional ? "继承" : "0"}
+          onChange={(event) => onChange({ cacheWrite: event.target.value })}
+        />
+      </label>
+      <label>
+        <span>推理</span>
+        <Input
+          inputMode="decimal"
+          value={draft.reasoning}
+          placeholder={optional ? "继承" : "同输出"}
+          onChange={(event) => onChange({ reasoning: event.target.value })}
+        />
+      </label>
     </div>
   );
 }
 
-/**
- * importInBatches creates every name through /models/import, splitting the
- * list because the API rejects batches above its cap.
- */
-async function importInBatches(names: string[]): Promise<{
-  created: ImportedModel[];
-  skipped: string[];
-}> {
-  const created: ImportedModel[] = [];
-  const skipped: string[] = [];
-  for (let start = 0; start < names.length; start += IMPORT_BATCH_SIZE) {
-    const result = await api.importModels(names.slice(start, start + IMPORT_BATCH_SIZE));
-    created.push(...result.created);
-    skipped.push(...result.skipped);
-  }
-  return { created, skipped };
+function ModelEditor({
+  draft,
+  onChange,
+  onRemove,
+}: {
+  draft: ModelDraft;
+  onChange: (next: ModelDraft) => void;
+  onRemove: () => void;
+}): ReactElement {
+  const patchWindow = (key: number, patch: Partial<WindowDraft>) => {
+    onChange({
+      ...draft,
+      windows: draft.windows.map((window) =>
+        window.key === key ? { ...window, ...patch } : window,
+      ),
+    });
+  };
+
+  return (
+    <div className="price-model">
+      <div className="price-model-head">
+        <Input
+          className="model-name-input"
+          value={draft.name}
+          placeholder="模型名称"
+          onChange={(event) => onChange({ ...draft, name: event.target.value })}
+        />
+        <Button variant="ghost" onClick={onRemove}>
+          删除模型
+        </Button>
+      </div>
+      <RateInputs
+        draft={draft}
+        onChange={(patch) => onChange({ ...draft, ...patch })}
+      />
+      <div className="price-model-foot">
+        <button
+          type="button"
+          className="ghost-btn"
+          onClick={() => onChange({ ...draft, open: !draft.open })}
+        >
+          {draft.open ? "收起时段" : `时段价格（${draft.windows.length}）`}
+        </button>
+        <span className="muted">单位：USD / 1M tokens</span>
+      </div>
+
+      {draft.open && (
+        <div className="window-list">
+          {draft.windows.length === 0 && <p className="muted">没有时段覆盖，使用基础价格。</p>}
+          {draft.windows.map((window, index) => (
+            <div className={`window-card${windowInvalid(window) ? " invalid" : ""}`} key={window.key}>
+              <div className="window-head">
+                <Input
+                  value={window.label}
+                  placeholder="时段名称"
+                  onChange={(event) => patchWindow(window.key, { label: event.target.value })}
+                />
+                <button
+                  type="button"
+                  className="ghost-btn"
+                  disabled={index === 0}
+                  aria-label="上移时段"
+                  onClick={() => {
+                    const windows = [...draft.windows];
+                    [windows[index - 1], windows[index]] = [windows[index], windows[index - 1]];
+                    onChange({ ...draft, windows });
+                  }}
+                >
+                  ↑
+                </button>
+                <button
+                  type="button"
+                  className="ghost-btn"
+                  disabled={index === draft.windows.length - 1}
+                  aria-label="下移时段"
+                  onClick={() => {
+                    const windows = [...draft.windows];
+                    [windows[index + 1], windows[index]] = [windows[index], windows[index + 1]];
+                    onChange({ ...draft, windows });
+                  }}
+                >
+                  ↓
+                </button>
+                <button
+                  type="button"
+                  className="ghost-btn danger-text"
+                  onClick={() =>
+                    onChange({
+                      ...draft,
+                      windows: draft.windows.filter((item) => item.key !== window.key),
+                    })
+                  }
+                >
+                  移除
+                </button>
+              </div>
+              <div className="day-picks" role="group" aria-label="生效星期">
+                {DAYS.map((day) => {
+                  const active = window.days.includes(day);
+                  return (
+                    <button
+                      key={day}
+                      type="button"
+                      className={active ? "on" : ""}
+                      aria-pressed={active}
+                      onClick={() =>
+                        patchWindow(window.key, {
+                          days: active
+                            ? window.days.filter((item) => item !== day)
+                            : [...window.days, day],
+                        })
+                      }
+                    >
+                      {DAY_LABELS[day]}
+                    </button>
+                  );
+                })}
+                <span className="time-range">
+                  <Input
+                    type="time"
+                    value={window.start}
+                    aria-label="开始时间"
+                    onChange={(event) => patchWindow(window.key, { start: event.target.value })}
+                  />
+                  <span>至</span>
+                  <Input
+                    type="time"
+                    value={window.end}
+                    aria-label="结束时间"
+                    onChange={(event) => patchWindow(window.key, { end: event.target.value })}
+                  />
+                </span>
+              </div>
+              <RateInputs
+                draft={window}
+                optional
+                onChange={(patch) => patchWindow(window.key, patch)}
+              />
+            </div>
+          ))}
+          <Button
+            variant="secondary"
+            onClick={() => onChange({ ...draft, windows: [...draft.windows, blankWindow()] })}
+          >
+            添加时段
+          </Button>
+        </div>
+      )}
+    </div>
+  );
 }
 
-/**
- * PartialSaveError marks a model that was created or updated but whose window
- * replacement failed, so the editor can retry against the saved id.
- */
-class PartialSaveError extends Error {
-  readonly modelId: number;
-  readonly detail: unknown;
-
-  constructor(modelId: number, detail: unknown) {
-    super(detail instanceof Error ? detail.message : String(detail));
-    this.name = "PartialSaveError";
-    this.modelId = modelId;
-    this.detail = detail;
-  }
-}
-
-/**
- * Pricing is the settings pricing subpage: it merges the configured, upstream
- * and observed model catalogs, imports unconfigured models with zero rates and
- * edits base prices plus time windows.
- */
-export function Pricing() {
+function PricingEditor({
+  upstream,
+  models,
+  timezone,
+}: {
+  upstream: Upstream;
+  models: PricingModel[];
+  timezone: string;
+}): ReactElement {
   const queryClient = useQueryClient();
   const toast = useToast();
-  const timeZone = useTimezone();
-  const models = useQuery({ queryKey: ["models"], queryFn: api.getModels });
-  const catalog = useQuery({
-    queryKey: ["model-catalog"],
-    queryFn: () => api.getModelCatalog(false),
+  const [drafts, setDrafts] = useState<ModelDraft[]>(() => models.map(fromModel));
+  const [filter, setFilter] = useState("");
+  const [catalog, setCatalog] = useState<ModelCatalog | null>(null);
+
+  const catalogQuery = useQuery({
+    queryKey: ["catalog", upstream.id],
+    queryFn: () => api.getCatalog(upstream.id),
   });
 
-  const [search, setSearch] = useState("");
-  const [editorOpen, setEditorOpen] = useState(false);
-  const [editingId, setEditingId] = useState<number | null>(null);
-  const [form, setForm] = useState<FormState>(EMPTY_FORM);
-  const [errors, setErrors] = useState<FormErrors>({});
-  const [focusWindows, setFocusWindows] = useState(false);
-  const [deletingId, setDeletingId] = useState<number | null>(null);
-  const dialogRef = useRef<HTMLDivElement | null>(null);
-  const windowsRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (catalogQuery.data) setCatalog(catalogQuery.data);
+  }, [catalogQuery.data]);
 
-  const refresh = useMutation({
-    mutationFn: () => api.getModelCatalog(true),
-    onSuccess: (data) => {
-      queryClient.setQueryData(["model-catalog"], data);
-      if (data.upstreamError !== "") {
-        toast("上游拉取失败，已保留已观测模型", "error");
-      } else {
-        toast("已刷新上游模型", "success");
+  const refreshCatalog = useMutation({
+    mutationFn: () => api.getCatalog(upstream.id, true),
+    onSuccess: (body) => {
+      setCatalog(body);
+      toast("模型目录已刷新", "success");
+    },
+    onError: (error) => toast(pricingError(error, "刷新模型目录失败"), "error"),
+  });
+
+  const candidates = useMemo(() => {
+    const configured = new Set(drafts.map((model) => model.name.trim()).filter(Boolean));
+    const names = new Map<string, boolean>();
+    for (const name of catalog?.configured ?? []) {
+      if (!configured.has(name)) names.set(name, false);
+    }
+    for (const model of catalog?.upstream ?? []) {
+      if (!configured.has(model.id)) names.set(model.id, true);
+    }
+    for (const observed of catalog?.observed ?? []) {
+      if (!configured.has(observed.model)) names.set(observed.model, false);
+    }
+    return [...names.entries()].map(([name, upstreamDiscovered]) => ({
+      name,
+      upstreamDiscovered,
+    }));
+  }, [catalog, drafts]);
+
+  const importMutation = useMutation({
+    mutationFn: async (names: string[]) => {
+      const created: string[] = [];
+      for (let index = 0; index < names.length; index += 100) {
+        const result = await api.importPricing(upstream.id, names.slice(index, index + 100));
+        created.push(...result.created);
       }
+      return created;
     },
-    onError: (error) => {
-      toast(error instanceof Error ? error.message : "刷新失败", "error");
+    onSuccess: (created) => {
+      setDrafts((current) => {
+        const existing = new Set(current.map((model) => model.name.trim()));
+        return [
+          ...current,
+          ...created
+            .filter((name) => !existing.has(name))
+            .map((name) => ({ ...blankModel(), name })),
+        ];
+      });
+      void queryClient.invalidateQueries({ queryKey: ["pricing-model-names"] });
+      toast(`已导入 ${created.length} 个模型，请补全价格`, "success");
     },
-  });
-
-  const importModels = useMutation({
-    mutationFn: importInBatches,
-    onSuccess: (result) => {
-      void queryClient.invalidateQueries({ queryKey: ["models"] });
-      void queryClient.invalidateQueries({ queryKey: ["model-catalog"] });
-      const parts = [`补录 ${result.created.length} 个模型`];
-      if (result.skipped.length > 0) parts.push(`跳过 ${result.skipped.length} 个`);
-      toast(parts.join("，"), "success");
-    },
-    onError: (error) => {
-      toast(error instanceof Error ? error.message : "补录失败", "error");
-    },
+    onError: (error) => toast(pricingError(error, "导入失败"), "error"),
   });
 
   const save = useMutation({
-    mutationFn: async ({
-      model,
-      windows,
-    }: {
-      model: ModelInput;
-      windows: WindowInput[];
-    }): Promise<number> => {
-      if (editingId == null) {
-        const created = await api.createModel(model);
-        try {
-          await api.putWindows(created.id, windows);
-        } catch (detail) {
-          throw new PartialSaveError(created.id, detail);
-        }
-        return created.id;
+    mutationFn: () => {
+      const payload = drafts.map(buildModel);
+      if (payload.some((model) => model === null)) {
+        throw new Error("模型名称必填，价格必须是非负数；基础输入/输出价不能留空");
       }
-      await api.updateModel(editingId, model);
-      try {
-        await api.putWindows(editingId, windows);
-      } catch (detail) {
-        throw new PartialSaveError(editingId, detail);
+      if (drafts.some((model) => model.windows.some(windowInvalid))) {
+        throw new Error("时段名称、星期与起止时间不完整，且起止不能相同");
       }
-      return editingId;
+      return api.putPricing(
+        upstream.id,
+        payload.filter((model): model is PricingModel => model !== null),
+      );
     },
-    onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["models"] });
-      void queryClient.invalidateQueries({ queryKey: ["model-catalog"] });
-      void queryClient.invalidateQueries({ queryKey: ["overview"] });
-      void queryClient.invalidateQueries({ queryKey: ["analysis"] });
+    onSuccess: (body) => {
+      queryClient.setQueryData(["pricing", upstream.id], body);
+      setDrafts(body.models.map(fromModel));
+      void queryClient.invalidateQueries({ queryKey: ["pricing-model-names"] });
       toast("价格已保存", "success");
-      setEditorOpen(false);
-      setErrors({});
     },
-    onError: (error) => {
-      // A create or update may have landed before putWindows failed.
-      void queryClient.invalidateQueries({ queryKey: ["models"] });
-      void queryClient.invalidateQueries({ queryKey: ["model-catalog"] });
-      if (error instanceof PartialSaveError) {
-        setEditingId(error.modelId);
-        toast("模型已保存，但时段窗口保存失败，请重试保存", "error");
-      }
-    },
+    onError: (error) => toast(pricingError(error, "保存价格失败"), "error"),
   });
 
-  const remove = useMutation({
-    mutationFn: (id: number) => api.deleteModel(id),
-    onSuccess: (_data, id) => {
-      void queryClient.invalidateQueries({ queryKey: ["models"] });
-      void queryClient.invalidateQueries({ queryKey: ["model-catalog"] });
-      void queryClient.invalidateQueries({ queryKey: ["overview"] });
-      void queryClient.invalidateQueries({ queryKey: ["analysis"] });
-      setDeletingId(null);
-      if (editingId === id) {
-        setEditorOpen(false);
-        setErrors({});
-      }
-      toast("已删除模型配置", "success");
-    },
-    onError: (error) => {
-      toast(error instanceof Error ? error.message : "删除失败", "error");
-    },
-  });
-
-  useEffect(() => {
-    if (!editorOpen) return;
-    const previousOverflow = document.body.style.overflow;
-    const previousFocus =
-      document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    document.body.style.overflow = "hidden";
-    const node = dialogRef.current;
-    const first = node?.querySelector<HTMLElement>(
-      'input:not([disabled]), button:not([disabled]), select:not([disabled]), textarea:not([disabled])',
-    );
-    first?.focus();
-
-    function onKey(event: KeyboardEvent) {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        setEditorOpen(false);
-        setErrors({});
-        return;
-      }
-      if (event.key !== "Tab" || node == null) return;
-      const focusable = Array.from(
-        node.querySelectorAll<HTMLElement>(
-          'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])',
-        ),
-      );
-      if (focusable.length === 0) return;
-      const firstEl = focusable[0];
-      const lastEl = focusable[focusable.length - 1];
-      if (event.shiftKey && document.activeElement === firstEl) {
-        event.preventDefault();
-        lastEl.focus();
-      } else if (!event.shiftKey && document.activeElement === lastEl) {
-        event.preventDefault();
-        firstEl.focus();
-      }
-    }
-
-    window.addEventListener("keydown", onKey, true);
-    return () => {
-      document.body.style.overflow = previousOverflow;
-      window.removeEventListener("keydown", onKey, true);
-      previousFocus?.focus();
-    };
-  }, [editorOpen]);
-
-  useEffect(() => {
-    if (!editorOpen || !focusWindows) return;
-    const timer = window.setTimeout(() => {
-      windowsRef.current?.scrollIntoView({ block: "nearest", behavior: "smooth" });
-      windowsRef.current?.querySelector<HTMLElement>("input, button")?.focus();
-    }, 60);
-    return () => window.clearTimeout(timer);
-  }, [editorOpen, focusWindows]);
-
-  function openCreate(name = "") {
-    save.reset();
-    setEditingId(null);
-    setForm({ ...EMPTY_FORM, name });
-    setErrors({});
-    setFocusWindows(false);
-    setDeletingId(null);
-    setEditorOpen(true);
-  }
-
-  function openEdit(model: Model, windowsOnly = false) {
-    save.reset();
-    setEditingId(model.id);
-    setForm(formFromModel(model));
-    setErrors({});
-    setFocusWindows(windowsOnly);
-    setDeletingId(null);
-    setEditorOpen(true);
-  }
-
-  function closeEditor() {
-    setEditorOpen(false);
-    setErrors({});
-    setFocusWindows(false);
-  }
-
-  function updateWindow(key: number, patch: Partial<WindowDraft>) {
-    setForm((current) => ({
-      ...current,
-      windows: current.windows.map((window) =>
-        window.key === key ? { ...window, ...patch } : window,
-      ),
-    }));
-  }
-
-  function moveWindow(index: number, delta: number) {
-    setForm((current) => {
-      const target = index + delta;
-      if (target < 0 || target >= current.windows.length) return current;
-      const windows = [...current.windows];
-      const [moved] = windows.splice(index, 1);
-      windows.splice(target, 0, moved);
-      return { ...current, windows };
-    });
-  }
-
-  function submit() {
-    const payload = buildPayload(form);
-    const nextErrors = {
-      ...validateModel(payload.model),
-      ...validateWindows(payload.windows),
-      ...baseRateErrors(form),
-    };
-    setErrors(nextErrors);
-    if (Object.keys(nextErrors).length > 0) return;
-    save.mutate(payload);
-  }
-
-  function importMissing() {
-    if (unconfigured.length === 0) return;
-    importModels.mutate(unconfigured.map((row) => row.name));
-  }
-
-  const rows = mergeRows(models.data?.models ?? [], catalog.data);
-  const unconfigured = rows.filter((row) => row.configured == null);
-  const query = search.trim().toLowerCase();
-  const visible = query === "" ? rows : rows.filter((row) => row.name.toLowerCase().includes(query));
-  const datalistNames = [
-    ...new Set([
-      ...(catalog.data?.upstream.map((model) => model.id) ?? []),
-      ...(catalog.data?.observed.map((entry) => entry.model) ?? []),
-    ]),
-  ].sort();
-  const saveError = save.error;
-  const saveFields =
-    saveError instanceof ApiError
-      ? Object.entries(saveError.fields)
-      : saveError instanceof PartialSaveError && saveError.detail instanceof ApiError
-        ? Object.entries(saveError.detail.fields)
-        : [];
-  const pending = models.isPending || catalog.isPending;
-
-  function renderActions(row: CatalogRow): ReactNode {
-    if (row.configured == null) {
-      return (
-        <span className="pricing-actions">
-          <Button variant="secondary" onClick={() => openCreate(row.name)}>
-            配置
-          </Button>
-        </span>
-      );
-    }
-    const model = row.configured;
-    if (deletingId === model.id) {
-      return (
-        <span className="pricing-actions">
-          <Button
-            variant="danger"
-            disabled={remove.isPending}
-            onClick={() => remove.mutate(model.id)}
-          >
-            {remove.isPending ? "删除中…" : "确认"}
-          </Button>
-          <Button variant="secondary" onClick={() => setDeletingId(null)}>
-            取消
-          </Button>
-        </span>
-      );
-    }
-    return (
-      <span className="pricing-actions">
-        <Button variant="secondary" onClick={() => openEdit(model)}>
-          编辑
-        </Button>
-        <Button variant="secondary" onClick={() => openEdit(model, true)}>
-          窗口
-        </Button>
-        <Button variant="secondary" onClick={() => setDeletingId(model.id)}>
-          删除
-        </Button>
-      </span>
-    );
-  }
-
-  const hasErrors =
-    models.isError ||
-    catalog.isError ||
-    refresh.isError ||
-    importModels.isError ||
-    (catalog.data?.upstreamError ?? "") !== "";
+  const visible = drafts.filter((model) =>
+    filter.trim() === "" ||
+    model.name.toLowerCase().includes(filter.trim().toLowerCase()),
+  );
 
   return (
     <>
-      <div className="settings-panel active">
-        <article className="card pricing-card">
-        <div className="pricing-head">
-          <div>
-            <div className="card-title">模型目录</div>
-            <div className="card-sub">
-              {catalog.data?.fetchedAt
-                ? `上次拉取：${formatTime(catalog.data.fetchedAt, timeZone)}`
-                : "尚未成功拉取上游模型"}
-            </div>
-          </div>
-          <div className="pricing-tools">
-            <input
-              className="search-input"
-              type="search"
-              value={search}
-              placeholder="搜索模型…"
-              aria-label="搜索模型"
-              autoComplete="off"
-              onChange={(event) => setSearch(event.target.value)}
-            />
-            <Button
-              variant="secondary"
-              disabled={refresh.isPending || pending}
-              onClick={() => refresh.mutate()}
-            >
-              {refresh.isPending ? "刷新中…" : "刷新上游模型"}
-            </Button>
-            <Button
-              variant="secondary"
-              disabled={importModels.isPending || unconfigured.length === 0}
-              onClick={importMissing}
-            >
-              {importModels.isPending ? "补录中…" : `一键补录（${unconfigured.length}）`}
-            </Button>
-            <Button onClick={() => openCreate()}>添加模型</Button>
-          </div>
-        </div>
-
-        {hasErrors && (
-          <div className="settings-body" style={{ display: "grid", gap: 8, paddingBottom: 0 }}>
-            {models.isError && (
-              <ErrorBanner error={models.error} onRetry={() => void models.refetch()} />
-            )}
-            {catalog.isError && (
-              <ErrorBanner error={catalog.error} onRetry={() => void catalog.refetch()} />
-            )}
-            {catalog.data?.upstreamError && (
-              <ErrorBanner
-                error={`上游模型拉取失败：${catalog.data.upstreamError}`}
-                onRetry={() => refresh.mutate()}
-              />
-            )}
-            {refresh.isError && (
-              <ErrorBanner error={refresh.error} onRetry={() => refresh.mutate()} />
-            )}
-            {importModels.isError && <ErrorBanner error={importModels.error} />}
-          </div>
-        )}
-
-        {pending ? (
-          <div className="log-empty">
-            <Spinner label="加载模型目录…" />
-          </div>
-        ) : rows.length === 0 ? (
-          <div className="log-empty">模型目录为空，刷新上游目录或添加模型。</div>
-        ) : visible.length === 0 ? (
-          <div className="log-empty">没有匹配的模型</div>
-        ) : (
-          <>
-            <div className="pricing-table-wrap">
-              <table className="pricing-table">
-                <thead>
-                  <tr>
-                    <th>模型</th>
-                    <th>来源</th>
-                    <th className="num">输入</th>
-                    <th className="num">输出</th>
-                    <th className="num">缓存读</th>
-                    <th>状态</th>
-                    <th className="num">操作</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {visible.map((row) => (
-                    <tr key={row.name}>
-                      <td>
-                        <div className="pricing-name">{row.name}</div>
-                        <div className="pricing-rates">
-                          {row.configured ? (
-                            <span
-                              title={
-                                row.configured.windows.length > 0
-                                  ? row.configured.windows.map(describeWindow).join("\n")
-                                  : "无时段窗口，使用基础费率"
-                              }
-                            >
-                              {windowSummary(row.configured)}
-                            </span>
-                          ) : (
-                            "未配置价格"
-                          )}
-                        </div>
-                      </td>
-                      <td>{sourceBadges(row)}</td>
-                      <td className="num">
-                        {row.configured ? displayRate(row.configured.inputPerMTok) : "—"}
-                      </td>
-                      <td className="num">
-                        {row.configured ? displayRate(row.configured.outputPerMTok) : "—"}
-                      </td>
-                      <td className="num">
-                        {row.configured ? displayRate(row.configured.cacheReadPerMTok) : "—"}
-                      </td>
-                      <td>{statusPill(row)}</td>
-                      <td className="num">{renderActions(row)}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-
-            <div className="pricing-cards">
-              {visible.map((row) => (
-                <div className="pricing-row" key={row.name}>
-                  <div className="pricing-row-top">
-                    <div>
-                      <div className="pricing-name">{row.name}</div>
-                      <div style={{ marginTop: 4 }}>{sourceBadges(row)}</div>
-                    </div>
-                    <div>{statusPill(row)}</div>
-                  </div>
-                  <div className="pricing-row-meta">
-                    <span>
-                      输入{" "}
-                      <b>{row.configured ? displayRate(row.configured.inputPerMTok) : "—"}</b>
-                    </span>
-                    <span>
-                      输出{" "}
-                      <b>{row.configured ? displayRate(row.configured.outputPerMTok) : "—"}</b>
-                    </span>
-                    <span>
-                      缓存读{" "}
-                      <b>{row.configured ? displayRate(row.configured.cacheReadPerMTok) : "—"}</b>
-                    </span>
-                    <span>{row.configured ? windowSummary(row.configured) : "未配置价格"}</span>
-                  </div>
-                  <div className="pricing-row-actions">{renderActions(row)}</div>
-                </div>
-              ))}
-            </div>
-          </>
-        )}
-      </article>
-      <p className="settings-hint">
-        价格按每百万 tokens 计，缓存写价留空按 0 计；reasoning 留空继承 output。峰谷窗口内命中时覆盖基础费率。
-      </p>
+      <div className="pricing-toolbar">
+        <Input
+          value={filter}
+          placeholder="筛选模型"
+          onChange={(event) => setFilter(event.target.value)}
+        />
+        <span className="muted">
+          时区 {timezone} · 时段按本地时间匹配
+        </span>
+        <Button variant="secondary" onClick={() => setDrafts([...drafts, blankModel()])}>
+          添加模型
+        </Button>
+        <Button disabled={save.isPending} onClick={() => save.mutate()}>
+          {save.isPending ? "保存中…" : "保存价格"}
+        </Button>
       </div>
 
-      {editorOpen && (
-        <>
-          <div className="modal-overlay open" onClick={closeEditor} aria-hidden="true" />
-          <div
-            className="modal open"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="model-modal-title"
-            ref={dialogRef}
-          >
-            <div className="modal-head">
-              <div className="modal-title" id="model-modal-title">
-                {editingId == null ? "添加模型" : "编辑模型"}
+      <div className="pricing-grid">
+        <div className="card pricing-list">
+          {visible.length === 0 ? (
+            <div className="log-empty">
+              {drafts.length === 0 ? "还没有价格模型" : "没有匹配的模型"}
+            </div>
+          ) : (
+            visible.map((draft) => (
+              <ModelEditor
+                key={draft.key}
+                draft={draft}
+                onChange={(next) =>
+                  setDrafts((current) =>
+                    current.map((model) => (model.key === draft.key ? next : model)),
+                  )
+                }
+                onRemove={() =>
+                  setDrafts((current) => current.filter((model) => model.key !== draft.key))
+                }
+              />
+            ))
+          )}
+        </div>
+
+        <aside className="card catalog-card">
+          <div className="card-head">
+            <div>
+              <div className="card-title">模型目录</div>
+              <div className="card-sub">
+                {catalog?.fetchedAt
+                  ? `拉取于 ${formatTime(catalog.fetchedAt)}`
+                  : "尚未拉取"}
               </div>
-              <button
-                type="button"
-                className="icon-btn"
-                aria-label="关闭"
-                onClick={closeEditor}
-              >
-                ✕
-              </button>
             </div>
-            <div className="modal-body">
-              <form
-                className="model-form"
-                onSubmit={(event) => {
-                  event.preventDefault();
-                  submit();
-                }}
-              >
-                <div className="model-grid">
-                  <div className="span-2">
-                    <Field label="模型名称" hint="可从目录选择或手动填写" error={errors.name}>
-                      <Input
-                        list="model-catalog-names"
-                        value={form.name}
-                        placeholder="deepseek-chat"
-                        autoComplete="off"
-                        onChange={(event) => setForm({ ...form, name: event.target.value })}
-                      />
-                      <datalist id="model-catalog-names">
-                        {datalistNames.map((name) => (
-                          <option key={name} value={name} />
-                        ))}
-                      </datalist>
-                    </Field>
-                  </div>
-                  <Field label="输入 $/M" error={errors.inputPerMTok}>
-                    <Input
-                      inputMode="decimal"
-                      value={form.input}
-                      placeholder="0"
-                      onChange={(event) => setForm({ ...form, input: event.target.value })}
-                    />
-                  </Field>
-                  <Field label="输出 $/M" error={errors.outputPerMTok}>
-                    <Input
-                      inputMode="decimal"
-                      value={form.output}
-                      placeholder="0"
-                      onChange={(event) => setForm({ ...form, output: event.target.value })}
-                    />
-                  </Field>
-                  <Field label="缓存读 $/M" error={errors.cacheReadPerMTok}>
-                    <Input
-                      inputMode="decimal"
-                      value={form.cacheRead}
-                      placeholder="0"
-                      onChange={(event) => setForm({ ...form, cacheRead: event.target.value })}
-                    />
-                  </Field>
-                  <Field label="缓存写 $/M（可选）" hint="留空按 0" error={errors.cacheWritePerMTok}>
-                    <Input
-                      inputMode="decimal"
-                      value={form.cacheWrite}
-                      placeholder="按 0"
-                      onChange={(event) => setForm({ ...form, cacheWrite: event.target.value })}
-                    />
-                  </Field>
-                  <div className="span-2">
-                    <Field
-                      label="Reasoning $/M（可选）"
-                      hint="留空继承输出价"
-                      error={errors.reasoningPerMTok}
-                    >
-                      <Input
-                        inputMode="decimal"
-                        value={form.reasoning}
-                        placeholder="继承 output"
-                        onChange={(event) => setForm({ ...form, reasoning: event.target.value })}
-                      />
-                    </Field>
-                  </div>
-                </div>
-
-                <div className="window-box" ref={windowsRef}>
-                  <div className="window-row">
-                    <span>
-                      <b>峰谷窗口</b>
-                      {form.windows.length > 0 ? ` · ${form.windows.length} 个` : ""}
-                    </span>
-                    <Button
-                      variant="secondary"
-                      onClick={() =>
-                        setForm((current) => ({
-                          ...current,
-                          windows: [...current.windows, blankWindow()],
-                        }))
-                      }
-                    >
-                      添加窗口
-                    </Button>
-                  </div>
-                  {errors.windows && (
-                    <p className="form-error" role="alert">
-                      {errors.windows}
-                    </p>
-                  )}
-                  {form.windows.length === 0 ? (
-                    <div className="pricing-rates">暂无窗口，使用基础费率。</div>
-                  ) : (
-                    form.windows.map((draft, index) => (
-                      <WindowEditor
-                        key={draft.key}
-                        index={index}
-                        draft={draft}
-                        errors={errors}
-                        canMoveUp={index > 0}
-                        canMoveDown={index < form.windows.length - 1}
-                        onChange={(patch) => updateWindow(draft.key, patch)}
-                        onRemove={() =>
-                          setForm((current) => ({
-                            ...current,
-                            windows: current.windows.filter((window) => window.key !== draft.key),
-                          }))
-                        }
-                        onMove={(delta) => moveWindow(index, delta)}
-                      />
-                    ))
-                  )}
-                </div>
-
-                {save.isError && (
-                  <div>
-                    <ErrorText error={save.error} />
-                    {saveFields.length > 0 && (
-                      <ul className="form-error" style={{ margin: "4px 0 0", paddingLeft: 16 }}>
-                        {saveFields.map(([field, message]) => (
-                          <li key={field}>
-                            {FIELD_LABELS[field] ?? field}：{message}
-                          </li>
-                        ))}
-                      </ul>
-                    )}
-                  </div>
-                )}
-
-                <div className="modal-actions">
-                  <Button variant="secondary" onClick={closeEditor}>
-                    取消
-                  </Button>
-                  <Button type="submit" disabled={save.isPending}>
-                    {save.isPending ? "保存中…" : "保存模型"}
-                  </Button>
-                </div>
-              </form>
-            </div>
+            <Button
+              variant="secondary"
+              disabled={refreshCatalog.isPending}
+              onClick={() => refreshCatalog.mutate()}
+            >
+              {refreshCatalog.isPending ? "刷新中…" : "刷新"}
+            </Button>
           </div>
-        </>
-      )}
+          <div className="catalog-body">
+            {catalog?.upstreamError && (
+              <p className="form-error">{catalog.upstreamError}</p>
+            )}
+            <div className="catalog-actions">
+              <Button
+                disabled={importMutation.isPending || candidates.length === 0}
+                onClick={() => importMutation.mutate(candidates.map((item) => item.name))}
+              >
+                {importMutation.isPending
+                  ? "导入中…"
+                  : `导入未定价模型（${candidates.length}）`}
+              </Button>
+            </div>
+            <div className="candidate-list">
+              {candidates.length === 0 ? (
+                <p className="muted">目录中的模型都已加入价格表。</p>
+              ) : (
+                candidates.slice(0, 80).map((candidate) => (
+                  <span className="chip" key={candidate.name}>
+                    {candidate.name}
+                    {candidate.upstreamDiscovered && <Badge tone="info">上游</Badge>}
+                  </span>
+                ))
+              )}
+            </div>
+            <p className="settings-note">
+              导入的模型按 0 价格创建，请在左侧补全价格。预设价格快照：
+              {catalog?.presetSnapshot || "—"}
+            </p>
+          </div>
+        </aside>
+      </div>
     </>
+  );
+}
+
+/** Pricing selects one upstream and edits its complete local price list. */
+export function Pricing(): ReactElement {
+  const upstreams = useQuery({ queryKey: ["upstreams"], queryFn: api.getUpstreams });
+  const bootstrap = useQuery({ queryKey: ["bootstrap"], queryFn: api.bootstrap });
+  const [selected, setSelected] = useState("");
+
+  const upstreamId =
+    selected || upstreams.data?.upstreams[0]?.id || "";
+  const upstream = upstreams.data?.upstreams.find((item) => item.id === upstreamId);
+  const pricing = useQuery({
+    queryKey: ["pricing", upstreamId],
+    enabled: upstreamId !== "",
+    queryFn: () => api.getPricing(upstreamId),
+  });
+
+  if (upstreams.isPending) return <Spinner />;
+  if (upstreams.isError) return <ErrorText error={upstreams.error} />;
+  if (upstreams.data.upstreams.length === 0) {
+    return (
+      <div className="settings-panel active">
+        <div className="card empty-setting">
+          <p>还没有上游。请先在「上游与密钥」中添加上游，再来配置价格。</p>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="settings-panel active">
+      <div className="settings-toolbar">
+        <label className="filter">
+          <span>上游</span>
+          <Select value={upstreamId} onChange={(event) => setSelected(event.target.value)}>
+            {upstreams.data.upstreams.map((item) => (
+              <option key={item.id} value={item.id}>
+                {item.name}
+              </option>
+            ))}
+          </Select>
+        </label>
+        <label className="filter">
+          <span>模型数</span>
+          <span className="toolbar-value">{pricing.data?.models.length ?? "—"}</span>
+        </label>
+      </div>
+
+      {pricing.isPending && <Spinner />}
+      {pricing.isError && <ErrorText error={pricing.error} />}
+      {upstream && pricing.data && (
+        <PricingEditor
+          key={upstream.id}
+          upstream={upstream}
+          models={pricing.data.models}
+          timezone={bootstrap.data?.timezone ?? "UTC"}
+        />
+      )}
+    </div>
   );
 }

@@ -32,9 +32,10 @@ import { Logs } from "./pages/Logs";
 import { Login } from "./pages/Login";
 import { Overview } from "./pages/Overview";
 import { Data } from "./pages/settings/Data";
-import { Gateway } from "./pages/settings/Gateway";
+import { Access } from "./pages/settings/Access";
 import { Pricing } from "./pages/settings/Pricing";
 import { SettingsLayout } from "./pages/settings/SettingsLayout";
+import { Upstreams } from "./pages/settings/Upstreams";
 
 const queryClient = new QueryClient({
   queryCache: new QueryCache({ onError: notifyUnauthorized }),
@@ -210,8 +211,9 @@ export function App() {
                 <Route path="requests" element={<RedirectKeepSearch to="/logs" />} />
                 <Route path="pricing" element={<RedirectKeepSearch to="/settings/pricing" />} />
                 <Route path="settings" element={<SettingsLayout />}>
-                  <Route index element={<Gateway />} />
+                  <Route index element={<Upstreams />} />
                   <Route path="pricing" element={<Pricing />} />
+                  <Route path="access" element={<Access />} />
                   <Route path="data" element={<Data />} />
                 </Route>
               </Route>

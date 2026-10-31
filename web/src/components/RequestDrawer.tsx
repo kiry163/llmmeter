@@ -23,6 +23,7 @@ function statusTone(status: number): "success" | "warning" | "danger" {
 }
 
 const RATE_LABELS: Record<string, string> = {
+  upstream_id: "上游",
   model: "模型",
   window: "窗口",
   input_per_mtok: "输入 / M",
@@ -92,6 +93,8 @@ function RequestBody({ record, timeZone }: { record: RequestRecord; timeZone?: s
 
       <Section title="概要">
         <Row label="请求 ID" value={`#${record.id}`} mono />
+        <Row label="上游" value={record.upstreamName || record.upstreamId || "—"} />
+        <Row label="网关密钥" value={record.keyName || record.keyId || "—"} />
         <Row label="模型" value={record.model || "—"} />
         <Row label="上游模型" value={record.upstreamModel || "—"} mono />
         <Row label="路径" value={record.path || "—"} mono />

@@ -5,26 +5,34 @@ import type {
   Bootstrap,
   Breakdown,
   BreakdownBy,
-  GatewayKeyResponse,
+  DataInfo,
+  General,
+  GeneralPatch,
   Health,
-  ImportModelsResult,
   Interval,
+  KeyCreateInput,
+  KeyCreated,
+  KeyPatch,
+  KeySecret,
+  KeysResponse,
   LiveSnapshot,
+  LocalKey,
   Me,
-  Model,
   ModelCatalog,
-  ModelInput,
-  ModelPatch,
-  ModelsResponse,
   Overview,
+  PricingBody,
+  PricingImportResult,
+  PricingModel,
+  ProbeResult,
   RequestRecord,
   RequestsPage,
   Series,
-  Settings,
-  SettingsPatch,
-  UpstreamTestInput,
+  Upstream,
+  UpstreamInput,
+  UpstreamPatch,
+  UpstreamSecret,
   UpstreamTestResult,
-  WindowInput,
+  UpstreamsResponse,
 } from "./types";
 
 const API_BASE = "/api";
@@ -97,8 +105,8 @@ function parseError(status: number, text: string): ApiError {
     "internal",
   ];
   const code = codes.includes(known as ApiErrorCode) ? (known as ApiErrorCode) : "unknown";
-  // The upstream probe reports failures as {ok:false,message} without an
-  // error envelope, so fall back to the top-level message.
+  // The upstream probe reports failures as {ok:false,error} without an error
+  // envelope, so fall back to the top-level message.
   const message =
     body?.message ?? envelope?.message ?? (text.trim() || `HTTP ${status}`);
   if (status === 401) {
@@ -149,6 +157,7 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 export interface RangeParams {
   from?: string;
   to?: string;
+  upstream?: string;
 }
 
 export interface SeriesParams extends RangeParams {
@@ -164,6 +173,7 @@ export interface AnalysisParams extends RangeParams {
 }
 
 export interface RequestParams extends RangeParams {
+  key?: string;
   model?: string;
   pathClass?: string;
   status?: number;
@@ -175,6 +185,11 @@ export interface RequestParams extends RangeParams {
   limit?: number;
 }
 
+export interface ProbeInput {
+  baseUrl: string;
+  apiKey: string;
+}
+
 export const api = {
   bootstrap: (): Promise<Bootstrap> => request<Bootstrap>("/bootstrap"),
 
@@ -183,21 +198,42 @@ export const api = {
   health: (): Promise<Health> => request<Health>("/health"),
 
   getOverview: (params: RangeParams = {}): Promise<Overview> =>
-    request<Overview>(`/overview${query({ from: params.from, to: params.to })}`),
+    request<Overview>(
+      `/overview${query({
+        from: params.from,
+        to: params.to,
+        upstream: params.upstream,
+      })}`,
+    ),
 
   getSeries: (params: SeriesParams = {}): Promise<Series> =>
     request<Series>(
-      `/series${query({ from: params.from, to: params.to, interval: params.interval })}`,
+      `/series${query({
+        from: params.from,
+        to: params.to,
+        interval: params.interval,
+        upstream: params.upstream,
+      })}`,
     ),
 
   getBreakdown: (params: BreakdownParams): Promise<Breakdown> =>
     request<Breakdown>(
-      `/breakdown${query({ from: params.from, to: params.to, by: params.by })}`,
+      `/breakdown${query({
+        from: params.from,
+        to: params.to,
+        by: params.by,
+        upstream: params.upstream,
+      })}`,
     ),
 
   getAnalysis: (params: AnalysisParams = {}): Promise<AnalysisBody> =>
     request<AnalysisBody>(
-      `/analysis${query({ from: params.from, to: params.to, interval: params.interval })}`,
+      `/analysis${query({
+        from: params.from,
+        to: params.to,
+        interval: params.interval,
+        upstream: params.upstream,
+      })}`,
     ),
 
   getRequests: (params: RequestParams = {}): Promise<RequestsPage> =>
@@ -205,6 +241,8 @@ export const api = {
       `/requests${query({
         from: params.from,
         to: params.to,
+        upstream: params.upstream,
+        key: params.key,
         model: params.model,
         pathClass: params.pathClass,
         status: params.status,
@@ -219,41 +257,81 @@ export const api = {
 
   getRequest: (id: number): Promise<RequestRecord> => request<RequestRecord>(`/requests/${id}`),
 
-  getModelCatalog: (refresh = false): Promise<ModelCatalog> =>
-    request<ModelCatalog>(
-      `/model-catalog${query({ refresh: refresh ? 1 : undefined })}`,
-    ),
+  getLiveSnapshot: (windowS: 60 | 300 = 60): Promise<LiveSnapshot> =>
+    request<LiveSnapshot>(`/live/snapshot${query({ window: windowS })}`),
 
-  getModels: (): Promise<ModelsResponse> => request<ModelsResponse>("/models"),
+  getUpstreams: (): Promise<UpstreamsResponse> => request<UpstreamsResponse>("/upstreams"),
 
-  createModel: (input: ModelInput): Promise<Model> =>
-    request<Model>("/models", { method: "POST", body: JSON.stringify(input) }),
+  createUpstream: (input: UpstreamInput): Promise<Upstream> =>
+    request<Upstream>("/upstreams", { method: "POST", body: JSON.stringify(input) }),
 
-  importModels: (names: string[]): Promise<ImportModelsResult> =>
-    request<ImportModelsResult>("/models/import", {
+  updateUpstream: (id: string, patch: UpstreamPatch): Promise<Upstream> =>
+    request<Upstream>(`/upstreams/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(patch),
+    }),
+
+  deleteUpstream: (id: string): Promise<void> =>
+    request<void>(`/upstreams/${id}`, { method: "DELETE" }),
+
+  testUpstream: (id: string): Promise<UpstreamTestResult> =>
+    request<UpstreamTestResult>(`/upstreams/${id}/test`, { method: "POST" }),
+
+  probeUpstream: (input: ProbeInput): Promise<ProbeResult> =>
+    request<ProbeResult>("/upstreams/probe", {
+      method: "POST",
+      body: JSON.stringify(input),
+    }),
+
+  revealUpstreamKey: (id: string): Promise<UpstreamSecret> =>
+    request<UpstreamSecret>(`/upstreams/${id}/secret`),
+
+  getPricing: (upstreamId: string): Promise<PricingBody> =>
+    request<PricingBody>(`/upstreams/${upstreamId}/pricing`),
+
+  putPricing: (upstreamId: string, models: PricingModel[]): Promise<PricingBody> =>
+    request<PricingBody>(`/upstreams/${upstreamId}/pricing`, {
+      method: "PUT",
+      body: JSON.stringify({ models }),
+    }),
+
+  importPricing: (upstreamId: string, names: string[]): Promise<PricingImportResult> =>
+    request<PricingImportResult>(`/upstreams/${upstreamId}/pricing/import`, {
       method: "POST",
       body: JSON.stringify({ names }),
     }),
 
-  updateModel: (id: number, patch: ModelPatch): Promise<Model> =>
-    request<Model>(`/models/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
+  getCatalog: (upstreamId: string, refresh = false): Promise<ModelCatalog> =>
+    request<ModelCatalog>(
+      `/upstreams/${upstreamId}/catalog${query({ refresh: refresh ? 1 : undefined })}`,
+    ),
 
-  deleteModel: (id: number): Promise<void> =>
-    request<void>(`/models/${id}`, { method: "DELETE" }),
+  getKeys: (): Promise<KeysResponse> => request<KeysResponse>("/keys"),
 
-  putWindows: (id: number, windows: WindowInput[]): Promise<Model> =>
-    request<Model>(`/models/${id}/windows`, {
-      method: "PUT",
-      body: JSON.stringify({ windows }),
-    }),
+  createKey: (input: KeyCreateInput): Promise<KeyCreated> =>
+    request<KeyCreated>("/keys", { method: "POST", body: JSON.stringify(input) }),
 
-  getSettings: (): Promise<Settings> => request<Settings>("/settings"),
+  updateKey: (id: string, patch: KeyPatch): Promise<LocalKey> =>
+    request<LocalKey>(`/keys/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
 
-  patchSettings: (patch: SettingsPatch): Promise<Settings> =>
-    request<Settings>("/settings", { method: "PATCH", body: JSON.stringify(patch) }),
+  deleteKey: (id: string): Promise<void> =>
+    request<void>(`/keys/${id}`, { method: "DELETE" }),
 
-  rotateKey: (): Promise<GatewayKeyResponse> =>
-    request<GatewayKeyResponse>("/gateway-key/rotate", { method: "POST" }),
+  rotateKey: (id: string): Promise<KeyCreated> =>
+    request<KeyCreated>(`/keys/${id}/rotate`, { method: "POST" }),
+
+  revealKey: (id: string): Promise<KeySecret> =>
+    request<KeySecret>(`/keys/${id}/secret`),
+
+  getGeneral: (): Promise<General> => request<General>("/general"),
+
+  patchGeneral: (patch: GeneralPatch): Promise<General> =>
+    request<General>("/general", { method: "PATCH", body: JSON.stringify(patch) }),
+
+  getData: (): Promise<DataInfo> => request<DataInfo>("/data"),
+
+  reloadConfig: (): Promise<{ reloaded: boolean }> =>
+    request<{ reloaded: boolean }>("/config/reload", { method: "POST" }),
 
   login: (password: string): Promise<{ authenticated: boolean }> =>
     request<{ authenticated: boolean }>("/auth/login", {
@@ -264,12 +342,9 @@ export const api = {
   logout: (): Promise<{ authenticated: boolean }> =>
     request<{ authenticated: boolean }>("/auth/logout", { method: "POST" }),
 
-  testUpstream: (input: UpstreamTestInput): Promise<UpstreamTestResult> =>
-    request<UpstreamTestResult>("/upstream/test", {
+  setPassword: (current: string, newPassword: string): Promise<{ adminPasswordSet: boolean }> =>
+    request<{ adminPasswordSet: boolean }>("/auth/password", {
       method: "POST",
-      body: JSON.stringify(input),
+      body: JSON.stringify({ current, newPassword }),
     }),
-
-  getLiveSnapshot: (windowS: 60 | 300 = 60): Promise<LiveSnapshot> =>
-    request<LiveSnapshot>(`/live/snapshot${query({ window: windowS })}`),
 };

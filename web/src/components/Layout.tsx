@@ -5,6 +5,7 @@ import { api } from "../api/client";
 import { useDocumentTitle } from "../hooks/useDocumentTitle";
 import { useLive } from "../hooks/useLive";
 import { useTheme } from "../lib/theme";
+import { resolveTimezone } from "../lib/settings";
 import { ThemeButton } from "./ThemeButton";
 
 const navItems = [
@@ -74,7 +75,7 @@ export function Layout() {
   const { mode } = useLive();
   const theme = useTheme();
   const location = useLocation();
-  const clock = useClock(bootstrap.data?.timezone);
+  const clock = useClock(resolveTimezone(bootstrap.data?.timezone));
   const titles: Record<string, string> = {
     "/": "总览",
     "/logs": "日志",

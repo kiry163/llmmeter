@@ -1,4 +1,5 @@
 import type { Interval } from "../api/types";
+import { resolveTimezone } from "./settings";
 
 /** RangePreset is one of the overview time-range shortcuts. */
 export type RangePreset = "today" | "24h" | "7d" | "30d" | "custom";
@@ -46,11 +47,12 @@ interface DayParts {
  * done on UTC midnights below, so the result is independent of the browser zone.
  */
 function dayParts(date: Date, timeZone?: string): DayParts {
-  if (!timeZone) {
+  const zone = resolveTimezone(timeZone);
+  if (!zone) {
     return { year: date.getFullYear(), month: date.getMonth() + 1, day: date.getDate() };
   }
   const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone,
+    timeZone: zone,
     year: "numeric",
     month: "2-digit",
     day: "2-digit",

@@ -38,6 +38,8 @@ type PricingFilter = "all" | "priced" | "unpriced";
 
 interface LogsFilters {
   range: UiRange;
+  upstream: string;
+  key: string;
   model: string;
   pathClass: PathClassFilter | "";
   statusClass: StatusClass | "";
@@ -48,6 +50,8 @@ interface LogsFilters {
 
 const DEFAULT_FILTERS: LogsFilters = {
   range: "today",
+  upstream: "",
+  key: "",
   model: "",
   pathClass: "",
   statusClass: "",
@@ -79,6 +83,8 @@ function parseLogsFilters(params: URLSearchParams): LogsFilters {
 
   return {
     range,
+    upstream: (params.get("upstream") ?? "").trim(),
+    key: (params.get("key") ?? "").trim(),
     model: (params.get("model") ?? "").trim(),
     pathClass: PATH_CLASS_FILTERS.includes(rawPath as PathClassFilter)
       ? (rawPath as PathClassFilter)
@@ -97,6 +103,8 @@ function parseLogsFilters(params: URLSearchParams): LogsFilters {
 function serializeLogsFilters(filters: LogsFilters): URLSearchParams {
   const params = new URLSearchParams();
   if (filters.range !== DEFAULT_FILTERS.range) params.set("range", filters.range);
+  if (filters.upstream) params.set("upstream", filters.upstream);
+  if (filters.key) params.set("key", filters.key);
   if (filters.model) params.set("model", filters.model);
   if (filters.pathClass) params.set("path", filters.pathClass);
   if (filters.statusClass) params.set("status", filters.statusClass);
@@ -155,6 +163,9 @@ function ModelLabel({ record }: { record: RequestRecord }): ReactElement {
       <span>{record.model || "—"}</span>
       <span className={`stream-badge${record.stream ? " on" : ""}`}>
         {record.stream ? "流式" : "非流式"}
+      </span>
+      <span className="log-route">
+        {record.upstreamName || "—"} · {record.keyName || "—"}
       </span>
     </div>
   );
@@ -301,6 +312,8 @@ export function Logs(): ReactElement {
     return {
       from: bounds.from,
       to: bounds.to,
+      upstream: filters.upstream || undefined,
+      key: filters.key || undefined,
       model: filters.model || undefined,
       pathClass: filters.pathClass || undefined,
       statusClass: filters.statusClass || undefined,
@@ -327,13 +340,30 @@ export function Logs(): ReactElement {
     },
   });
 
-  const configuredModels = useQuery({
-    queryKey: ["models"],
-    queryFn: api.getModels,
+  const upstreams = useQuery({
+    queryKey: ["upstreams"],
+    queryFn: api.getUpstreams,
   });
-  const catalog = useQuery({
-    queryKey: ["model-catalog"],
-    queryFn: () => api.getModelCatalog(false),
+  const keys = useQuery({
+    queryKey: ["keys"],
+    queryFn: api.getKeys,
+  });
+  const pricingSets = useQuery({
+    queryKey: ["pricing-model-names", upstreams.data?.upstreams.map((u) => u.id).join(",")],
+    enabled: (upstreams.data?.upstreams.length ?? 0) > 0,
+    queryFn: async () => {
+      const lists = await Promise.all(
+        (upstreams.data?.upstreams ?? []).map(async (upstream) => {
+          try {
+            const body = await api.getPricing(upstream.id);
+            return body.models.map((model) => model.name);
+          } catch {
+            return [];
+          }
+        }),
+      );
+      return lists.flat();
+    },
   });
 
   const rows = useMemo(
@@ -342,15 +372,26 @@ export function Logs(): ReactElement {
   );
   const summary = list.data?.pages[0]?.summary;
 
+  const keyOptions = useMemo(
+    () =>
+      (keys.data?.keys ?? []).filter(
+        (key) => !filters.upstream || key.upstreamId === filters.upstream,
+      ),
+    [keys.data, filters.upstream],
+  );
+
   const modelOptions = useMemo(() => {
-    const names = new Set<string>();
-    for (const model of configuredModels.data?.models ?? []) names.add(model.name);
-    for (const observed of catalog.data?.observed ?? []) names.add(observed.model);
+    const names = new Set<string>(pricingSets.data ?? []);
+    for (const record of rows) {
+      if (record.model) names.add(record.model);
+    }
     if (filters.model) names.add(filters.model);
     return [...names].filter((name) => name !== "").sort((a, b) => a.localeCompare(b));
-  }, [configuredModels.data, catalog.data, filters.model]);
+  }, [pricingSets.data, rows, filters.model]);
 
   const hasActiveFilters =
+    filters.upstream !== "" ||
+    filters.key !== "" ||
     filters.model !== "" ||
     filters.pathClass !== "" ||
     filters.statusClass !== "" ||
@@ -387,6 +428,45 @@ export function Logs(): ReactElement {
       />
 
       <section className="card log-filters" aria-label="筛选">
+        <label className="filter">
+          <span>上游</span>
+          <select
+            value={filters.upstream}
+            onChange={(event) =>
+              updateFilter({ upstream: event.target.value, key: "" })
+            }
+          >
+            <option value="">全部</option>
+            {upstreams.data?.upstreams.map((upstream) => (
+              <option key={upstream.id} value={upstream.id}>
+                {upstream.name}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        <label className="filter">
+          <span>网关密钥</span>
+          <select
+            value={filters.key}
+            onChange={(event) => {
+              const keyId = event.target.value;
+              const selectedKey = keyOptions.find((key) => key.id === keyId);
+              updateFilter({
+                key: keyId,
+                upstream: selectedKey?.upstreamId ?? filters.upstream,
+              });
+            }}
+          >
+            <option value="">全部</option>
+            {keyOptions.map((key) => (
+              <option key={key.id} value={key.id}>
+                {key.name}
+              </option>
+            ))}
+          </select>
+        </label>
+
         <label className="filter">
           <span>模型</span>
           <select

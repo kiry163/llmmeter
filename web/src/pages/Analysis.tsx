@@ -9,11 +9,11 @@ import type {
   AnalysisTopRequest,
   AnalysisTrendBucket,
   Interval,
-  TrendModel,
 } from "../api/types";
 import { ErrorBanner } from "../components/ErrorBanner";
 import { PageHeader, RangeSeg } from "../components/PageHeader";
 import { RequestDrawer } from "../components/RequestDrawer";
+import { UpstreamFilter } from "../components/UpstreamFilter";
 import {
   CHART_PALETTE,
   CHART_TOOLTIP,
@@ -23,7 +23,8 @@ import {
 } from "../components/charts";
 import type { ChartTheme } from "../components/charts";
 import { useTimezone } from "../hooks/useTimezone";
-import { UNKNOWN_KEY } from "../lib/analysis";
+import { UNKNOWN_KEY, aggregateTrend, mergeRankRows } from "../lib/analysis";
+import type { TrendBucket, TrendStats } from "../lib/analysis";
 import {
   formatBytes,
   formatCost,
@@ -62,7 +63,7 @@ const TOP_OPTIONS: readonly { value: TopTab; label: string }[] = [
 const EMPTY_HIDDEN: ReadonlySet<string> = new Set<string>();
 
 /** metricValue reads one model's contribution for the active trend metric. */
-function metricValue(model: TrendModel | undefined, metric: MetricKey): number {
+function metricValue(model: TrendStats | undefined, metric: MetricKey): number {
   if (!model) return 0;
   switch (metric) {
     case "cost":
@@ -102,7 +103,7 @@ function parseTopTab(params: URLSearchParams): TopTab {
 }
 
 /** bucketLabel renders a trend bucket at the interval's precision. */
-function bucketLabel(bucket: AnalysisTrendBucket, interval: Interval): string {
+function bucketLabel(bucket: TrendBucket, interval: Interval): string {
   if (interval === "day") return bucket.day.slice(5);
   // Hour buckets carry the hour index in minuteOfDay (the SQL divides by 60).
   if (interval === "hour") {
@@ -133,10 +134,11 @@ function fillBuckets(
   trend: AnalysisTrendBucket[],
   range: UiRange,
   bounds: { from: string; to: string },
-): AnalysisTrendBucket[] {
+): TrendBucket[] {
+  const aggregated = aggregateTrend(trend);
   if (range === "today") {
-    const byHour = new Map<number, Record<string, TrendModel>>();
-    for (const bucket of trend) {
+    const byHour = new Map<number, Record<string, TrendStats>>();
+    for (const bucket of aggregated) {
       if (bucket.day !== bounds.to) continue;
       byHour.set(bucket.minuteOfDay, bucket.byModel);
     }
@@ -146,8 +148,8 @@ function fillBuckets(
       byModel: byHour.get(hour) ?? {},
     }));
   }
-  const byDay = new Map<string, Record<string, TrendModel>>(
-    trend.map((bucket) => [bucket.day, bucket.byModel] as const),
+  const byDay = new Map<string, Record<string, TrendStats>>(
+    aggregated.map((bucket) => [bucket.day, bucket.byModel] as const),
   );
   return eachDay(bounds.from, bounds.to).map((day) => ({
     day,
@@ -157,7 +159,7 @@ function fillBuckets(
 }
 
 /** trendModelNames lists the models present in the range, largest first. */
-function trendModelNames(buckets: AnalysisTrendBucket[], metric: MetricKey): string[] {
+function trendModelNames(buckets: TrendBucket[], metric: MetricKey): string[] {
   const totals = new Map<string, number>();
   for (const bucket of buckets) {
     for (const [model, stats] of Object.entries(bucket.byModel)) {
@@ -179,7 +181,7 @@ export interface TrendOptionStyle {
 }
 
 export function buildTrendOption(
-  buckets: AnalysisTrendBucket[],
+  buckets: TrendBucket[],
   interval: Interval,
   metric: MetricKey,
   modelFilter: string,
@@ -257,10 +259,14 @@ export function buildTrendOption(
   };
 }
 
-function logsHref(range: UiRange, filters: { model?: string; path?: string }): string {
+function logsHref(
+  range: UiRange,
+  filters: { model?: string; path?: string; upstream?: string },
+): string {
   const params = new URLSearchParams({ range });
   if (filters.model) params.set("model", filters.model);
   if (filters.path) params.set("path", filters.path);
+  if (filters.upstream) params.set("upstream", filters.upstream);
   return `/logs?${params.toString()}`;
 }
 
@@ -362,6 +368,7 @@ function RankList({
               />
             </div>
             <div className="rank-requests">
+              {row.upstreamName && `${row.upstreamName} · `}
               {formatTokens(row.requests)} 请求 ·{" "}
               {compactNumber(row.promptTokens + row.completionTokens)} tok
             </div>
@@ -382,6 +389,7 @@ export function Analysis(): ReactElement {
   const range = parseRange(searchParams);
   const metric = parseMetric(searchParams);
   const topTab = parseTopTab(searchParams);
+  const upstream = (searchParams.get("upstream") ?? "").trim();
   const bounds = useMemo(() => rangeBounds(range, timeZone), [range, timeZone]);
   const interval: Interval = range === "today" ? "hour" : "day";
 
@@ -389,9 +397,9 @@ export function Analysis(): ReactElement {
   const [selectedId, setSelectedId] = useState<number | null>(null);
 
   const analysis = useQuery({
-    queryKey: ["analysis", bounds.from, bounds.to, interval],
+    queryKey: ["analysis", bounds.from, bounds.to, interval, upstream],
     queryFn: () =>
-      api.getAnalysis({ from: bounds.from, to: bounds.to, interval }),
+      api.getAnalysis({ from: bounds.from, to: bounds.to, interval, upstream }),
   });
 
   const data = analysis.data;
@@ -451,16 +459,28 @@ export function Analysis(): ReactElement {
     });
   };
 
+  const updateUpstream = (value: string) => {
+    setSearchParams(
+      (current) => {
+        const params = new URLSearchParams(current);
+        if (value) params.set("upstream", value);
+        else params.delete("upstream");
+        return params;
+      },
+      { replace: true },
+    );
+  };
+
   const modelRank = useMemo(
     () =>
-      [...(data?.models ?? [])]
+      mergeRankRows(data?.models ?? [])
         .sort((left, right) => right.costNanoUsd - left.costNanoUsd)
         .slice(0, 5),
     [data?.models],
   );
   const pathRank = useMemo(
     () =>
-      [...(data?.paths ?? [])]
+      mergeRankRows(data?.paths ?? [])
         .sort((left, right) => right.costNanoUsd - left.costNanoUsd)
         .slice(0, 5),
     [data?.paths],
@@ -480,12 +500,15 @@ export function Analysis(): ReactElement {
         title="分析"
         subtitle="趋势、榜单与异常定位"
         actions={
-          <RangeSeg
-            value={range}
-            options={RANGE_OPTIONS}
-            onChange={(value) => updateParam("range", value)}
-            ariaLabel="分析时间范围"
-          />
+          <div className="page-actions">
+            <UpstreamFilter value={upstream} onChange={updateUpstream} />
+            <RangeSeg
+              value={range}
+              options={RANGE_OPTIONS}
+              onChange={(value) => updateParam("range", value)}
+              ariaLabel="分析时间范围"
+            />
+          </div>
         }
       />
 
@@ -617,7 +640,8 @@ export function Analysis(): ReactElement {
                         <span>{row.model || UNKNOWN_KEY}</span>
                       </div>
                       <div className="top-sub">
-                        {formatTime(row.startedAt, timeZone)} · {row.pathClass}
+                        {formatTime(row.startedAt, timeZone)} · {row.upstreamName} ·{" "}
+                        {row.pathClass}
                       </div>
                     </div>
                     <span className="top-value">{topValue(row, topTab)}</span>
@@ -689,7 +713,7 @@ export function Analysis(): ReactElement {
               rows={modelRank}
               colorFor={colorFor}
               emptyLabel={rankEmptyLabel}
-              onOpen={(model) => navigate(logsHref(range, { model }))}
+              onOpen={(model) => navigate(logsHref(range, { model, upstream }))}
             />
           </article>
 
@@ -704,7 +728,7 @@ export function Analysis(): ReactElement {
               rows={pathRank}
               colorFor={() => "var(--accent)"}
               emptyLabel={rankEmptyLabel}
-              onOpen={(path) => navigate(logsHref(range, { path }))}
+              onOpen={(path) => navigate(logsHref(range, { path, upstream }))}
             />
           </article>
         </div>

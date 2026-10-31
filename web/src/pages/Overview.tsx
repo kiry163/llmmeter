@@ -11,10 +11,12 @@ import { PageHeader, RangeSeg } from "../components/PageHeader";
 import type { RangeOption } from "../components/PageHeader";
 import { RequestDrawer } from "../components/RequestDrawer";
 import { Sparkline } from "../components/Sparkline";
+import { UpstreamFilter } from "../components/UpstreamFilter";
 import { chartTooltip, LineChart, useChartTheme } from "../components/charts";
 import type { ChartTheme } from "../components/charts";
 import { useLive } from "../hooks/useLive";
 import { useTimezone } from "../hooks/useTimezone";
+import { mergeRankRows } from "../lib/analysis";
 import {
   formatBytesDecimal,
   formatCost,
@@ -282,6 +284,9 @@ function RecentRow({
       <td className="model">
         <span className="dot" style={{ background: color }} aria-hidden="true" />
         {record.model || "未知"}
+        {record.upstreamName && (
+          <small className="rank-upstream">{record.upstreamName}</small>
+        )}
       </td>
       <td className="num hide-sm">{formatTokens(record.promptTokens)}</td>
       <td className="num hide-sm">{formatTokens(record.completionTokens)}</td>
@@ -311,6 +316,8 @@ export function Overview() {
   });
 
   const requestedRange = readRange(searchParams.get("range"));
+  const upstream = (searchParams.get("upstream") ?? "").trim();
+  const live = upstream ? snapshot?.byUpstream[upstream] : snapshot;
 
   const bootstrap = useQuery({
     queryKey: ["bootstrap"],
@@ -346,35 +353,36 @@ export function Overview() {
   }, [range, today.from, today.to, lifetimeFrom, timeZone]);
 
   const todayOverview = useQuery({
-    queryKey: ["overview", today.from, today.to],
-    queryFn: () => api.getOverview({ from: today.from, to: today.to }),
+    queryKey: ["overview", today.from, today.to, upstream],
+    queryFn: () => api.getOverview({ from: today.from, to: today.to, upstream }),
     placeholderData: keepPreviousData,
     staleTime: 30_000,
     refetchInterval: 15_000,
   });
 
   const previousOverview = useQuery({
-    queryKey: ["overview", yesterday, yesterday],
-    queryFn: () => api.getOverview({ from: yesterday, to: yesterday }),
+    queryKey: ["overview", yesterday, yesterday, upstream],
+    queryFn: () => api.getOverview({ from: yesterday, to: yesterday, upstream }),
     placeholderData: keepPreviousData,
     staleTime: 60_000,
   });
 
   const lifetimeOverview = useQuery({
-    queryKey: ["overview", lifetimeFrom, today.to],
-    queryFn: () => api.getOverview({ from: lifetimeFrom, to: today.to }),
+    queryKey: ["overview", lifetimeFrom, today.to, upstream],
+    queryFn: () => api.getOverview({ from: lifetimeFrom, to: today.to, upstream }),
     placeholderData: keepPreviousData,
     staleTime: 60_000,
     refetchInterval: 60_000,
   });
 
   const chartSeries = useQuery({
-    queryKey: ["series", chartRange.from, chartRange.to, chartRange.interval],
+    queryKey: ["series", chartRange.from, chartRange.to, chartRange.interval, upstream],
     queryFn: () =>
       api.getSeries({
         from: chartRange.from,
         to: chartRange.to,
         interval: chartRange.interval,
+        upstream,
       }),
     placeholderData: keepPreviousData,
     staleTime: 30_000,
@@ -382,31 +390,31 @@ export function Overview() {
   });
 
   const sparkSeries = useQuery({
-    queryKey: ["series", sparkFrom, today.to, "day"],
-    queryFn: () => api.getSeries({ from: sparkFrom, to: today.to, interval: "day" }),
+    queryKey: ["series", sparkFrom, today.to, "day", upstream],
+    queryFn: () => api.getSeries({ from: sparkFrom, to: today.to, interval: "day", upstream }),
     placeholderData: keepPreviousData,
     staleTime: 60_000,
   });
 
   const todayHours = useQuery({
-    queryKey: ["series", today.from, today.to, "hour"],
-    queryFn: () => api.getSeries({ from: today.from, to: today.to, interval: "hour" }),
+    queryKey: ["series", today.from, today.to, "hour", upstream],
+    queryFn: () => api.getSeries({ from: today.from, to: today.to, interval: "hour", upstream }),
     placeholderData: keepPreviousData,
     staleTime: 30_000,
     refetchInterval: 15_000,
   });
 
   const modelBreakdown = useQuery({
-    queryKey: ["breakdown", "model", today.from, today.to],
-    queryFn: () => api.getBreakdown({ from: today.from, to: today.to, by: "model" }),
+    queryKey: ["breakdown", "model", today.from, today.to, upstream],
+    queryFn: () => api.getBreakdown({ from: today.from, to: today.to, by: "model", upstream }),
     placeholderData: keepPreviousData,
     staleTime: 30_000,
     refetchInterval: 15_000,
   });
 
   const recent = useQuery({
-    queryKey: ["requests", today.from, today.to, 8],
-    queryFn: () => api.getRequests({ from: today.from, to: today.to, limit: 8 }),
+    queryKey: ["requests", today.from, today.to, 8, upstream],
+    queryFn: () => api.getRequests({ from: today.from, to: today.to, limit: 8, upstream }),
     placeholderData: keepPreviousData,
     staleTime: 15_000,
     refetchInterval: 15_000,
@@ -463,7 +471,9 @@ export function Overview() {
 
   const topModels = useMemo(() => {
     const rows = modelBreakdown.data?.rows ?? [];
-    return [...rows].sort((left, right) => right.costNanoUsd - left.costNanoUsd).slice(0, 5);
+    return mergeRankRows(rows)
+      .sort((left, right) => right.costNanoUsd - left.costNanoUsd)
+      .slice(0, 5);
   }, [modelBreakdown.data]);
 
   const maxModelCost = Math.max(...topModels.map((row) => row.costNanoUsd), 1);
@@ -505,6 +515,18 @@ export function Overview() {
     );
   };
 
+  const updateUpstream = (next: string) => {
+    setSearchParams(
+      (current) => {
+        const params = new URLSearchParams(current);
+        if (next) params.set("upstream", next);
+        else params.delete("upstream");
+        return params;
+      },
+      { replace: true },
+    );
+  };
+
   const toggleSeries = (key: SeriesKey) => {
     setHidden((current) => ({ ...current, [key]: !current[key] }));
   };
@@ -525,12 +547,15 @@ export function Overview() {
         title="总览"
         subtitle="实时状态与区间用量"
         actions={
-          <RangeSeg
-            value={range}
-            options={rangeOptions}
-            onChange={updateRange}
-            ariaLabel="时间范围"
-          />
+          <div className="page-actions">
+            <UpstreamFilter value={upstream} onChange={updateUpstream} />
+            <RangeSeg
+              value={range}
+              options={rangeOptions}
+              onChange={updateRange}
+              ariaLabel="时间范围"
+            />
+          </div>
         }
       />
 
@@ -683,14 +708,16 @@ export function Overview() {
         <div className="strip-stats">
           <div className="stat">
             <span className="stat-label">进行中</span>
-            <span className="stat-value">{snapshot ? snapshot.inflight : "—"}</span>
+            <span className="stat-value">
+              {snapshot ? (live?.inflight ?? 0) : "—"}
+            </span>
             <span className="stat-sub">请求</span>
           </div>
           <div className="stat">
             <span className="stat-label">P95</span>
             <span className="stat-value">
-              {snapshot && snapshot.latencyP95Ms !== null
-                ? formatDuration(snapshot.latencyP95Ms)
+              {live && live.latencyP95Ms !== null
+                ? formatDuration(live.latencyP95Ms)
                 : "—"}
             </span>
             <span className="stat-sub">延迟</span>
@@ -698,9 +725,11 @@ export function Overview() {
           <div className="stat">
             <span className="stat-label">错误率</span>
             <span className="stat-value">
-              {snapshot
-                ? formatPercent(snapshot.errors / Math.max(snapshot.qps * snapshot.windowS, 1))
-                : "—"}
+              {live
+                ? formatPercent(live.errors / Math.max(live.qps * (snapshot?.windowS ?? 60), 1))
+                : snapshot
+                  ? "0%"
+                  : "—"}
             </span>
             <span className="stat-sub">{mode === "down" ? "未连接" : "近 60s"}</span>
           </div>
@@ -823,6 +852,9 @@ export function Overview() {
                       <span className="rank-name">
                         <i className="sw" style={{ background: color }} aria-hidden="true" />
                         <span>{row.key || "未知模型"}</span>
+                        {row.upstreamName && (
+                          <small className="rank-upstream">{row.upstreamName}</small>
+                        )}
                       </span>
                       <span className="rank-val">{formatCost(row.costNanoUsd)}</span>
                     </div>

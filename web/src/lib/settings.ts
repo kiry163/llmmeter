@@ -1,5 +1,3 @@
-import type { Settings } from "../api/types";
-
 /** COMMON_TIMEZONES lists the zones offered before the browser zone. */
 export const COMMON_TIMEZONES = [
   "Asia/Shanghai",
@@ -30,6 +28,30 @@ export function browserTimezone(): string {
   }
 }
 
+const timezoneCache = new Map<string, string | undefined>();
+
+/**
+ * resolveTimezone returns a usable IANA zone or undefined. The backend may
+ * report "Local" for the host zone; Intl cannot format with that name, so the
+ * caller falls back to the browser zone.
+ */
+export function resolveTimezone(zone: string | null | undefined): string | undefined {
+  const value = zone?.trim();
+  const key = value ?? "";
+  if (timezoneCache.has(key)) return timezoneCache.get(key);
+  let resolved: string | undefined;
+  if (value && value !== "Local") {
+    try {
+      new Intl.DateTimeFormat("en-US", { timeZone: value }).format();
+      resolved = value;
+    } catch {
+      resolved = undefined;
+    }
+  }
+  timezoneCache.set(key, resolved);
+  return resolved;
+}
+
 /**
  * timezoneOptions returns the common zones followed by the current zone and
  * the browser zone, without duplicates.
@@ -40,58 +62,6 @@ export function timezoneOptions(current: string): string[] {
     if (zone && !options.includes(zone)) options.push(zone);
   }
   return options;
-}
-
-/**
- * maskValue renders a secret as bullets plus its last four characters. Very
- * short secrets are fully masked so the value is never shown verbatim.
- */
-export function maskValue(secret: string): string {
-  const value = secret.trim();
-  if (!value) return "未设置";
-  if (value.length <= 4) return "••••";
-  return `••••${value.slice(-4)}`;
-}
-
-/** RedactedSettings is the display-only projection of the API payload. */
-export interface RedactedSettings {
-  upstream: {
-    baseUrl: string;
-    apiKey: string;
-  };
-  timezone: string;
-  retentionDays: number;
-  gatewayKey: string;
-  adminPasswordSet: boolean;
-  listen: string;
-  dbPath: string;
-  dbSizeBytes: number;
-  version: string;
-}
-
-/**
- * redactSettings turns the masked API payload into strings safe to render.
- * The API never sends secrets, so no plaintext is dropped here.
- */
-export function redactSettings(settings: Settings): RedactedSettings {
-  const { apiKey } = settings.upstream;
-  const gateway = settings.gatewayKey;
-  return {
-    upstream: {
-      baseUrl: settings.upstream.baseUrl,
-      apiKey: apiKey.set ? `••••${apiKey.last4}` : "未设置",
-    },
-    timezone: settings.timezone,
-    retentionDays: settings.retentionDays,
-    gatewayKey: gateway.set
-      ? `${gateway.prefix}${gateway.last4 ? `••••${gateway.last4}` : "••••"}`
-      : "未设置",
-    adminPasswordSet: settings.adminPasswordSet,
-    listen: settings.listen,
-    dbPath: settings.dbPath,
-    dbSizeBytes: settings.dbSizeBytes,
-    version: settings.version,
-  };
 }
 
 /** validateRetention checks the detail retention window in days. */
@@ -117,49 +87,4 @@ export function listenIsLoopback(listen: string): boolean {
   }
   if (host === "") return false;
   return host.toLowerCase() === "localhost" || host === "127.0.0.1" || host === "::1";
-}
-
-/**
- * validateClearPassword requires the current password before clearing it.
- * The server still verifies the value; this only blocks an empty submit.
- */
-export function validateClearPassword(currentPassword: string): string | undefined {
-  if (currentPassword.trim() === "") return "清除密码需要当前密码";
-  return undefined;
-}
-
-/** SettingsDraft is the editable state of the settings form. */
-export interface SettingsDraft {
-  retentionDays: string;
-  currentPassword: string;
-  newPassword: string;
-  confirmPassword: string;
-  /** passwordSet is true when the server already has an admin password. */
-  passwordSet: boolean;
-}
-
-/**
- * validateSettings validates the numeric ranges and an optional password
- * change. Leaving every password field empty means "keep the current one".
- */
-export function validateSettings(draft: SettingsDraft): FormErrors {
-  const errors: FormErrors = {};
-
-  const retention = validateRetention(draft.retentionDays);
-  if (retention) errors.retentionDays = retention;
-
-  const changing =
-    draft.currentPassword !== "" || draft.newPassword !== "" || draft.confirmPassword !== "";
-  if (changing) {
-    if (draft.passwordSet && draft.currentPassword === "") {
-      errors.currentPassword = "请输入当前密码";
-    }
-    if (draft.newPassword.length < 8) {
-      errors.newPassword = "新密码至少需要 8 个字符";
-    } else if (draft.confirmPassword !== draft.newPassword) {
-      errors.confirmPassword = "两次输入的新密码不一致";
-    }
-  }
-
-  return errors;
 }

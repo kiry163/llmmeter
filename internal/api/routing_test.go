@@ -26,6 +26,7 @@ func TestRootRouting(t *testing.T) {
 		{"/pricing", "spa"},
 		{"/settings", "spa"},
 		{"/settings/pricing", "spa"},
+		{"/settings/access", "spa"},
 		{"/settings/data", "spa"},
 		{"/login", "spa"},
 		{"/favicon.svg", "spa"},

@@ -2,8 +2,9 @@ import { NavLink, Outlet } from "react-router-dom";
 import { PageHeader } from "../../components/PageHeader";
 
 const tabs = [
-  { to: "/settings", label: "上游与访问", end: true },
+  { to: "/settings", label: "上游与密钥", end: true },
   { to: "/settings/pricing", label: "价格", end: false },
+  { to: "/settings/access", label: "访问", end: false },
   { to: "/settings/data", label: "数据", end: false },
 ];
 

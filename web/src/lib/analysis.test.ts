@@ -2,14 +2,19 @@ import { describe, expect, it } from "vitest";
 import type { AnalysisRow, AnalysisTrendBucket } from "../api/types";
 import {
   UNKNOWN_KEY,
+  aggregateTrend,
   chartClickModel,
   filterModelRows,
+  mergeRankRows,
   parseModelFilter,
   trendHasModel,
 } from "./analysis";
+import type { TrendBucket } from "./analysis";
 
-function row(key: string, requests: number): AnalysisRow {
+function row(key: string, requests: number, upstreamName = "u"): AnalysisRow {
   return {
+    upstreamId: upstreamName,
+    upstreamName,
     key,
     requests,
     errors: 0,
@@ -23,24 +28,32 @@ function row(key: string, requests: number): AnalysisRow {
   };
 }
 
-function bucket(day: string, models: string[]): AnalysisTrendBucket {
+function apiBucket(day: string, models: string[]): AnalysisTrendBucket {
   return {
     day,
     minuteOfDay: 0,
-    byModel: Object.fromEntries(
-      models.map((model) => [
-        model,
-        {
-          requests: 1,
-          promptTokens: 0,
-          completionTokens: 0,
-          costNanoUsd: 0,
-          upBytes: 0,
-          downBytes: 0,
-        },
-      ]),
-    ),
+    series: models.map((model) => ({
+      upstreamId: "u",
+      upstreamName: "u",
+      model,
+      requests: 1,
+      promptTokens: 2,
+      completionTokens: 3,
+      cacheReadTokens: 0,
+      costNanoUsd: 0,
+      upBytes: 0,
+      downBytes: 0,
+    })),
   };
+}
+
+function bucket(day: string, models: string[]): TrendBucket {
+  return aggregateTrend([
+    apiBucket(
+      day,
+      models,
+    ),
+  ])[0] ?? { day, minuteOfDay: 0, byModel: {} };
 }
 
 describe("analysis model drill-down", () => {
@@ -68,6 +81,63 @@ describe("analysis model drill-down", () => {
     expect(trendHasModel(buckets, "b")).toBe(true);
     expect(trendHasModel(buckets, "missing")).toBe(false);
     expect(trendHasModel([], "a")).toBe(false);
+  });
+});
+
+describe("trend aggregation", () => {
+  it("folds the same model across upstreams into one series", () => {
+    const buckets = aggregateTrend([
+      {
+        day: "2026-10-30",
+        minuteOfDay: 1,
+        series: [
+          {
+            upstreamId: "a",
+            upstreamName: "A",
+            model: "m",
+            requests: 1,
+            promptTokens: 10,
+            completionTokens: 5,
+            cacheReadTokens: 2,
+            costNanoUsd: 3,
+            upBytes: 1,
+            downBytes: 2,
+          },
+          {
+            upstreamId: "b",
+            upstreamName: "B",
+            model: "m",
+            requests: 2,
+            promptTokens: 20,
+            completionTokens: 8,
+            cacheReadTokens: 4,
+            costNanoUsd: 6,
+            upBytes: 3,
+            downBytes: 4,
+          },
+        ],
+      },
+    ]);
+    expect(buckets[0].byModel.m).toEqual({
+      requests: 3,
+      promptTokens: 30,
+      completionTokens: 13,
+      cacheReadTokens: 6,
+      costNanoUsd: 9,
+      upBytes: 4,
+      downBytes: 6,
+    });
+  });
+
+  it("merges ranking rows by model and keeps upstream names", () => {
+    const merged = mergeRankRows([
+      { ...row("m", 2, "A"), costNanoUsd: 1 },
+      { ...row("m", 3, "B"), costNanoUsd: 2 },
+    ]);
+    expect(merged).toHaveLength(1);
+    expect(merged[0].requests).toBe(5);
+    expect(merged[0].costNanoUsd).toBe(3);
+    expect(merged[0].upstreamName).toBe("A / B");
   });
 });
 

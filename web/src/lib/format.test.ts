@@ -7,6 +7,7 @@ import {
   formatOptionalDuration,
   formatPercent,
   formatRate,
+  formatTime,
 } from "./format";
 
 describe("format", () => {
@@ -37,5 +38,10 @@ describe("format", () => {
     expect(formatRate(null)).toBe("—");
     expect(formatRate(129.09)).toBe("129.1 t/s");
     expect(formatRate(0)).toBe("0.0 t/s");
+  });
+  it("treats the backend Local sentinel as the browser zone", () => {
+    expect(formatTime("2026-10-31T12:00:00Z", "Local")).toMatch(
+      /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/,
+    );
   });
 });

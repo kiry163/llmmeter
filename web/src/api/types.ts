@@ -1,10 +1,12 @@
-// Wire types mirroring the JSON contracts of internal/api (spec §6).
+// Wire types mirroring the JSON contracts of internal/api.
 
 export interface Bootstrap {
   version: string;
   authRequired: boolean;
   listen: string;
   timezone: string;
+  configPath: string;
+  dbPath: string;
   earliestDay: string;
 }
 
@@ -49,7 +51,9 @@ export interface Overview {
   previous: OverviewStats;
 }
 
-export type Interval = "minute" | "hour" | "day";
+/** Requested interval; responses always report a resolved minute/hour/day. */
+export type Interval = "auto" | "minute" | "hour" | "day";
+export type ResolvedInterval = Exclude<Interval, "auto">;
 
 export interface SeriesPoint {
   day: string;
@@ -71,6 +75,8 @@ export interface Series {
 export type BreakdownBy = "model" | "pathClass";
 
 export interface BreakdownRow {
+  upstreamId: string;
+  upstreamName: string;
   key: string;
   requests: number;
   errors: number;
@@ -87,7 +93,7 @@ export interface Breakdown {
   rows: BreakdownRow[];
 }
 
-/** Pricing snapshot stored with a request; shape is upstream defined. */
+/** Rate snapshot stored with a request; shape is upstream defined. */
 export interface RatesSnapshot {
   [key: string]: unknown;
 }
@@ -100,6 +106,10 @@ export interface RequestRecord {
   minuteOfDay: number;
   path: string;
   pathClass: string;
+  upstreamId: string;
+  upstreamName: string;
+  keyId: string;
+  keyName: string;
   model: string;
   upstreamModel: string;
   stream: boolean;
@@ -142,111 +152,198 @@ export interface RequestsPage {
   summary: RequestsSummary;
 }
 
-export interface Window {
-  id: number;
-  label: string;
-  daysMask: number;
-  startMinute: number;
-  endMinute: number;
-  inputPerMTok: number | null;
-  outputPerMTok: number | null;
-  cacheReadPerMTok: number | null;
-  cacheWritePerMTok: number | null;
-  reasoningPerMTok: number | null;
-}
-
-export interface Model {
-  id: number;
+export interface Upstream {
+  id: string;
   name: string;
-  inputPerMTok: number;
-  outputPerMTok: number;
-  cacheReadPerMTok: number;
-  cacheWritePerMTok: number;
-  reasoningPerMTok: number | null;
-  windows: Window[];
-}
-
-export interface ModelsResponse {
-  models: Model[];
-}
-
-export interface ModelInput {
-  name: string;
-  inputPerMTok: number;
-  outputPerMTok: number;
-  cacheReadPerMTok: number;
-  cacheWritePerMTok: number;
-  reasoningPerMTok: number | null;
-}
-
-export type ModelPatch = Partial<ModelInput>;
-
-export interface WindowInput {
-  label: string;
-  daysMask: number;
-  startMinute: number;
-  endMinute: number;
-  inputPerMTok: number | null;
-  outputPerMTok: number | null;
-  cacheReadPerMTok: number | null;
-  cacheWritePerMTok: number | null;
-  reasoningPerMTok: number | null;
-}
-
-export interface MaskedSecret {
-  set: boolean;
-  last4: string;
-}
-
-export interface MaskedGatewayKey {
-  set: boolean;
-  prefix: string;
-  last4: string;
-}
-
-export interface Settings {
-  upstream: {
-    baseUrl: string;
-    apiKey: MaskedSecret;
-  };
-  timezone: string;
-  retentionDays: number;
-  gatewayKey: MaskedGatewayKey;
-  adminPasswordSet: boolean;
-  listen: string;
-  dbPath: string;
-  dbSizeBytes: number;
-  version: string;
-}
-
-export interface SettingsPatch {
-  upstream?: {
-    baseUrl?: string;
-    apiKey?: string;
-  };
-  timezone?: string;
-  retentionDays?: number;
-  currentPassword?: string;
-  newPassword?: string;
-  clearPassword?: boolean;
-}
-
-export interface GatewayKeyResponse {
-  gatewayKey: string;
-}
-
-export interface UpstreamTestInput {
   baseUrl: string;
+  apiKeyMasked: string;
+  enabled: boolean;
+  lastUsedAt: string | null;
+  modelCount: number;
+  keyCount: number;
+}
+
+export interface UpstreamsResponse {
+  upstreams: Upstream[];
+}
+
+export interface UpstreamInput {
+  name: string;
+  baseUrl: string;
+  apiKey?: string;
+  enabled?: boolean;
+}
+
+export type UpstreamPatch = Partial<UpstreamInput>;
+
+export interface UpstreamSecret {
   apiKey: string;
+}
+
+export interface ProbeModel {
+  id: string;
+  ownedBy?: string;
+  matched: boolean;
+}
+
+export interface Preset {
+  model: string;
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+  reasoning: number;
+}
+
+export interface ProbeResult {
+  ok: boolean;
+  latencyMs: number;
+  provider: string;
+  presetSnapshot: string;
+  models: ProbeModel[];
+  presets: Preset[];
+  error: string;
 }
 
 export interface UpstreamTestResult {
   ok: boolean;
-  status: number;
-  message?: string;
+  latencyMs: number;
+  modelCount: number;
+  error: string;
+}
+
+export interface LocalKey {
+  id: string;
+  name: string;
+  keyMasked: string;
+  enabled: boolean;
+  upstreamId: string;
+  upstreamName: string;
+  lastUsedAt: string | null;
+}
+
+export interface KeysResponse {
+  keys: LocalKey[];
+}
+
+export interface KeyCreated {
+  id: string;
+  name: string;
+  key: string;
+  keyMasked: string;
+  upstreamId: string;
+  upstreamName: string;
+}
+
+export interface KeySecret {
+  key: string;
+}
+
+export interface KeyCreateInput {
+  name: string;
+  upstreamId: string;
+}
+
+export interface KeyPatch {
+  name?: string;
+  upstreamId?: string;
+  enabled?: boolean;
+}
+
+export interface PricingWindow {
+  label: string;
+  days: string[];
+  start: string;
+  end: string;
+  input: number | null;
+  output: number | null;
+  cacheRead: number | null;
+  cacheWrite: number | null;
+  reasoning: number | null;
+}
+
+export interface PricingModel {
+  name: string;
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+  reasoning: number | null;
+  windows: PricingWindow[];
+}
+
+export interface PricingBody {
+  models: PricingModel[];
+}
+
+export interface PricingImportResult {
+  created: string[];
+  skipped: string[];
+}
+
+export interface CatalogModel {
+  id: string;
+  ownedBy?: string;
+}
+
+export interface CatalogObserved {
+  model: string;
+  requests: number;
+  lastSeen: string;
+}
+
+export interface ModelCatalog {
+  fetchedAt: string | null;
+  provider: string;
+  presetSnapshot: string;
+  configured: string[];
+  upstream: CatalogModel[];
+  observed: CatalogObserved[];
+  presets: Preset[];
+  upstreamError: string;
+}
+
+export interface General {
+  timezone: string;
+  retentionDays: number;
+}
+
+export interface GeneralPatch {
+  timezone?: string;
+  retentionDays?: number;
+}
+
+export interface DataInfo {
+  configPath: string;
+  dbPath: string;
+  dbBytes: number;
+  walBytes: number;
+  schemaVersion: number;
+  version: string;
+  retentionDays: number;
+  timezone: string;
+  effectiveListen: string;
+  writeQueue: number;
+  earliestDay: string;
+}
+
+export interface LiveUpstreamSnapshot {
+  requests: number;
+  inflight: number;
+  qps: number;
+  errors: number;
+  upBps: number;
+  downBps: number;
+  latencyP50Ms: number | null;
+  latencyP95Ms: number | null;
+  promptTokens: number;
+  cacheReadTokens: number;
+  cacheHitRate: number | null;
+  spark: LiveSparkPoint[];
 }
 
 export interface LiveModelRate {
+  upstreamId: string;
   model: string;
   qps: number;
   errors: number;
@@ -260,6 +357,7 @@ export interface LiveSparkPoint {
 }
 
 export interface InflightInfo {
+  upstreamId: string;
   pathClass: string;
   model: string;
   elapsedMs: number;
@@ -275,51 +373,37 @@ export interface LiveSnapshot {
   downBps: number;
   latencyP50Ms: number | null;
   latencyP95Ms: number | null;
+  promptTokens: number;
+  cacheReadTokens: number;
+  cacheHitRate: number | null;
   byModel: LiveModelRate[];
+  byUpstream: Record<string, LiveUpstreamSnapshot>;
   spark: LiveSparkPoint[];
   inflightRequests: InflightInfo[];
 }
 
-export interface CatalogModel {
-  id: string;
-  ownedBy?: string;
-}
-
-export interface CatalogObserved {
+export interface AnalysisTrendSeries {
+  upstreamId: string;
+  upstreamName: string;
   model: string;
-  requests: number;
-  lastSeen: string;
-}
-
-/** ModelCatalog combines the upstream listing with locally observed models. */
-export interface ModelCatalog {
-  fetchedAt: string | null;
-  upstream: CatalogModel[];
-  observed: CatalogObserved[];
-  upstreamError: string;
-}
-
-export interface ImportedModel {
-  id: number;
-  name: string;
-}
-
-/** ImportModelsResult reports the models created and the names skipped. */
-export interface ImportModelsResult {
-  created: ImportedModel[];
-  skipped: string[];
-}
-
-export interface TrendModel {
   requests: number;
   promptTokens: number;
   completionTokens: number;
+  cacheReadTokens: number;
   costNanoUsd: number;
   upBytes: number;
   downBytes: number;
 }
 
+export interface AnalysisTrendBucket {
+  day: string;
+  minuteOfDay: number;
+  series: AnalysisTrendSeries[];
+}
+
 export interface AnalysisRow {
+  upstreamId: string;
+  upstreamName: string;
   key: string;
   requests: number;
   errors: number;
@@ -332,15 +416,13 @@ export interface AnalysisRow {
   unpriced: number;
 }
 
-export interface AnalysisTrendBucket {
-  day: string;
-  minuteOfDay: number;
-  byModel: Record<string, TrendModel>;
-}
-
 export interface AnalysisTopRequest {
   id: number;
   startedAt: string;
+  upstreamId: string;
+  upstreamName: string;
+  keyId: string;
+  keyName: string;
   model: string;
   pathClass: string;
   stream: boolean;
@@ -383,7 +465,7 @@ export interface AnalysisBody {
   range: {
     from: string;
     to: string;
-    interval: Interval;
+    interval: ResolvedInterval;
     partial: boolean;
   };
   trend: AnalysisTrendBucket[];
