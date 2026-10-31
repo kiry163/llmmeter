@@ -273,6 +273,7 @@ gateway_keys:
 
 - `gateway_keys` 是顶层列表；每个本地 key 有且只有一个 `upstream_id`。
 - WebUI 可直接把某个 key 改绑到另一个上游；保存后新请求立即走新上游，客户端使用的 key 不变。
+- 价格跟随上游，不跟随 key；改绑后按目标上游的价格表计价，目标上游未配置的模型变为未定价。
 - 已在途的请求保持开始时绑定的上游与费率快照，改绑只影响之后的请求。
 - 一个上游可以被多个本地 key 使用，也可以没有本地 key。
 - 上游 key 为空时，网关不向上游发送 `Authorization`，支持 Ollama、LM Studio 等本地服务。
@@ -478,9 +479,11 @@ CREATE TABLE traffic_minutes (
 
 ### 7.1 按上游独立
 
+- 价格模型的身份是 `(upstream_id, model_name)`；同名模型在不同上游是两条独立价格条目，不共享费率、窗口或定价状态。
 - 每个上游编译一份独立的 `pricing.Table`。
-- 网关按绑定上游取表、匹配窗口、写费率快照。
-- 同名模型在不同上游互不影响。
+- 网关按请求开始时绑定的上游取表、匹配窗口、写费率快照。
+- 本地 key 不携带价格；改绑 key 后，后续请求改用目标上游的价格表。目标上游没有该模型的价格条目时，请求标记为未定价，成本 0，直到在该上游补配置。
+- 在途请求保持开始时的上游与费率快照，不因改绑而重算。
 - 价格页先选上游；UI 支持把某个上游的价格列表复制到另一个上游（纯前端操作，保存时仍写目标上游）。
 
 ### 7.2 公式
@@ -740,7 +743,7 @@ CREATE TABLE traffic_minutes (
   {"id":"macbook","name":"MacBook","key":"sk-local-...","keyMasked":"sk-local-8f3a…9c21","upstreamId":"deepseek","upstreamName":"DeepSeek"}
   ```
 
-- `PATCH` 请求体只包含要改的字段：`{name?, upstreamId?, enabled?}`。修改 `upstreamId` 即切换上游，保存后新请求立即生效；响应更新后的 key 条目。
+- `PATCH` 请求体只包含要改的字段：`{name?, upstreamId?, enabled?}`。修改 `upstreamId` 即切换上游，保存后新请求立即生效；响应更新后的 key 条目。价格表随目标上游切换，目标上游未配置的模型按未定价处理。
 - key `id` 全局唯一；生成规则与上游相同：由名称转 slug，无 ASCII 可用字符时用 `key`，冲突时追加 `-2`、`-3`。
 - `rotate` 响应同 `POST`，新值写入配置，旧值立即失效。
 - `secret` 响应：
@@ -1066,6 +1069,8 @@ CREATE TABLE traffic_minutes (
 - 卡片操作：测试连接、编辑、删除；`keyCount > 0` 时删除按钮禁用并提示先转移或删除绑定 key。
 - 本地 key 表格（独立于上游卡片）：名称、掩码、绑定上游下拉框、启用开关、最近使用、显示/复制、轮换、删除。
 - 改绑上游：在 key 行的下拉框选择目标上游后立即调用 `PATCH /api/keys/{keyId}`；成功 toast“已切换到 X”，失败回滚选择并显示错误。客户端不需要换 key。
+- 目标上游没有任何价格条目时，改绑前提示“该上游尚未配置价格，请求会计为未定价”；只提示，不阻止。
+- 改绑只影响之后的请求；已发出的请求在日志中仍显示旧上游与旧费率快照。
 - “新建上游”向导：名称、baseURL、上游 key（可空）、启用；提交前可测试连接。
 - “新建本地 key”：输入名称并选择上游，生成并展示完整值，可复制；之后仍可通过显示按钮读取。
 - 删除上游二次确认；若仍有绑定 key，列出这些 key 并阻止删除，历史数据保留。
@@ -1206,7 +1211,7 @@ CREATE TABLE traffic_minutes (
 Go：
 
 - `internal/config`：默认路径解析、严格 YAML、未知字段、重复 key、字段校验表、窗口校验、slug 生成、key 生成、原子写、权限、深拷贝、SIGHUP 重载失败保留旧快照。
-- `internal/gateway`：key 哈希索引、多个 key 绑定同一/不同上游、运行时改绑后新请求走新上游、在途请求保持旧上游、禁用 key、缺失 key、禁用上游、空上游 key 不发 Authorization、路径透传、上游 key 覆盖、按上游计价、错误形状。
+- `internal/gateway`：key 哈希索引、多个 key 绑定同一/不同上游、运行时改绑后新请求走新上游并改用目标上游价格表、目标上游无该模型时未定价、在途请求保持旧上游、禁用 key、缺失 key、禁用上游、空上游 key 不发 Authorization、路径透传、上游 key 覆盖、按上游计价、错误形状。
 - `internal/store`：schema v2 创建、错误版本拒绝、上游/key 筛选、分钟聚合主键、保留清理、partial 计算、earliestDay。
 - `internal/metrics`：全局与按上游快照、byModel 带 upstream、per-upstream spark、in-flight 过滤。
 - `internal/pricing`：窗口匹配、跨午夜、列表顺序、继承、成本公式、负数归零。
