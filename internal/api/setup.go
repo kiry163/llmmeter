@@ -75,10 +75,17 @@ func (s *Server) setup(w http.ResponseWriter, r *http.Request) {
 		}
 		passwordHash = hash
 	}
-	secret, err := secure.RandomSecret()
-	if err != nil {
-		writeInternal(w, err)
-		return
+	// Setup may run on a document that already holds an admin password (and
+	// therefore a session secret) before any upstream exists. Never clear
+	// those: preserve the hash and only generate a secret when there is none.
+	var newSecret []byte
+	if s.configStore.Config().Auth.SessionSecret == "" {
+		secret, err := secure.RandomSecret()
+		if err != nil {
+			writeInternal(w, err)
+			return
+		}
+		newSecret = secret
 	}
 	gatewayKey := secure.NewGatewayKey()
 
@@ -90,10 +97,21 @@ func (s *Server) setup(w http.ResponseWriter, r *http.Request) {
 	upstreamID := slugify(name, "upstream")
 	keyID := slugify(keyName, "default")
 	timezone := strings.TrimSpace(in.Timezone)
+	listen := s.effectiveListen()
+	dbPath := s.databasePath()
 
-	err = s.configStore.Update(func(c *config.Config) error {
+	err := s.configStore.Update(func(c *config.Config) error {
 		if len(c.Upstreams) > 0 {
 			return errSetupExists
+		}
+		// Record the values this process actually runs with, so validation
+		// checks the same effective listen and the file keeps them across
+		// restarts.
+		if listen != "" {
+			c.Server.Listen = listen
+		}
+		if dbPath != "" {
+			c.Server.Database = dbPath
 		}
 		c.Upstreams = []config.Upstream{{
 			ID:      upstreamID,
@@ -109,8 +127,12 @@ func (s *Server) setup(w http.ResponseWriter, r *http.Request) {
 			UpstreamID: upstreamID,
 		}}
 		c.General.Timezone = timezone
-		c.Auth.AdminPasswordHash = passwordHash
-		c.Auth.SessionSecret = base64.StdEncoding.EncodeToString(secret)
+		if passwordHash != "" {
+			c.Auth.AdminPasswordHash = passwordHash
+		}
+		if len(newSecret) > 0 {
+			c.Auth.SessionSecret = base64.StdEncoding.EncodeToString(newSecret)
+		}
 		return nil
 	})
 	if err != nil {
@@ -126,6 +148,7 @@ func (s *Server) setup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.catalog.invalidate()
 	// Setup generated the session secret in the same write, so a configured
 	// password can be used immediately without a second login round-trip.
 	if passwordHash != "" {

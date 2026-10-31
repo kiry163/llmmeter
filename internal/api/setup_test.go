@@ -1,6 +1,7 @@
 package api_test
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/kiry163/llmmeter/internal/api"
 	"github.com/kiry163/llmmeter/internal/config"
+	"github.com/kiry163/llmmeter/internal/secure"
 	"github.com/kiry163/llmmeter/internal/store"
 )
 
@@ -214,5 +216,68 @@ func TestSetupValidatesBodyFields(t *testing.T) {
 	}
 	if len(env.config.Snapshot().Config.Upstreams) != 0 {
 		t.Fatal("invalid setup wrote configuration")
+	}
+}
+
+func TestSetupPreservesExistingAdminPasswordAndSecret(t *testing.T) {
+	env := newConfigEnv(t, "127.0.0.1:8100")
+	hash, err := secure.HashPassword("oldpass1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := secure.RandomSecret()
+	if err != nil {
+		t.Fatal(err)
+	}
+	secret := base64.StdEncoding.EncodeToString(raw)
+	if err := env.config.Update(func(c *config.Config) error {
+		c.Auth.AdminPasswordHash = hash
+		c.Auth.SessionSecret = secret
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := doPOST(t, env.srv, "/api/setup",
+		`{"upstreamName":"DeepSeek","baseUrl":"https://api.deepseek.com"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("setup = %d %s", rec.Code, rec.Body.String())
+	}
+	auth := env.config.Snapshot().Config.Auth
+	if auth.AdminPasswordHash != hash || !secure.VerifyPassword(auth.AdminPasswordHash, "oldpass1") {
+		t.Fatal("setup cleared or replaced the existing admin password")
+	}
+	if auth.SessionSecret != secret {
+		t.Fatal("setup rotated the existing session secret")
+	}
+	rawFile := readConfigFile(t, env.configPath)
+	if !strings.Contains(rawFile, secret) || !strings.Contains(rawFile, hash) {
+		t.Fatalf("config.yaml did not preserve auth material:\n%s", rawFile)
+	}
+}
+
+func TestSetupPersistsEffectiveServerPaths(t *testing.T) {
+	env := newConfigEnv(t, "127.0.0.1:9999")
+	if got := env.config.Snapshot().Config.Server.Listen; got == "127.0.0.1:9999" {
+		t.Fatalf("fixture base listen unexpectedly already effective: %q", got)
+	}
+	rec := doPOST(t, env.srv, "/api/setup",
+		`{"upstreamName":"DeepSeek","baseUrl":"https://api.deepseek.com"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("setup = %d %s", rec.Code, rec.Body.String())
+	}
+	cfg := env.config.Snapshot().Config
+	if cfg.Server.Listen != "127.0.0.1:9999" {
+		t.Fatalf("listen = %q", cfg.Server.Listen)
+	}
+	if cfg.Server.Database != env.dbPath {
+		t.Fatalf("database = %q, want %q", cfg.Server.Database, env.dbPath)
+	}
+	raw := readConfigFile(t, env.configPath)
+	if !strings.Contains(raw, "listen: 127.0.0.1:9999") {
+		t.Fatalf("config.yaml missing effective listen:\n%s", raw)
+	}
+	if !strings.Contains(raw, "database: "+env.dbPath) {
+		t.Fatalf("config.yaml missing effective database:\n%s", raw)
 	}
 }
